@@ -1,0 +1,4 @@
+python-dotenv
+Pyrogram
+py-tgcalls
+yt-dlp

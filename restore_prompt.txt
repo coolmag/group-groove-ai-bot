@@ -1,0 +1,99 @@
+Промт для восстановления работы (сохраните этот текст)
+
+Привет! Пожалуйста, используй этот промт, чтобы восстановить контекст нашей работы над проектом "Group
+Groove AI" после перезагрузки.
+
+## 1. Контекст Проекта
+
+ * Название: Group Groove AI
+ * Цель: Создать умного AI-диджея для голосовых чатов в Telegram.
+ * Ключевые функции:
+     * Принимает заказы на треки от пользователей.
+     * Анализирует музыкальные вкусы группы.
+     * Самостоятельно предлагает похожие треки.
+     * Объявляет песни сгенерированным голосом.
+
+## 2. Текущий Статус и План
+
+ * Блокирующая Проблема: Мы столкнулись с ошибкой "ERROR" на сайте my.telegram.org и не можем получить
+   api_id и api_hash. Это временно мешает нам использовать библиотеку Pyrogram для работы с голосовыми
+   чатами.
+
+ * Временный План (Наш обходной путь): Мы решили не ждать и продолжить разработку, реализовав основную
+   логику.
+     1. Временно переключиться на библиотеку python-telegram-bot, так как для нее нужен только токен бота.
+     2. Реализовать "мозг" бота: Научить его принимать команду /play <название песни>, находить ее на YouTube
+         через yt-dlp и скачивать аудио.
+     3. Вместо проигрывания вслух, бот будет временно отправлять готовый .mp3 файл в чат.
+     4. Конечная цель: Когда проблема с api_id будет решена, мы вернемся к Pyrogram и интегрируем уже готовую
+         логику в голосовой чат.
+
+## 3. Структура и Содержимое Проекта
+
+ * Абсолютный путь к папке проекта: C:\Users\tyca7\Desktop\Group_Groove_AI_Telegram
+
+ * Содержимое файлов на момент остановки:
+
+     * `C:\Users\tyca7\Desktop\Group_Groove_AI_Telegram\.env`
+
+ 1         BOT_TOKEN=YOUR_TOKEN_HERE
+ 2         API_ID=YOUR_API_ID_HERE
+ 3         API_HASH=YOUR_API_HASH_HERE
+
+     * `C:\Users\tyca7\Desktop\Group_Groove_AI_Telegram\requirements.txt`
+
+ 1         python-dotenv
+ 2         pyrogram
+ 3         py-tgcalls
+ 4         yt-dlp
+ 5         gTTS
+
+     * `C:\Users\tyca7\Desktop\Group_Groove_AI_Telegram\config.py`
+
+ 1         import os
+ 2         from dotenv import load_dotenv
+ 3 
+ 4         load_dotenv()
+ 5 
+ 6         BOT_TOKEN = os.getenv("BOT_TOKEN")
+ 7         API_ID = os.getenv("API_ID")
+ 8         API_HASH = os.getenv("API_HASH")
+
+     * `C:\Users\tyca7\Desktop\Group_Groove_AI_Telegram\main.py`
+
+  1         import asyncio
+  2         from pyrogram import Client, filters
+  3         from config import BOT_TOKEN, API_ID, API_HASH
+  4 
+  5         # Создаем экземпляр клиента Pyrogram
+  6         app = Client(
+  7             "my_bot",
+  8             api_id=API_ID,
+  9             api_hash=API_HASH,
+ 10             bot_token=BOT_TOKEN
+ 11         )
+ 12 
+ 13         # Обработчик команды /start
+ 14         @app.on_message(filters.command("start"))
+ 15         async def start_command(client, message):
+ 16             await message.reply_text("Привет! Я Group Groove AI, ваш личный диджей. Готов
+    зажигать!")
+ 17 
+ 18         # Основная функция для запуска бота
+ 19         async def main():
+ 20             await app.start()
+ 21             print("Бот успешно запущен!")
+ 22             await asyncio.Event().wait() # Бот будет работать до остановки вручную
+ 23 
+ 24         if __name__ == "__main__":
+ 25             asyncio.run(main())
+
+## 4. Твоя Следующая Задача
+
+Твоя задача — начать реализацию нашего Временного Плана:
+
+ 1. Измени `requirements.txt`: Замени pyrogram и py-tgcalls на python-telegram-bot.
+ 2. Установи новые зависимости и удали старые, если это необходимо.
+ 3. Перепиши код в `main.py`, используя синтаксис библиотеки python-telegram-bot. Убери использование API_ID
+    и API_HASH.
+ 4. Реализуй базовый функционал: Бот должен запускаться и отвечать на команду /start.
