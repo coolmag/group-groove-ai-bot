@@ -9,7 +9,7 @@ from pyrogram.types import Message
 from pytgcalls import PyTgCalls
 from aiohttp import web
 
-# --- WEB SERVER FOR RENDER ---
+# --- WEB SERVER FOR RENDER --- 
 async def web_server():
     routes = web.RouteTableDef()
     @routes.get('/')
@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-YT_PROXY_URL = os.getenv('YT_PROXY_URL') # <-- ДОБАВЛЕНО
 
 app = Client(
     'my_bot',
@@ -89,7 +88,7 @@ async def play_handler(client: Client, message: Message):
             await message.reply_text('Please specify a song name after /play')
             return
 
-        await message.reply_text('**Downloading...**')
+        await message.reply_text('**Searching on SoundCloud...**')
         song_name = message.text.split(None, 1)[1]
 
         ydl_opts = {
@@ -98,18 +97,14 @@ async def play_handler(client: Client, message: Message):
             'noplaylist': True,
             'quiet': True,
         }
-        
-        # Add proxy if it exists
-        if YT_PROXY_URL:
-            ydl_opts['proxy'] = YT_PROXY_URL # <-- ДОБАВЛЕНО
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch:{song_name}", download=True)['entries'][0]
+                info = ydl.extract_info(f"scsearch:{song_name}", download=True)['entries'][0]
                 downloaded_file = ydl.prepare_filename(info)
                 title = info.get('title', 'Unknown Title')
         except Exception as e:
-            await message.reply_text("Error downloading the audio.")
+            await message.reply_text("Error downloading the track from SoundCloud.")
             logger.error(f"Download error: {e}")
             return
 
