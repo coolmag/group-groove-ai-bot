@@ -123,7 +123,7 @@ async def play_handler(client: Client, message: Message):
 
         try:
             await message.reply_text(f'▶️ **Now playing:** {title}')
-            await pytgcalls.join_group_call(
+            await pytgcalls.play(
                 chat_id,
                 MediaStream('audio.raw'),
             )
@@ -140,7 +140,7 @@ async def play_handler(client: Client, message: Message):
 @app.on_message(filters.command('stop'))
 async def stop_handler(client: Client, message: Message):
     try:
-        await pytgcalls.leave_group_call(message.chat.id)
+        await pytgcalls.leave_call(message.chat.id)
         await message.reply_text("⏹ **Playback stopped**")
         cleanup_files('audio.raw', 'downloaded_audio.*')
     except Exception as e:
