@@ -2,7 +2,7 @@ import asyncio
 import os
 import logging
 import subprocess
-from pytgcalls.types import AudioPiped
+from pytgcalls.types import MediaStream
 import yt_dlp
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
@@ -26,6 +26,15 @@ app = Client(
 )
 pytgcalls = PyTgCalls(app)
 
+def cleanup_files(*files):
+    for file in files:
+        if os.path.exists(file):
+            try:
+                os.remove(file)
+                logger.info(f"Removed {file}")
+            except Exception as e:
+                logger.error(f"Error removing {file}: {e}")
+
 async def run_command(cmd):
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -33,18 +42,22 @@ async def run_command(cmd):
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
-    logger.info(f'[{cmd!r} exited with {proc.returncode}]')
+    
+    if proc.returncode != 0:
+        logger.error(f'Command failed: {cmd!r}')
+        if stderr:
+            logger.error(f'[stderr]\n{stderr.decode()}')
+        raise Exception(f"Command failed with return code {proc.returncode}")
+    
+    logger.info(f'[{cmd!r} executed successfully]')
     if stdout:
         logger.info(f'[stdout]\n{stdout.decode()}')
-    if stderr:
-        logger.error(f'[stderr]\n{stderr.decode()}')
 
 @app.on_message(filters.command('play'))
 async def play_handler(client: Client, message: Message):
     chat_id = message.chat.id
     
-    if os.path.exists('audio.raw'):
-        os.remove('audio.raw')
+    cleanup_files('audio.raw', 'downloaded_audio.*')
 
     try:
         if len(message.command) < 2:
@@ -58,28 +71,56 @@ async def play_handler(client: Client, message: Message):
             'format': 'bestaudio/best',
             'outtmpl': 'downloaded_audio.%(ext)s',
             'noplaylist': True,
+            'quiet': True,
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(song_name, download=True)
-            downloaded_file = ydl.prepare_filename(info)
-            title = info.get('title', 'Unknown Title')
 
-        await message.reply_text('**Converting...**')
-        await run_command(
-            f'ffmpeg -i "{downloaded_file}" -f s16le -ac 2 -ar 48000 -acodec pcm_s16le audio.raw'
-        )
-        
-        if os.path.exists(downloaded_file):
-            os.remove(downloaded_file)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch:{song_name}", download=True)['entries'][0]
+                downloaded_file = ydl.prepare_filename(info)
+                title = info.get('title', 'Unknown Title')
+        except Exception as e:
+            await message.reply_text("Error downloading the audio.")
+            logger.error(f"Download error: {e}")
+            return
 
-        await message.reply_text(f'▶️ **Now playing:** {title}')
-        await pytgcalls.join_group_call(
-            chat_id,
-            AudioPiped('audio.raw'),
-        )
+        try:
+            await message.reply_text('**Converting...**')
+            await run_command(
+                f'ffmpeg -i "{downloaded_file}" -f s16le -ac 2 -ar 48000 -acodec pcm_s16le audio.raw -y'
+            )
+        except Exception as e:
+            await message.reply_text("Error converting the audio.")
+            logger.error(f"Conversion error: {e}")
+            cleanup_files(downloaded_file)
+            return
+
+        cleanup_files(downloaded_file)
+
+        try:
+            await message.reply_text(f'▶️ **Now playing:** {title}')
+            await pytgcalls.join_group_call(
+                chat_id,
+                MediaStream('audio.raw'),
+            )
+        except Exception as e:
+            await message.reply_text("Error joining the voice chat.")
+            logger.error(f"Voice chat error: {e}")
+            cleanup_files('audio.raw')
 
     except Exception as e:
-        await message.reply_text(f'An error occurred: {e}')
+        await message.reply_text(f'An error occurred: {str(e)}')
+        logger.error(e, exc_info=True)
+        cleanup_files('audio.raw', 'downloaded_audio.*')
+
+@app.on_message(filters.command('stop'))
+async def stop_handler(client: Client, message: Message):
+    try:
+        await pytgcalls.leave_group_call(message.chat.id)
+        await message.reply_text("⏹ **Playback stopped**")
+        cleanup_files('audio.raw', 'downloaded_audio.*')
+    except Exception as e:
+        await message.reply_text(f"Error stopping playback: {e}")
         logger.error(e, exc_info=True)
 
 async def main():
@@ -88,9 +129,14 @@ async def main():
     await pytgcalls.start()
     logger.info("Clients started. Idling...")
     await idle()
+    logger.info("Stopping clients...")
+    await app.stop()
+    cleanup_files('audio.raw', 'downloaded_audio.*')
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info('Bot stopped by user.')
+    finally:
+        cleanup_files('audio.raw', 'downloaded_audio.*')
