@@ -19,11 +19,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /play command."""
     if not context.args:
-        await update.message.reply_text("Please provide a song name or YouTube/SoundCloud URL.")
+        await update.message.reply_text("Please provide a song name or SoundCloud URL.")
         return
 
     query = " ".join(context.args)
-    message = await update.message.reply_text(f'Searching for "{query}"...')
+    message = await update.message.reply_text(f'Searching for "{query}" on SoundCloud...')
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -40,7 +40,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             await message.edit_text("Downloading and converting...")
-            info = ydl.extract_info(f"ytsearch:{query}", download=True)['entries'][0]
+            info = ydl.extract_info(f"scsearch:{query}", download=True)['entries'][0]
             filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
             title = info.get('title', 'Unknown Title')
             duration = info.get('duration', 0)
