@@ -55,10 +55,16 @@ async def web_server():
         await runner.cleanup()
 
 # --- Bot Handlers ---
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A new command to get the chat ID."""
+    chat_id = update.message.chat_id
+    await update.message.reply_text(f"This chat's ID is: {chat_id}")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
     Welcome! Commands:
     /play <song name> - Search for a song.
+    /id - Get the ID of this chat.
     
     Admin commands:
     /radio_on <genre> - Start radio mode.
@@ -201,6 +207,7 @@ def main() -> None:
 
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("id", id_command)) # <-- ADDED THIS
     application.add_handler(CommandHandler("play", play_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(CommandHandler("radio_on", radio_on_command))
