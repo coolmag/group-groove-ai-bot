@@ -23,7 +23,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     query = " ".join(context.args)
-    message = await update.message.reply_text(f"Searching for "{query}"...")
+    message = await update.message.reply_text(f'Searching for "{query}"...')
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -36,6 +36,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         'noplaylist': True,
     }
 
+    filename = ""
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             await message.edit_text("Downloading and converting...")
@@ -58,9 +59,8 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error("Error in play_command: %s", e, exc_info=True)
         await message.edit_text(f"Sorry, an error occurred: {e}")
     finally:
-        if os.path.exists(filename):
+        if filename and os.path.exists(filename):
             os.remove(filename)
-
 
 def main() -> None:
     """Start the bot."""
