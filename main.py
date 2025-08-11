@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+YT_PROXY_URL = os.getenv('YT_PROXY_URL') # <-- ДОБАВЛЕНО
 
 app = Client(
     'my_bot',
@@ -97,6 +98,10 @@ async def play_handler(client: Client, message: Message):
             'noplaylist': True,
             'quiet': True,
         }
+        
+        # Add proxy if it exists
+        if YT_PROXY_URL:
+            ydl_opts['proxy'] = YT_PROXY_URL # <-- ДОБАВЛЕНО
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
