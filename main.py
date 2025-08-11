@@ -1,110 +1,90 @@
-     1 import asyncio
-     2 import os
-     3 import logging
-     4 import subprocess
-     5 from pytgcalls.types import AudioPiped
-     6
-     7 import yt_dlp
-     8 from pyrogram import Client, filters, idle
-     9 from pyrogram.types import Message
-    10
-    11 from pytgcalls import PyTgCalls
-    12
-    13 # Logging
-    14 logging.basicConfig(
-    15     level=logging.INFO,
-    16     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    17 )
-    18 logger = logging.getLogger(__name__)
-    19
-    20 # Config
-    21 API_ID = int(os.getenv('API_ID', 0))
-    22 API_HASH = os.getenv('API_HASH')
-    23 BOT_TOKEN = os.getenv('BOT_TOKEN')
-    24
-    25 # Clients
-    26 app = Client(
-    27     'my_bot',
-    28     api_id=API_ID,
-    29     api_hash=API_HASH,
-    30     bot_token=BOT_TOKEN,
-    31 )
-    32 pytgcalls = PyTgCalls(app)
-    33
-    34 # --- Helper function to run shell commands ---
-    35 async def run_command(cmd):
-    36     proc = await asyncio.create_subprocess_shell(
-    37         cmd,
-    38         stdout=asyncio.subprocess.PIPE,
-    39         stderr=asyncio.subprocess.PIPE,
-    40     )
-    41     stdout, stderr = await proc.communicate()
-    42     logger.info(f'[{cmd!r} exited with {proc.returncode}]')
-    43     if stdout:
-    44         logger.info(f'[stdout]\n{stdout.decode()}')
-    45     if stderr:
-    46         logger.error(f'[stderr]\n{stderr.decode()}')
-    47
-    48
-    49 @app.on_message(filters.command('play'))
-    50 async def play_handler(client: Client, message: Message):
-    51     chat_id = message.chat.id
-    52
-    53     # Cleanup previous files
-    54     if os.path.exists('audio.raw'):
-    55         os.remove('audio.raw')
-    56
-    57     try:
-    58         if len(message.command) < 2:
-    59             await message.reply_text('Please specify a song name after /play')
-    60             return
-    61
-    62         await message.reply_text('**Downloading...**')
-    63         song_name = message.text.split(None, 1)[1]
-    64
-    65         # Download with yt-dlp
-    66         ydl_opts = {
-    67             'format': 'bestaudio/best',
-    68             'outtmpl': 'downloaded_audio.%(ext)s',
-    69             'noplaylist': True,
-    70         }
-    71         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-    72             info = ydl.extract_info(song_name, download=True)
-    73             downloaded_file = ydl.prepare_filename(info)
-    74             title = info.get('title', 'Unknown Title')
-    75
-    76         # Convert to raw format with FFmpeg
-    77         await message.reply_text('**Converting...**')
-    78         await run_command(
-    79             f'ffmpeg -i "{downloaded_file}" -f s16le -ac 2 -ar 48000 -acodec pcm_s16le
-       audio.raw'
-    80         )
-    81
-    82         # Clean up downloaded file
-    83         if os.path.exists(downloaded_file):
-    84             os.remove(downloaded_file)
-    85
-    86         # Join call and stream
-    87         await message.reply_text(f'▶️ **Now playing:** {title}')
-    88         await pytgcalls.join_group_call(
-    89             chat_id,
-    90             AudioPiped('audio.raw'),
-    91         )
-    92
-    93     except Exception as e:
-    94         await message.reply_text(f'An error occurred: {e}')
-    95         logger.error(e, exc_info=True)
-    96
-    97
-    98 async def main():
-    99     logger.info("Starting bot and call client...")
-   100     await app.start()
-   101     await pytgcalls.start()
-   102     logger.info("Clients started. Idling...")
-   103     await idle()
-   104
-   105 if __name__ == '__main__':
-   106     try:
-   107         asyncio.run(main())
-   108     except KeyboardInterrupt:
-   109         logger.info('Bot stopped by user.')
+  import asyncio
+  import os
+  import logging
+  import subprocess
+  from pytgcalls.types import AudioPiped
+  import yt_dlp
+  from pyrogram import Client, filters, idle
+  from pyrogram.types import Message
+  from pytgcalls import PyTgCalls
+  Logging
+  logging.basicConfig(
+      level=logging.INFO,
+      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  )
+  logger = logging.getLogger(__name__)
+  Config
+  API_ID = int(os.getenv('API_ID', 0))
+  API_HASH = os.getenv('API_HASH')
+  BOT_TOKEN = os.getenv('BOT_TOKEN')
+  Clients
+  app = Client(
+      'my_bot',
+      api_id=API_ID,
+      api_hash=API_HASH,
+      bot_token=BOT_TOKEN,
+  )
+  pytgcalls = PyTgCalls(app)
+  --- Helper function to run shell commands ---
+  async def run_command(cmd):
+      proc = await asyncio.create_subprocess_shell(
+          cmd,
+          stdout=asyncio.subprocess.PIPE,
+          stderr=asyncio.subprocess.PIPE,
+      )
+      stdout, stderr = await proc.communicate()
+      logger.info(f'[{cmd!r} exited with {proc.returncode}]')
+      if stdout:
+          logger.info(f'[stdout]\n{stdout.decode()}')
+      if stderr:
+          logger.error(f'[stderr]\n{stderr.decode()}')
+  @app.on_message(filters.command('play'))
+  async def play_handler(client: Client, message: Message):
+      chat_id = message.chat.id
+  Cleanup previous files
+      if os.path.exists('audio.raw'):
+          os.remove('audio.raw')
+      try:
+          if len(message.command) < 2:
+              await message.reply_text('Please specify a song name after /play')
+              return
+          await message.reply_text('Downloading...')
+          song_name = message.text.split(None, 1)[1]
+  Download with yt-dlp
+          ydl_opts = {
+              'format': 'bestaudio/best',
+              'outtmpl': 'downloaded_audio.%(ext)s',
+              'noplaylist': True,
+          }
+          with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+              info = ydl.extract_info(song_name, download=True)
+              downloaded_file = ydl.prepare_filename(info)
+              title = info.get('title', 'Unknown Title')
+  Convert to raw format with FFmpeg
+          await message.reply_text('Converting...')
+          await run_command(
+              f'ffmpeg -i "{downloaded_file}" -f s16le -ac 2 -ar 48000 -acodec pcm_s16le audio.raw'
+          )
+  Clean up downloaded file
+          if os.path.exists(downloaded_file):
+              os.remove(downloaded_file)
+  Join call and stream
+          await message.reply_text(f'▶️ Now playing: {title}')
+          await pytgcalls.join_group_call(
+              chat_id,
+              AudioPiped('audio.raw'),
+          )
+      except Exception as e:
+          await message.reply_text(f'An error occurred: {e}')
+          logger.error(e, exc_info=True)
+  async def main():
+      logger.info("Starting bot and call client...")
+      await app.start()
+      await pytgcalls.start()
+      logger.info("Clients started. Idling...")
+      await idle()
+  if __name__ == '__main__':
+      try:
+          asyncio.run(main())
+      except KeyboardInterrupt:
+          logger.info('Bot stopped by user.')
