@@ -1,8 +1,4 @@
-       #!/bin/bash
-   
-       # Install FFmpeg
-       apt-get update -y
-       apt-get install -y ffmpeg
-   
-        # Install Python dependencies
-        pip install -r requirements.txt
+   1     #!/bin/bash
+   2     apt-get update -y
+   3     apt-get install -y ffmpeg
+   4     pip install -r requirements.txt
