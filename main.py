@@ -7,6 +7,30 @@ import yt_dlp
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from pytgcalls import PyTgCalls
+from aiohttp import web
+
+# --- WEB SERVER FOR RENDER ---
+async def web_server():
+    routes = web.RouteTableDef()
+    @routes.get('/')
+    async def hello(request):
+        return web.Response(text="I am alive.")
+    
+    app = web.Application()
+    app.add_routes(routes)
+    
+    port = int(os.environ.get("PORT", 8080))
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    try:
+        await site.start()
+        logger.info(f"Web server started on port {port}")
+        await asyncio.Event().wait() # Keep server running
+    finally:
+        await runner.cleanup()
+# --- END WEB SERVER ---
 
 logging.basicConfig(
     level=logging.INFO,
@@ -123,8 +147,8 @@ async def stop_handler(client: Client, message: Message):
         await message.reply_text(f"Error stopping playback: {e}")
         logger.error(e, exc_info=True)
 
-async def main():
-    logger.info("Starting bot and call client...")
+async def bot_main():
+    logger.info("Starting bot client...")
     await app.start()
     await pytgcalls.start()
     logger.info("Clients started. Idling...")
@@ -135,7 +159,11 @@ async def main():
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(asyncio.gather(
+            bot_main(),
+            web_server(),
+        ))
     except KeyboardInterrupt:
         logger.info('Bot stopped by user.')
     finally:
