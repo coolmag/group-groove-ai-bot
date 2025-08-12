@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
 
-# --- Setup --- # Forcing a clean rebuild
+# --- Setup ---
 load_dotenv()
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -171,7 +171,7 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config['is_on'] = True
     config['genre'] = genre
     save_config(config)
-    await update.message.reply_text(f"Режим радио ВКЛ. Жанр: {genre}")
+    await update.message.reply_text(f"Режим радио ВКЛ. Жанр: {genre}.\n\nГотовлю первый трек, это может занять до минуты...")
     logger.info(f"Radio mode turned ON by admin {user_id} with genre '{genre}'")
 
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,7 +196,7 @@ async def download_track(url: str = None, query: str = None):
 
     ydl_opts = {
         'format': 'bestaudio/best',
-        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
         'outtmpl': out_template,
         'noplaylist': True,
         'quiet': True,
@@ -208,12 +208,30 @@ async def download_track(url: str = None, query: str = None):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # If it's a search query (from radio), we need to filter the results
             if query:
-                search_result = ydl.extract_info(query, download=False)
+                search_result_opts = ydl_opts.copy()
+                search_result_opts.pop('postprocessors', None)
+                search_result_opts['extract_flat'] = 'in_playlist'
+                with yt_dlp.YoutubeDL(search_result_opts) as ydl_search:
+                    search_result = ydl_search.extract_info(query, download=False)
+                
                 if not search_result or not search_result.get('entries'):
+                    logger.warning(f"Radio search for '{query}' yielded no results.")
                     return None
-                info = ydl.extract_info(search_result['entries'][0]['url'], download=True)
-            else:
+
+                # Filter out long tracks (e.g., > 15 minutes = 900 seconds)
+                short_tracks = [t for t in search_result['entries'] if t.get('duration') and t['duration'] < 900]
+
+                if not short_tracks:
+                    logger.warning(f"Radio search for '{query}' found tracks, but all were longer than 15 minutes.")
+                    return None
+                
+                track_to_download = random.choice(short_tracks)
+                logger.info(f"Radio selected track to download: {track_to_download['title']} ({track_to_download['url']})")
+                info = ydl.extract_info(track_to_download['url'], download=True)
+
+            else: # If it's a direct URL from /play command
                 info = ydl.extract_info(url, download=True)
 
             filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
@@ -223,7 +241,7 @@ async def download_track(url: str = None, query: str = None):
                 "duration": info.get('duration', 0)
             }
     except Exception as e:
-        logger.error(f"Failed to download track {search_query}: {e}")
+        logger.error(f"Failed to download track {search_query}: {e}", exc_info=True)
         return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
