@@ -3,12 +3,12 @@ import os
 import asyncio
 import json
 import random
-import tempfile
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
 from aiohttp import web
+import signal
 
 # --- Setup ---
 load_dotenv()
@@ -56,8 +56,8 @@ async def run_yt_dlp(opts, query, download=False):
             return ydl.extract_info(query, download)
     return await loop.run_in_executor(None, _exec)
 
-# --- Web Server for Render ---
-async def web_server():
+# --- Web Server ---
+async def web_server(stop_event: asyncio.Event):
     routes = web.RouteTableDef()
     @routes.get('/')
     async def hello(_):
@@ -70,11 +70,13 @@ async def web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Web server started on port {port}")
+
     try:
-        await site.start()
-        logger.info(f"Web server started on port {port}")
-        await asyncio.Event().wait()
+        await stop_event.wait()  # Ожидаем сигнала остановки
     finally:
+        logger.info("Shutting down web server...")
         await runner.cleanup()
 
 # --- Bot Commands ---
@@ -105,7 +107,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'format': 'bestaudio',
         'noplaylist': True,
         'quiet': True,
-        'default_search': 'scsearch5',
+        'default_search': 'ytsearch5',  # Ищем в YouTube
     }
 
     try:
@@ -140,7 +142,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await download_and_send(track_info.get('id'), query.message.chat_id, context.bot)
             await query.edit_message_text("Track sent!")
         except Exception as e:
-            logger.error(f"Error sending track: {e}")
+            logger.error(f"Error sending track: {e}", exc_info=True)
             await query.edit_message_text(f"Failed: {e}")
 
 async def download_and_send(video_id, chat_id, bot):
@@ -156,7 +158,8 @@ async def download_and_send(video_id, chat_id, bot):
         'quiet': True,
     }
 
-    info = await run_yt_dlp(ydl_opts, video_id, download=True)
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    info = await run_yt_dlp(ydl_opts, url, download=True)
     title = info.get('title', 'Unknown')
     duration = info.get('duration', 0)
     filename = f"{info.get('id')}.mp3"
@@ -196,34 +199,64 @@ async def get_cached_tracks(genre):
     now = asyncio.get_event_loop().time()
     if RADIO_CACHE['genre'] == genre and now - RADIO_CACHE['last_update'] < 3600:
         return RADIO_CACHE['tracks']
-    opts = {'format': 'bestaudio', 'noplaylist': False, 'quiet': True, 'default_search': 'scsearch10'}
+    opts = {'format': 'bestaudio', 'noplaylist': False, 'quiet': True, 'default_search': 'ytsearch10'}
     info = await run_yt_dlp(opts, f"{genre} playlist", download=False)
     tracks = info.get('entries', [])
     RADIO_CACHE.update({'genre': genre, 'tracks': tracks, 'last_update': now})
     return tracks
 
-async def radio_loop(application: Application):
-    while True:
-        await asyncio.sleep(5)
-        config = load_config()
-        if config.get('is_on'):
-            try:
-                tracks = await get_cached_tracks(config['genre'])
-                if not tracks:
-                    await asyncio.sleep(60)
-                    continue
-                track = random.choice(tracks)
-                logger.info(f"[Radio] Playing: {track.get('title')}")
-                await download_and_send(track.get('id'), RADIO_CHAT_ID, application.bot)
-                await asyncio.sleep(track.get('duration', 300) + 5)
-            except Exception as e:
-                logger.error(f"Error in radio loop: {e}")
-                await asyncio.sleep(60)
+async def radio_loop(application: Application, stop_event: asyncio.Event):
+    try:
+        while not stop_event.is_set():
+            config = load_config()
+            if config.get('is_on'):
+                try:
+                    tracks = await get_cached_tracks(config['genre'])
+                    if not tracks:
+                        logger.warning("No tracks found for radio.")
+                        await asyncio.sleep(60)
+                        continue
+                    track = random.choice(tracks)
+                    logger.info(f"[Radio] Playing: {track.get('title')}")
+                    await download_and_send(track.get('id'), RADIO_CHAT_ID, application.bot)
+                    # Подождать длительность трека + небольшой буфер
+                    await asyncio.wait_for(stop_event.wait(), timeout=track.get('duration', 300) + 5)
+                except Exception as e:
+                    logger.error(f"Error in radio loop: {e}", exc_info=True)
+                    await asyncio.wait_for(stop_event.wait(), timeout=60)
+            else:
+                # Радио выключено, ждём
+                await asyncio.wait_for(stop_event.wait(), timeout=10)
+    except asyncio.CancelledError:
+        logger.info("Radio loop cancelled.")
+    except Exception as e:
+        logger.error(f"Radio loop unexpected error: {e}", exc_info=True)
 
 # --- Post Init ---
 async def post_init(application: Application):
-    asyncio.create_task(radio_loop(application))
-    asyncio.create_task(web_server())
+    stop_event = asyncio.Event()
+    application.stop_event = stop_event
+
+    # Запуск фоновых задач
+    application.radio_task = asyncio.create_task(radio_loop(application, stop_event))
+    application.web_task = asyncio.create_task(web_server(stop_event))
+
+# --- Graceful shutdown handler ---
+def setup_signal_handlers(application: Application):
+    loop = asyncio.get_event_loop()
+
+    def _stop():
+        logger.info("Received stop signal, shutting down...")
+        application.stop_event.set()
+
+        # Отменяем задачи
+        if application.radio_task:
+            application.radio_task.cancel()
+        if application.web_task:
+            application.web_task.cancel()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _stop)
 
 # --- Main ---
 def main():
@@ -236,6 +269,8 @@ def main():
     app.add_handler(CommandHandler("radio_off", radio_off_command))
 
     logger.info("Starting bot...")
+
+    setup_signal_handlers(app)
     app.run_polling()
 
 if __name__ == "__main__":
