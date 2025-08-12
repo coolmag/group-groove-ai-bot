@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
 
-# --- Setup ---
+# --- Setup --- # Forcing a clean rebuild
 load_dotenv()
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
