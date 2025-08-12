@@ -9,9 +9,14 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from dotenv import load_dotenv
 from aiohttp import web
 import signal
+import tempfile
+import time
 
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(pathname)s:%(lineno)d",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -24,7 +29,14 @@ try:
 except (TypeError, ValueError):
     raise ValueError("ADMIN_ID or RADIO_CHAT_ID are not set or invalid.")
 
-CONFIG_FILE = "radio_config.json"
+# Log env vars for debugging
+logger.info(f"BOT_TOKEN: {BOT_TOKEN[:5]}..., ADMIN_ID: {ADMIN_ID}, RADIO_CHAT_ID: {RADIO_CHAT_ID}, PORT: {os.environ.get('PORT')}")
+
+# Use temporary directory for files to handle ephemeral storage on Render
+TEMP_DIR = tempfile.gettempdir()
+CONFIG_FILE = os.path.join(TEMP_DIR, "radio_config.json")
+logger.info(f"Using config file: {CONFIG_FILE}")
+
 RADIO_CACHE = {"genre": None, "tracks": [], "last_update": 0}
 
 def load_config():
@@ -47,26 +59,66 @@ async def run_yt_dlp(opts, query, download=False):
     loop = asyncio.get_running_loop()
     def _exec():
         with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(query, download)
+            for attempt in range(3):
+                try:
+                    return ydl.extract_info(query, download=download)
+                except Exception as e:
+                    if attempt == 2:
+                        raise
+                    logger.warning(f"yt_dlp attempt {attempt+1} failed: {e}")
+                    time.sleep(2 ** attempt)
     return await loop.run_in_executor(None, _exec)
 
-async def web_server(stop_event: asyncio.Event):
+async def web_server(stop_event: asyncio.Event, application: Application):
     routes = web.RouteTableDef()
     @routes.get('/')
     async def hello(_):
         return web.Response(text="I am alive.")
+    
+    @routes.post(f'/{BOT_TOKEN}')
+    async def webhook(request):
+        try:
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+            return web.Response(status=200)
+        except Exception as e:
+            logger.error(f"Webhook error: {e}", exc_info=True)
+            return web.Response(status=500)
+    
     app = web.Application()
     app.add_routes(routes)
-    port = int(os.environ.get("PORT", 8080))
+    try:
+        port = int(os.environ["PORT"])
+    except KeyError:
+        logger.warning("PORT not set, skipping web server.")
+        return
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(f"Web server started on port {port}")
+    
+    # Set webhook if on Render
+    try:
+        hostname = os.environ['RENDER_EXTERNAL_HOSTNAME']
+        webhook_url = f"https://{hostname}/{BOT_TOKEN}"
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set to {webhook_url}")
+    except KeyError:
+        logger.warning("RENDER_EXTERNAL_HOSTNAME not set, skipping set_webhook.")
+    except Exception as e:
+        logger.error(f"Error setting webhook: {e}")
+    
     try:
         await stop_event.wait()
     finally:
         logger.info("Shutting down web server...")
+        try:
+            await application.bot.delete_webhook()
+            logger.info("Webhook deleted.")
+        except Exception as e:
+            logger.error(f"Error deleting webhook: {e}")
         await runner.cleanup()
 
 async def start_command(update: Update, _):
@@ -137,24 +189,32 @@ async def download_and_send(video_id, chat_id, bot):
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
-            'preferredquality': '192',
+            'preferredquality': '128',  # Reduced for lower resource usage
         }],
-        'outtmpl': '%(id)s.%(ext)s',
+        'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
         'noplaylist': True,
         'quiet': True,
         'nocheckcertificate': True,
     }
     url = f"https://www.youtube.com/watch?v={video_id}"
-    info = await run_yt_dlp(ydl_opts, url, download=True)
-    title = info.get('title', 'Unknown')
-    duration = info.get('duration', 0)
-    filename = f"{info.get('id')}.mp3"
-    try:
-        with open(filename, 'rb') as audio_file:
-            await bot.send_audio(chat_id=chat_id, audio=audio_file, title=title, duration=duration)
-    finally:
-        if os.path.exists(filename):
-            os.remove(filename)
+    filename = None
+    for attempt in range(3):
+        try:
+            info = await run_yt_dlp(ydl_opts, url, download=True)
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            filename = os.path.join(TEMP_DIR, f"{info.get('id')}.mp3")
+            with open(filename, 'rb') as audio_file:
+                await bot.send_audio(chat_id=chat_id, audio=audio_file, title=title, duration=duration)
+            return
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1} failed: {e}")
+            if attempt == 2:
+                raise
+            await asyncio.sleep(2 ** attempt)
+        finally:
+            if filename and os.path.exists(filename):
+                os.remove(filename)
 
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -203,7 +263,7 @@ async def radio_loop(application: Application, stop_event: asyncio.Event):
                     track = random.choice(tracks)
                     logger.info(f"[Radio] Воспроизвожу: {track.get('title')}")
                     await download_and_send(track.get('id'), RADIO_CHAT_ID, application.bot)
-                    await asyncio.wait_for(stop_event.wait(), timeout=track.get('duration', 300) + 5)
+                    await asyncio.wait_for(stop_event.wait(), timeout=track.get('duration', 300) + 30)  # Added buffer
                 except asyncio.TimeoutError:
                     continue
                 except Exception as e:
@@ -220,13 +280,14 @@ async def radio_loop(application: Application, stop_event: asyncio.Event):
         logger.error(f"Непредвиденная ошибка радио: {e}", exc_info=True)
 
 async def post_init(application: Application):
+    await application.initialize()
     stop_event = asyncio.Event()
     application.bot_data['stop_event'] = stop_event
     application.bot_data['radio_task'] = asyncio.create_task(radio_loop(application, stop_event))
-    application.bot_data['web_task'] = asyncio.create_task(web_server(stop_event))
+    application.bot_data['web_task'] = asyncio.create_task(web_server(stop_event, application))
 
 def setup_signal_handlers(application: Application):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     def _stop():
         logger.info("Получен сигнал завершения, останавливаем...")
         stop_event = application.bot_data.get('stop_event')
@@ -238,20 +299,24 @@ def setup_signal_handlers(application: Application):
         web_task = application.bot_data.get('web_task')
         if web_task:
             web_task.cancel()
+        tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _stop)
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("id", id_command))
-    app.add_handler(CommandHandler("p", play_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(CommandHandler("ron", radio_on_command))
-    app.add_handler(CommandHandler("roff", radio_off_command))
-    logger.info("Запуск бота...")
+async def async_main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    await post_init(app)
     setup_signal_handlers(app)
-    app.run_polling()
+    radio_task = app.bot_data['radio_task']
+    web_task = app.bot_data['web_task']
+    await asyncio.gather(radio_task, web_task, return_exceptions=True)
+    await app.shutdown()
+
+def main():
+    logger.info("Запуск бота...")
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     main()
