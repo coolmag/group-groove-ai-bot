@@ -46,10 +46,9 @@ def ensure_download_dir():
         os.makedirs(DOWNLOAD_DIR)
 
 # --- Bot Commands ---
-def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received /start command from user {user_id}")
-    # A shorter welcome, directing user to /help for details
     welcome_text = (
         f"Привет! Я музыкальный бот. 🎵\n\n"
         f"Используй /play для поиска песен или включи радио с помощью /ron.\n"
@@ -58,7 +57,7 @@ def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text)
     logger.info(f"Replied to /start command from user {user_id}")
 
-def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received /help command from user {user_id}")
     help_text = (
@@ -75,14 +74,14 @@ def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.message.chat_id
     logger.info(f"Received /id command from user {user_id} in chat {chat_id}")
     await update.message.reply_text(f"ID этого чата: `{chat_id}`", parse_mode='Markdown')
     logger.info(f"Replied to /id command from user {user_id}")
 
-def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received /play command from user {user_id}")
     if not context.args:
@@ -127,7 +126,7 @@ def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in /play search: {e}", exc_info=True)
         await message.edit_text("Произошла ошибка во время поиска.")
 
-def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received button callback from user {user_id}")
     query = update.callback_query
@@ -155,7 +154,7 @@ def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"Не удалось обработать трек: {e}")
 
-def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received /ron command from user {user_id}")
     if user_id != ADMIN_ID:
@@ -175,7 +174,7 @@ def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Режим радио ВКЛ. Жанр: {genre}")
     logger.info(f"Radio mode turned ON by admin {user_id} with genre '{genre}'")
 
-def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received /rof command from user {user_id}")
     if user_id != ADMIN_ID:
@@ -190,7 +189,7 @@ def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Radio mode turned OFF by admin {user_id}")
 
 # --- Music Handling ---
-def download_track(url: str = None, query: str = None):
+async def download_track(url: str = None, query: str = None):
     ensure_download_dir()
     unique_id = uuid.uuid4()
     out_template = os.path.join(DOWNLOAD_DIR, f'{unique_id}.%(ext)s')
@@ -227,7 +226,7 @@ def download_track(url: str = None, query: str = None):
         logger.error(f"Failed to download track {search_query}: {e}")
         return None
 
-def send_track(track_info: dict, chat_id: int, bot):
+async def send_track(track_info: dict, chat_id: int, bot):
     try:
         with open(track_info['filepath'], 'rb') as audio_file:
             await bot.send_audio(
@@ -239,7 +238,7 @@ def send_track(track_info: dict, chat_id: int, bot):
     except Exception as e:
         logger.error(f"Failed to send track {track_info['filepath']}: {e}")
 
-def radio_loop(application: Application):
+async def radio_loop(application: Application):
     logger.info("Radio loop started.")
     next_track_info = None
     while True:
@@ -287,7 +286,7 @@ def radio_loop(application: Application):
                 os.remove(current_track_info['filepath'])
 
 # --- Application Setup ---
-def post_init(application: Application) -> None:
+async def post_init(application: Application) -> None:
     """This function is called after initialization but before polling starts."""
     await application.bot.set_my_commands([
         BotCommand("play", "Найти и скачать трек"),
