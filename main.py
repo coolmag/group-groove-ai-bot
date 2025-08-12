@@ -208,28 +208,34 @@ async def download_track(url: str = None, query: str = None):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # If it's a search query (from radio), we need to filter the results
+            # If it's a search query (from radio), we apply advanced filtering
             if query:
                 search_result_opts = ydl_opts.copy()
                 search_result_opts.pop('postprocessors', None)
                 search_result_opts['extract_flat'] = 'in_playlist'
+                search_result_opts['default_search'] = 'scsearch10' # Search for 10 results
+
                 with yt_dlp.YoutubeDL(search_result_opts) as ydl_search:
-                    search_result = ydl_search.extract_info(query, download=False)
+                    search_result = ydl_search.extract_info(query.replace("scsearch1:", ""), download=False)
                 
                 if not search_result or not search_result.get('entries'):
                     logger.warning(f"Radio search for '{query}' yielded no results.")
                     return None
 
-                # Filter out long tracks (e.g., > 15 minutes = 900 seconds)
-                short_tracks = [t for t in search_result['entries'] if t.get('duration') and t['duration'] < 900]
+                # Filter tracks between 1 and 15 minutes
+                suitable_tracks = [
+                    t for t in search_result['entries'] 
+                    if t.get('duration') and 60 < t['duration'] < 900
+                ]
 
-                if not short_tracks:
-                    logger.warning(f"Radio search for '{query}' found tracks, but all were longer than 15 minutes.")
+                if not suitable_tracks:
+                    logger.warning(f"Radio search for '{query}' found tracks, but none were in the 1-15 minute range.")
                     return None
                 
-                track_to_download = random.choice(short_tracks)
-                logger.info(f"Radio selected track to download: {track_to_download['title']} ({track_to_download['url']})")
-                info = ydl.extract_info(track_to_download['url'], download=True)
+                track_to_download = random.choice(suitable_tracks)
+                track_url = track_to_download['url']
+                logger.info(f"Radio selected track to download: {track_to_download['title']} ({track_url})")
+                info = ydl.extract_info(track_url, download=True)
 
             else: # If it's a direct URL from /play command
                 info = ydl.extract_info(url, download=True)
@@ -272,7 +278,7 @@ async def radio_loop(application: Application):
         try:
             if next_track_info is None:
                 logger.info("[Radio] No pre-fetched track. Fetching one now...")
-                genre_query = f"scsearch1:{config['genre']} music"
+                genre_query = f"{config['genre']}"
                 next_track_info = await download_track(query=genre_query)
 
             if not next_track_info:
@@ -283,7 +289,7 @@ async def radio_loop(application: Application):
             current_track_info = next_track_info
 
             logger.info("[Radio] Pre-fetching next track in background...")
-            genre_query = f"scsearch1:{config['genre']} music"
+            genre_query = f"{config['genre']}"
             fetch_task = asyncio.create_task(download_track(query=genre_query))
 
             logger.info(f"[Radio] Sending track: {current_track_info['title']}")
