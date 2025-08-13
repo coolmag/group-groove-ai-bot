@@ -7,7 +7,7 @@ import yt_dlp
 import uuid
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Message, Poll
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
 from collections import deque
 
