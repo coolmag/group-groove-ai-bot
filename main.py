@@ -49,6 +49,7 @@ def load_config():
     config.setdefault('voting_interval_seconds', 3600)
     config.setdefault('track_interval_seconds', 120)
     config.setdefault('message_cleanup_limit', 30)
+    config.setdefault('genre_poll_id', None) # Persist the poll ID
     
     return config
 
@@ -527,8 +528,13 @@ async def _create_and_send_poll(application: Application) -> bool:
             open_period=60,
         )
         
-        application.bot_data['genre_poll_id'] = message.poll.id
-        logger.info(f"[Voting] Poll {message.poll.id} sent to chat {RADIO_CHAT_ID}.")
+        # Persist the poll ID to be resilient against restarts
+        poll_id = message.poll.id
+        application.bot_data['genre_poll_id'] = poll_id
+        config['genre_poll_id'] = poll_id
+        save_config(config)
+
+        logger.info(f"[Voting] Poll {poll_id} sent to chat {RADIO_CHAT_ID} and persisted.")
         return True
 
     except Exception as e:
@@ -552,6 +558,8 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Clean up poll id immediately
     context.bot_data['genre_poll_id'] = None
+    config['genre_poll_id'] = None
+    # We don't save the config yet, it will be saved after the winner is processed
 
     # Check if radio is still on
     config = load_config()
@@ -600,11 +608,13 @@ async def post_init(application: Application) -> None:
     application.bot_data['radio_playlist'] = deque(config.get('radio_playlist', []))
     application.bot_data['played_radio_urls'] = config.get('played_radio_urls', [])
     application.bot_data['radio_message_ids'] = deque(config.get('radio_message_ids', []))
-    application.bot_data['genre_poll_id'] = None # This should not be persisted
+    application.bot_data['genre_poll_id'] = config.get('genre_poll_id', None)
 
     logger.info(f"Loaded {len(application.bot_data['radio_playlist'])} tracks into playlist.")
     logger.info(f"Loaded {len(application.bot_data['played_radio_urls'])} played URLs.")
     logger.info(f"Loaded {len(application.bot_data['radio_message_ids'])} message IDs.")
+    if application.bot_data['genre_poll_id']:
+        logger.info(f"Loaded active poll ID: {application.bot_data['genre_poll_id']}")
 
     await application.bot.set_my_commands([
         BotCommand("play", "Найти и скачать трек"),
