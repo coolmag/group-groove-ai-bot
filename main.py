@@ -5,6 +5,7 @@ import json
 import random
 import yt_dlp
 import uuid
+from types import SimpleNamespace
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Message, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
@@ -651,9 +652,13 @@ async def schedule_poll_processing(application: Application, poll_id: str, delay
         logger.warning(f"[Voting Processor] Poll {poll_id} no longer active or already processed. Skipping.")
         return
 
-    # Recreate the Poll object from the dictionary stored in the config
-    poll = Poll.from_dict(active_poll_dict)
-    await process_poll_results(poll, application)
+    # Manually construct a simple object that mimics the Poll structure, only with the data we need.
+    # This avoids the error from the library not having a .from_dict() method.
+    options_data = active_poll_dict.get('options', [])
+    mock_options = [SimpleNamespace(text=o.get('text'), voter_count=o.get('voter_count')) for o in options_data]
+    mock_poll = SimpleNamespace(id=active_poll_dict.get('id'), options=mock_options)
+
+    await process_poll_results(mock_poll, application)
 
 
 async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
