@@ -80,7 +80,9 @@ def build_search_queries(genre_str):
 def is_genre_match(track, genre_str):
     core_genre = genre_str.split()[0].lower()
     keywords = GENRE_KEYWORDS.get(core_genre, [core_genre])
-    text = (track.get('title', '') + ' ' + track.get('description', '')).lower()
+    title = track.get('title') or ''
+    description = track.get('description') or ''
+    text = (title + ' ' + description).lower()
     return any(kw in text for kw in keywords)
 
 # --- Config & FS Management ---
@@ -464,6 +466,14 @@ async def process_poll_results(poll, application: Application):
             winning_options = [option.text]
         elif option.voter_count == max_votes and max_votes > 0:
             winning_options.append(option.text)
+
+    if not winning_options and poll.options:
+        # If no one voted, but there are options, find the one with votes, even if it's just one.
+        for option in poll.options:
+            if option.voter_count > 0:
+                max_votes = option.voter_count
+                winning_options = [option.text]
+                break # Found a winner
 
     final_winner = "Pop" if not winning_options else random.choice(winning_options)
     print(f"Winner: '{final_winner}'.")
