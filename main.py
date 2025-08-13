@@ -29,7 +29,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
 CONFIG_FILE = "radio_config.json"
-downLOAD_DIR = "downloads"
+DOWNLOAD_DIR = "downloads"
 
 # --- Genre Definitions ---
 GENRE_KEYWORDS = {
@@ -476,7 +476,7 @@ async def process_poll_results(poll, application: Application):
     asyncio.create_task(refill_playlist(application))
 
 # --- Application Setup ---
-async def post_init(application: Application) -> None:
+async def post_init(application: Application) -> None: 
     global radio_task, voting_task
     config = load_config()
     bot_data = application.bot_data
