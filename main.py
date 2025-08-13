@@ -539,7 +539,11 @@ async def _create_and_send_poll(application: Application) -> bool:
 async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the result of the hourly genre poll."""
     poll = update.poll
-    logger.info(f"Received poll update for poll {poll.id}")
+    logger.info(f"Received poll update for poll {poll.id}. Is closed: {poll.is_closed}")
+
+    # We only want to process the results when the poll is officially closed by Telegram
+    if not poll.is_closed:
+        return
 
     # Check if this is the poll we are waiting for
     if context.bot_data.get('genre_poll_id') != poll.id:
@@ -553,34 +557,40 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
     config = load_config()
     if not config.get('is_on'):
         logger.info("[Voting] Radio was turned off during the poll. Ignoring results.")
-        await context.bot.send_message(RADIO_CHAT_ID, "Голосование отменено, так как радио было выключено.")
+        # No need to announce cancellation if the poll just silently ended
         return
 
-    winning_option = None
-    max_votes = -1
+    winning_options = []
+    max_votes = 0
     total_votes = 0
 
     for option in poll.options:
         total_votes += option.voter_count
         if option.voter_count > max_votes:
             max_votes = option.voter_count
-            winning_option = option.text
+            winning_options = [option.text] # New winner, reset list
+        elif option.voter_count == max_votes and max_votes > 0:
+            winning_options.append(option.text) # Tie, add to list
 
-    # Default to Pop if no one voted
-    if total_votes == 0:
-        winning_option = "Pop"
+    # Decide the final winner
+    if not winning_options: # This means total_votes == 0
+        final_winner = "Pop" # Default to Pop if no one voted
         logger.info("[Voting] No votes received. Defaulting to Pop.")
-    else:
-        logger.info(f"[Voting] Winning genre is '{winning_option}' with {max_votes} vote(s).")
+    elif len(winning_options) == 1:
+        final_winner = winning_options[0]
+        logger.info(f"[Voting] Winning genre is '{final_winner}' with {max_votes} vote(s).")
+    else: # Handle tie
+        final_winner = random.choice(winning_options)
+        logger.info(f"[Voting] Tie between {winning_options} with {max_votes} votes. Randomly selected: '{final_winner}'.")
 
     # Update config
-    config['genre'] = winning_option
+    config['genre'] = final_winner
     # Clear the playlist so the new genre takes effect immediately
     config['radio_playlist'] = []
     context.bot_data['radio_playlist'] = deque()
     save_config(config)
     
-    await context.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Следующий час играет: **{winning_option}**", parse_mode='Markdown')
+    await context.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Следующий час играет: **{final_winner}**", parse_mode='Markdown')
 
 # --- Application Setup ---
 async def post_init(application: Application) -> None:
