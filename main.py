@@ -176,7 +176,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=f"Обрабатываю трек...")
         
         try:
-            track_info = await download_track(url=track_url)
+            track_info = await download_track(url=track_url, bot_data=context.bot_data)
             if track_info:
                 await send_track(track_info, query.message.chat_id, context.bot)
                 await query.edit_message_text(text=f"Трек отправлен!")
@@ -234,7 +234,7 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Radio mode turned OFF by admin {user_id}")
 
 # --- Music Handling ---
-async def download_track(url: str = None, query: str = None):
+async def download_track(url: str = None, query: str = None, bot_data: dict = None):
     ensure_download_dir()
     unique_id = uuid.uuid4()
     out_template = os.path.join(DOWNLOAD_DIR, f'{unique_id}.%(ext)s')
@@ -253,51 +253,75 @@ async def download_track(url: str = None, query: str = None):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # If it's a search query (from radio), we apply advanced filtering
+            # If it's a search query (from radio), we apply advanced filtering and playlist logic
             if query:
-                search_suffixes = [
-                    "beats", "mix", "instrumental", "chill", "study", "hip hop", 
-                    "music", "session", "vibes", "radio", "live", "remix"
-                ]
-                diversified_query = f"{query} {random.choice(search_suffixes)}"
-                logger.info(f"Diversified radio search query to: '{diversified_query}'")
+                # --- Radio Playlist Logic ---
+                if bot_data and 'played_radio_urls' in bot_data:
+                    if len(bot_data['played_radio_urls']) >= 30:
+                        logger.info("[Radio] Played 30 tracks, clearing session playlist.")
+                        bot_data['played_radio_urls'].clear()
+                elif bot_data and 'played_radio_urls' not in bot_data:
+                    bot_data['played_radio_urls'] = []
 
-                search_result_opts = ydl_opts.copy()
-                search_result_opts.pop('postprocessors', None)
-                search_result_opts['extract_flat'] = 'in_playlist'
-                search_result_opts['default_search'] = 'scsearch100' # Search for 100 results
 
-                with yt_dlp.YoutubeDL(search_result_opts) as ydl_search:
-                    search_result = ydl_search.extract_info(diversified_query.replace("scsearch1:", ""), download=False)
-                
-                if not search_result or not search_result.get('entries'):
-                    logger.warning(f"Radio search for '{query}' yielded no results.")
-                    return None
+                # --- Search Diversification & Uniqueness Check ---
+                for attempt in range(10): # Max 10 attempts to find a new track
+                    search_suffixes = [
+                        "beats", "mix", "instrumental", "chill", "study", "hip hop", 
+                        "music", "session", "vibes", "radio", "live", "remix"
+                    ]
+                    diversified_query = f"{query} {random.choice(search_suffixes)}"
+                    logger.info(f"[Radio Attempt {attempt+1}/10] Diversified search: '{diversified_query}'")
 
-                # Filter tracks between 1 and 15 minutes
-                suitable_tracks = [
-                    t for t in search_result['entries'] 
-                    if t.get('duration') and 60 < t['duration'] < 900
-                ]
+                    search_result_opts = ydl_opts.copy()
+                    search_result_opts.pop('postprocessors', None)
+                    search_result_opts['extract_flat'] = 'in_playlist'
+                    search_result_opts['default_search'] = 'scsearch100'
 
-                if not suitable_tracks:
-                    logger.warning(f"Radio search for '{query}' found tracks, but none were in the 1-15 minute range.")
-                    return None
-                
-                track_to_download = random.choice(suitable_tracks)
-                track_url = track_to_download['url']
-                logger.info(f"Radio selected track to download: {track_to_download['title']} ({track_url})")
-                info = ydl.extract_info(track_url, download=True)
+                    with yt_dlp.YoutubeDL(search_result_opts) as ydl_search:
+                        search_result = ydl_search.extract_info(diversified_query.replace("scsearch1:", ""), download=False)
+                    
+                    if not search_result or not search_result.get('entries'):
+                        logger.warning(f"Radio search for '{diversified_query}' yielded no results.")
+                        continue # Try again with a different suffix
+
+                    suitable_tracks = [t for t in search_result['entries'] if t.get('duration') and 60 < t['duration'] < 900]
+
+                    if not suitable_tracks:
+                        logger.warning(f"No suitable tracks found for '{diversified_query}' in the 1-15 minute range.")
+                        continue # Try again
+
+                    # Find an unplayed track from the suitable tracks
+                    random.shuffle(suitable_tracks) # Shuffle to not always pick the top ones
+                    
+                    for track_to_download in suitable_tracks:
+                        track_url = track_to_download['url']
+                        
+                        # Check if track has been played (only if bot_data is available for radio mode)
+                        if bot_data and track_url in bot_data.get('played_radio_urls', []):
+                            logger.info(f"Track '{track_to_download['title']}' already played. Trying another from the same search results.")
+                            continue # Try next track in suitable_tracks
+                        
+                        # Found a new track
+                        if bot_data:
+                            bot_data['played_radio_urls'].append(track_url)
+                            logger.info(f"Found new track: {track_to_download['title']}. Playlist size: {len(bot_data['played_radio_urls'])}")
+                        
+                        info = ydl.extract_info(track_url, download=True)
+                        filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+                        return {"filepath": filename, "title": info.get('title', 'Unknown Title'), "duration": info.get('duration', 0)}
+
+                logger.warning("[Radio] Could not find a new, unplayed track after 10 attempts with multiple searches.")
+                return None
 
             else: # If it's a direct URL from /play command
                 info = ydl.extract_info(url, download=True)
-
-            filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
-            return {
-                "filepath": filename,
-                "title": info.get('title', 'Unknown Title'),
-                "duration": info.get('duration', 0)
-            }
+                filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+                return {
+                    "filepath": filename,
+                    "title": info.get('title', 'Unknown Title'),
+                    "duration": info.get('duration', 0)
+                }
     except Exception as e:
         logger.error(f"Failed to download track {search_query}: {e}", exc_info=True)
         return None
@@ -339,19 +363,21 @@ async def radio_loop(application: Application):
                 continue
             
             current_track_info = next_track_info
+            next_track_info = None  # Reset to ensure a new track is fetched
 
             logger.info("[Radio] Pre-fetching next track in background...")
             genre_query = f"{config['genre']}"
-            fetch_task = asyncio.create_task(download_track(query=genre_query))
+            fetch_task = asyncio.create_task(download_track(query=genre_query, bot_data=application.bot_data))
 
             logger.info(f"[Radio] Sending track: {current_track_info['title']}")
             await send_track(current_track_info, RADIO_CHAT_ID, application.bot)
             
-            next_track_info = await fetch_task
-            
             sleep_duration = current_track_info.get('duration', 180)
-            logger.info(f"[Radio] Waiting for {sleep_duration} seconds.")
+            logger.info(f"[Radio] Waiting for {sleep_duration} seconds while next track downloads...")
             await asyncio.sleep(sleep_duration)
+
+            logger.info("[Radio] Finished waiting. Awaiting next track download to complete.")
+            next_track_info = await fetch_task
 
         except Exception as e:
             logger.error(f"Error in radio loop: {e}", exc_info=True)
