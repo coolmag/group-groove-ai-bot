@@ -81,6 +81,43 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"ID этого чата: `{chat_id}`", parse_mode='Markdown')
     logger.info(f"Replied to /id command from user {user_id}")
 
+async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    page_size = 5
+    
+    if 'paginated_searches' not in context.bot_data or search_id not in context.bot_data['paginated_searches']:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("Ошибка: поиск не найден. Попробуйте снова.", callback_data="noop")]])
+
+    results = context.bot_data['paginated_searches'][search_id]
+    
+    start_index = page * page_size
+    end_index = start_index + page_size
+    
+    keyboard = []
+    for entry in results[start_index:end_index]:
+        title = entry.get('title', 'Unknown Title')
+        duration_str = format_duration(entry.get('duration'))
+        
+        cache_key = uuid.uuid4().hex[:10]
+        if 'track_urls' not in context.bot_data:
+            context.bot_data['track_urls'] = {}
+        context.bot_data['track_urls'][cache_key] = entry.get('url')
+        
+        keyboard.append([InlineKeyboardButton(f"▶️ {title} ({duration_str})", callback_data=f"play_track:{cache_key}")])
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page:{search_id}:{page-1}"))
+    
+    total_pages = (len(results) + page_size - 1) // page_size
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"page:{search_id}:{page+1}"))
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+        
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received /play command from user {user_id}")
@@ -96,7 +133,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'format': 'bestaudio',
         'noplaylist': True,
         'quiet': True,
-        'default_search': 'scsearch5',
+        'default_search': 'scsearch30',
         'extract_flat': 'in_playlist'
     }
 
@@ -107,24 +144,19 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.edit_text("Треки не найдены.")
                 return
 
-        if 'search_results' not in context.bot_data:
-            context.bot_data['search_results'] = {}
+        search_id = uuid.uuid4().hex[:10]
+        if 'paginated_searches' not in context.bot_data:
+            context.bot_data['paginated_searches'] = {}
+        
+        context.bot_data['paginated_searches'][search_id] = info['entries']
 
-        keyboard = []
-        for entry in info['entries'][:5]:
-            title = entry.get('title', 'Unknown Title')
-            duration_str = format_duration(entry.get('duration'))
-            cache_key = uuid.uuid4().hex[:10]
-            context.bot_data['search_results'][cache_key] = entry.get('url')
-            
-            keyboard.append([InlineKeyboardButton(f"▶️ {title} ({duration_str})", callback_data=f"play_track:{cache_key}")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.edit_text('Пожалуйста, выберите трек:', reply_markup=reply_markup)
+        reply_markup = await get_paginated_keyboard(search_id, context, page=0)
+        await message.edit_text(f'Найдено треков: {len(info["entries"])}. Пожалуйста, выберите трек:', reply_markup=reply_markup)
 
     except Exception as e:
         logger.error(f"Error in /play search: {e}", exc_info=True)
         await message.edit_text("Произошла ошибка во время поиска.")
+
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -132,14 +164,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    command, cache_key = query.data.split(":", 1)
+    command, data = query.data.split(":", 1)
 
     if command == "play_track":
-        if 'search_results' not in context.bot_data or cache_key not in context.bot_data['search_results']:
+        cache_key = data
+        if 'track_urls' not in context.bot_data or cache_key not in context.bot_data['track_urls']:
             await query.edit_message_text("Ошибка: результат поиска устарел. Пожалуйста, попробуйте снова.")
             return
 
-        track_url = context.bot_data['search_results'][cache_key]
+        track_url = context.bot_data['track_urls'][cache_key]
         await query.edit_message_text(text=f"Обрабатываю трек...")
         
         try:
@@ -153,6 +186,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Не удалось обработать трек.")
         except Exception as e:
             await query.edit_message_text(f"Не удалось обработать трек: {e}")
+    
+    elif command == "page":
+        search_id, page_num_str = data.split(":", 1)
+        page_num = int(page_num_str)
+        
+        reply_markup = await get_paginated_keyboard(search_id, context, page=page_num)
+        
+        if search_id in context.bot_data['paginated_searches']:
+            results = context.bot_data['paginated_searches'][search_id]
+            await query.edit_message_text(f'Найдено треков: {len(results)}. Пожалуйста, выберите трек:', reply_markup=reply_markup)
+        else:
+            await query.edit_message_text('Ошибка: поиск устарел.', reply_markup=None)
 
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -210,13 +255,20 @@ async def download_track(url: str = None, query: str = None):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # If it's a search query (from radio), we apply advanced filtering
             if query:
+                search_suffixes = [
+                    "beats", "mix", "instrumental", "chill", "study", "hip hop", 
+                    "music", "session", "vibes", "radio", "live", "remix"
+                ]
+                diversified_query = f"{query} {random.choice(search_suffixes)}"
+                logger.info(f"Diversified radio search query to: '{diversified_query}'")
+
                 search_result_opts = ydl_opts.copy()
                 search_result_opts.pop('postprocessors', None)
                 search_result_opts['extract_flat'] = 'in_playlist'
-                search_result_opts['default_search'] = 'scsearch10' # Search for 10 results
+                search_result_opts['default_search'] = 'scsearch100' # Search for 100 results
 
                 with yt_dlp.YoutubeDL(search_result_opts) as ydl_search:
-                    search_result = ydl_search.extract_info(query.replace("scsearch1:", ""), download=False)
+                    search_result = ydl_search.extract_info(diversified_query.replace("scsearch1:", ""), download=False)
                 
                 if not search_result or not search_result.get('entries'):
                     logger.warning(f"Radio search for '{query}' yielded no results.")
