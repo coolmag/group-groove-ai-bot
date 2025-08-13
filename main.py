@@ -136,7 +136,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         search_id = uuid.uuid4().hex[:10]
         context.bot_data.setdefault('paginated_searches', {})[search_id] = info['entries']
         reply_markup = await get_paginated_keyboard(search_id, context)
-        await message.edit_text(f'Найдено: {len(info["entries"]) }. Выберите трек:', reply_markup=reply_markup)
+        await message.edit_text(f'Найдено: {len(info["entries"])}. Выберите трек:', reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error in /play: {e}")
         await message.edit_text("Ошибка поиска.")
@@ -365,7 +365,7 @@ async def process_poll_results(poll, application: Application):
     await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{final_winner}**", parse_mode='Markdown')
 
 # --- Application Setup ---
-async def post_init(application: Application) -> None: 
+async def post_init(application: Application) -> None:
     config = load_config()
     bot_data = application.bot_data
     bot_data['radio_playlist'] = deque(config.get('radio_playlist', []))
