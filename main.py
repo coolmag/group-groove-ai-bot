@@ -360,7 +360,7 @@ async def process_poll_results(poll, application: Application):
     logger.info(f"Winner: '{final_winner}'.")
     config['genre'] = final_winner
     config['radio_playlist'] = []
-    application.bot_data['radio_playlist'] = deque()
+    application.bot_data['radio_playlist'].clear()
     save_config(config)
     await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{final_winner}**", parse_mode='Markdown')
 
