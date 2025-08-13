@@ -5,9 +5,10 @@ import json
 import random
 import yt_dlp
 import uuid
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Message
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
+from collections import deque
 
 # --- Setup ---
 load_dotenv()
@@ -292,7 +293,7 @@ async def download_track(url: str = None, query: str = None, bot_data: dict = No
                         continue # Try again
 
                     # Find an unplayed track from the suitable tracks
-                    random.shuffle(suitable_tracks) # Shuffle to not always pick the top ones
+                    # random.shuffle(suitable_tracks) # Shuffle to not always pick the top ones
                     
                     for track_to_download in suitable_tracks:
                         track_url = track_to_download['url']
@@ -326,70 +327,82 @@ async def download_track(url: str = None, query: str = None, bot_data: dict = No
         logger.error(f"Failed to download track {search_query}: {e}", exc_info=True)
         return None
 
-async def send_track(track_info: dict, chat_id: int, bot):
+async def send_track(track_info: dict, chat_id: int, bot) -> Message | None:
     try:
         with open(track_info['filepath'], 'rb') as audio_file:
-            await bot.send_audio(
+            message = await bot.send_audio(
                 chat_id=chat_id,
                 audio=audio_file,
                 title=track_info['title'],
                 duration=track_info['duration']
             )
+            return message
     except Exception as e:
         logger.error(f"Failed to send track {track_info['filepath']}: {e}")
+        return None
+
+async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
+    """Deletes the 10 oldest track messages from the chat."""
+    logger.info(f"Track limit reached. Clearing 10 oldest tracks.")
+    for _ in range(10):
+        if context.bot_data['radio_message_ids']:
+            chat_id, message_id = context.bot_data['radio_message_ids'].popleft()
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                logger.info(f"Deleted message {message_id} from chat {chat_id}")
+                await asyncio.sleep(1) # Avoid hitting rate limits
+            except Exception as e:
+                logger.error(f"Failed to delete message {message_id}: {e}")
 
 async def radio_loop(application: Application):
     logger.info("Radio loop started.")
-    next_track_info = None
     while True:
-        await asyncio.sleep(3)
+        await asyncio.sleep(5) # Check every 5 seconds
         config = load_config()
         
         if not config.get('is_on'):
-            if next_track_info and os.path.exists(next_track_info['filepath']):
-                os.remove(next_track_info['filepath'])
-            next_track_info = None
+            await asyncio.sleep(15) # Sleep longer when inactive
             continue
 
         try:
-            if next_track_info is None:
-                logger.info("[Radio] No pre-fetched track. Fetching one now...")
-                genre_query = f"{config['genre']}"
-                next_track_info = await download_track(query=genre_query)
+            logger.info("[Radio] Searching for a track...")
+            genre_query = f"{config['genre']}"
+            track_info = await download_track(query=genre_query, bot_data=application.bot_data)
 
-            if not next_track_info:
-                logger.warning("[Radio] Could not fetch a track. Retrying in 30s.")
-                await asyncio.sleep(30)
+            if not track_info:
+                logger.warning("[Radio] Could not fetch a track. Retrying in 60s.")
+                await asyncio.sleep(60)
                 continue
             
-            current_track_info = next_track_info
-            next_track_info = None  # Reset to ensure a new track is fetched
-
-            logger.info("[Radio] Pre-fetching next track in background...")
-            genre_query = f"{config['genre']}"
-            fetch_task = asyncio.create_task(download_track(query=genre_query, bot_data=application.bot_data))
-
-            logger.info(f"[Radio] Sending track: {current_track_info['title']}")
-            await send_track(current_track_info, RADIO_CHAT_ID, application.bot)
+            logger.info(f"[Radio] Sending track: {track_info['title']}")
+            sent_message = await send_track(track_info, RADIO_CHAT_ID, application.bot)
             
-            sleep_duration = current_track_info.get('duration', 180)
-            logger.info(f"[Radio] Waiting for {sleep_duration} seconds while next track downloads...")
-            await asyncio.sleep(sleep_duration)
+            if sent_message:
+                application.bot_data['radio_message_ids'].append((sent_message.chat_id, sent_message.message_id))
+                logger.info(f"Radio messages in queue: {len(application.bot_data['radio_message_ids'])}")
+                
+                if len(application.bot_data['radio_message_ids']) >= 30:
+                    await clear_old_tracks(application)
 
-            logger.info("[Radio] Finished waiting. Awaiting next track download to complete.")
-            next_track_info = await fetch_task
+            # Wait for 2 minutes before the next track
+            logger.info("[Radio] Waiting for 120 seconds...")
+            await asyncio.sleep(120)
 
         except Exception as e:
             logger.error(f"Error in radio loop: {e}", exc_info=True)
-            next_track_info = None
-            await asyncio.sleep(30)
+            await asyncio.sleep(30) # Wait before retrying after an error
         finally:
-            if 'current_track_info' in locals() and current_track_info and os.path.exists(current_track_info['filepath']):
-                os.remove(current_track_info['filepath'])
+            if 'track_info' in locals() and track_info and os.path.exists(track_info['filepath']):
+                os.remove(track_info['filepath'])
+
 
 # --- Application Setup ---
 async def post_init(application: Application) -> None:
     """This function is called after initialization but before polling starts."""
+    # Initialize data structures for radio state
+    application.bot_data['played_radio_urls'] = []
+    application.bot_data['radio_message_ids'] = deque()
+    
     await application.bot.set_my_commands([
         BotCommand("play", "Найти и скачать трек"),
         BotCommand("p", "Сокращение для /play"),
