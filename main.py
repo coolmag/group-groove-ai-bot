@@ -3,6 +3,7 @@ import os
 import asyncio
 import json
 import random
+import re
 import yt_dlp
 import uuid
 from types import SimpleNamespace
@@ -33,6 +34,18 @@ def format_duration(seconds):
     minutes, seconds = divmod(int(seconds), 60)
     return f"{minutes:02d}:{seconds:02d}"
 
+def has_ukrainian_chars(text):
+    return any(char in text for char in 'іІїЇєЄґҐ')
+
+def parse_genre_query(genre_string: str) -> str:
+    match = re.search(r'(70|80|90|2000|2010)-х$', genre_string)
+    if match:
+        decade_part = match.group(1)
+        core_genre = genre_string[:match.start()].strip()
+        modifier = f"{decade_part}s" if decade_part in ['70', '80', '90'] else decade_part
+        return f"{core_genre} {modifier}"
+    return genre_string
+
 # --- Config & FS Management ---
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -40,7 +53,6 @@ def load_config():
             config = json.load(f)
     else:
         config = {}
-
     config.setdefault('is_on', False)
     config.setdefault('genre', 'lo-fi hip hop')
     config.setdefault('radio_playlist', [])
@@ -199,8 +211,12 @@ async def download_track(url: str):
         return {'filepath': filename, 'title': info.get('title', 'Unknown'), 'duration': info.get('duration', 0)}
 
 async def send_track(track_info: dict, chat_id: int, bot):
-    with open(track_info['filepath'], 'rb') as audio_file:
-        await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
+    try:
+        with open(track_info['filepath'], 'rb') as audio_file:
+            return await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
+    except Exception as e:
+        logger.error(f"Failed to send track {track_info.get('filepath')}: {e}")
+        return None
 
 async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
     for _ in range(10):
@@ -218,13 +234,21 @@ async def radio_loop(application: Application):
 
         if not bot_data.get('radio_playlist'):
             logger.info("Refilling radio playlist...")
+            raw_genre = config.get('genre', 'lo-fi hip hop')
+            search_query = parse_genre_query(raw_genre)
+            logger.info(f"Original: '{raw_genre}', Parsed: '{search_query}'")
             ydl_opts = {'format': 'bestaudio', 'noplaylist': True, 'quiet': True, 'default_search': 'scsearch50', 'extract_flat': 'in_playlist'}
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(config['genre'], download=False)
+                    info = ydl.extract_info(search_query, download=False)
                 if info and info.get('entries'):
                     played = set(bot_data.get('played_radio_urls', []))
-                    suitable = [t['url'] for t in info['entries'] if t and 60 < t.get('duration', 0) < 900 and t.get('url') not in played]
+                    suitable = [
+                        t['url'] for t in info['entries'] 
+                        if t and 60 < t.get('duration', 0) < 900 
+                        and t.get('url') not in played
+                        and not has_ukrainian_chars(t.get('title', ''))
+                    ]
                     random.shuffle(suitable)
                     bot_data['radio_playlist'] = deque(suitable)
             except Exception as e:
@@ -240,16 +264,16 @@ async def radio_loop(application: Application):
         try:
             track_info = await download_track(track_url)
             sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
-            bot_data.setdefault('radio_message_ids', deque()).append((sent_msg.chat_id, sent_msg.message_id))
-            bot_data.setdefault('played_radio_urls', []).append(track_url)
-            if len(bot_data['played_radio_urls']) > 100: bot_data['played_radio_urls'].pop(0)
-            if len(bot_data['radio_message_ids']) >= config.get('message_cleanup_limit', 30): await clear_old_tracks(application)
-            
-            # Persist state
-            config['radio_playlist'] = list(bot_data['radio_playlist'])
-            config['played_radio_urls'] = bot_data['played_radio_urls']
-            config['radio_message_ids'] = list(bot_data['radio_message_ids'])
-            save_config(config)
+            if sent_msg:
+                bot_data.setdefault('radio_message_ids', deque()).append((sent_msg.chat_id, sent_msg.message_id))
+                bot_data.setdefault('played_radio_urls', []).append(track_url)
+                if len(bot_data['played_radio_urls']) > 100: bot_data['played_radio_urls'].pop(0)
+                if len(bot_data['radio_message_ids']) >= config.get('message_cleanup_limit', 30): await clear_old_tracks(application)
+                
+                config['radio_playlist'] = list(bot_data['radio_playlist'])
+                config['played_radio_urls'] = bot_data['played_radio_urls']
+                config['radio_message_ids'] = list(bot_data['radio_message_ids'])
+                save_config(config)
 
         except Exception as e:
             logger.error(f"Radio loop track error: {e}")
@@ -259,6 +283,11 @@ async def radio_loop(application: Application):
         await asyncio.sleep(config.get('track_interval_seconds', 120))
 
 # --- Voting Logic ---
+# The voting system uses a hybrid approach:
+# 1. A self-managed timer (`schedule_poll_processing`) is used to trigger the result processing, as relying on an update from Telegram was unreliable.
+# 2. A passive `PollHandler` (`receive_poll_update`) listens for user votes to keep a persisted, up-to-date version of the poll object in the config file.
+# 3. When the timer is up, the scheduler reads the final poll state from the config and processes it.
+
 async def hourly_voting_loop(application: Application):
     while True:
         config = load_config()
@@ -271,11 +300,22 @@ async def _create_and_send_poll(application: Application) -> bool:
     try:
         votable_genres = config.get("votable_genres", [])
         if len(votable_genres) < 10: return False
+
+        # --- Poll Option Generation ---
+        # To create variety, we generate a mix of options:
+        # 1. 5 options of "Genre + Decade" (e.g., "Rock 80-х")
+        # 2. 4 unique random genres.
+        # 3. "Pop" is always included as a default.
         decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
         special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
-        regular = set(random.sample([g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop'], k=4))
+        regular_pool = [g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop']
+        num_to_sample = min(4, len(regular_pool))
+        regular = set(random.sample(regular_pool, k=num_to_sample))
+        
         options = list(special | regular)
-        while len(options) < 9: options.append(random.choice(votable_genres))
+        while len(options) < 9: # Ensure we have 9 diverse options before adding Pop
+            chosen = random.choice(votable_genres)
+            if chosen not in options: options.append(chosen)
         options.append("Pop")
         random.shuffle(options)
         
