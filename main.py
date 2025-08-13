@@ -207,9 +207,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = int(page_num_str)
         reply_markup = await get_paginated_keyboard(search_id, context, page)
         await query.edit_message_text('Выберите трек:', reply_markup=reply_markup)
-    
-    elif command == "status_refresh":
-        await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global radio_task, voting_task
@@ -230,7 +227,6 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         voting_task = asyncio.create_task(hourly_voting_loop(context.application))
     
     await update.message.reply_text(f"Радио включено. Жанр: {genre}.")
-    # Immediately start filling the playlist in the background
     asyncio.create_task(refill_playlist(context.application))
 
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,13 +255,11 @@ async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Ошибка запуска голосования.")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends the radio status panel."""
     if update.effective_user.id != ADMIN_ID: return
     await send_status_panel(context.application, update.message.chat_id)
 
 # --- UI Panel Logic ---
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
-    """Sends or updates the radio control panel."""
     config = load_config()
     status = "🟢 ВКЛ" if config.get('is_on') else "🔴 ВЫКЛ"
     genre = config.get('genre', '-')
@@ -398,6 +392,13 @@ async def radio_loop(application: Application):
                     await asyncio.sleep(60)
                     continue
             
+            if 'playlist_status_message_id' in bot_data:
+                try:
+                    await application.bot.delete_message(chat_id=RADIO_CHAT_ID, message_id=bot_data['playlist_status_message_id'])
+                except Exception as e:
+                    print(f"Could not delete playlist status message: {e}")
+                del bot_data['playlist_status_message_id']
+
             track_url = bot_data['radio_playlist'].popleft()
             try:
                 track_info = await download_track(track_url)
@@ -509,14 +510,6 @@ async def process_poll_results(poll, application: Application):
         elif option.voter_count == max_votes and max_votes > 0:
             winning_options.append(option.text)
 
-    if not winning_options and poll.options:
-        # If no one voted, but there are options, find the one with votes, even if it's just one.
-        for option in poll.options:
-            if option.voter_count > 0:
-                max_votes = option.voter_count
-                winning_options = [option.text]
-                break # Found a winner
-
     final_winner = "Pop" if not winning_options else random.choice(winning_options)
     print(f"Winner: '{final_winner}'.")
     config['genre'] = final_winner
@@ -524,11 +517,12 @@ async def process_poll_results(poll, application: Application):
     application.bot_data['radio_playlist'].clear()
     save_config(config)
     await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{final_winner}**", parse_mode='Markdown')
-    # Immediately trigger the playlist refill for the new genre
+    status_msg = await application.bot.send_message(RADIO_CHAT_ID, "⚙️ Составляю новый плейлист...")
+    application.bot_data['playlist_status_message_id'] = status_msg.message_id
     asyncio.create_task(refill_playlist(application))
 
 # --- Application Setup ---
-async def post_init(application: Application) -> None: 
+async def post_init(application: Application) -> None:
     global radio_task, voting_task
     config = load_config()
     bot_data = application.bot_data
