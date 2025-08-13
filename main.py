@@ -137,7 +137,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         search_id = uuid.uuid4().hex[:10]
         context.bot_data.setdefault('paginated_searches', {})[search_id] = info['entries']
         reply_markup = await get_paginated_keyboard(search_id, context)
-        await message.edit_text(f'Найдено: {len(info["entries"])}. Выберите трек:', reply_markup=reply_markup)
+        await message.edit_text(f'Найдено: {len(info["entries"]) }. Выберите трек:', reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error in /play: {e}")
         await message.edit_text("Ошибка поиска.")
@@ -228,7 +228,7 @@ async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
 
 async def refill_playlist(application: Application):
     bot_data = application.bot_data
-    logger.info("DEBUG: ENTERING REFILL_PLAYLIST")
+    logger.info("Refilling radio playlist...")
     config = load_config()
     raw_genre = config.get('genre', 'lo-fi hip hop')
     search_query = parse_genre_query(raw_genre)
@@ -242,9 +242,9 @@ async def refill_playlist(application: Application):
             suitable = [t['url'] for t in info['entries'] if t and 60 < t.get('duration', 0) < 900 and t.get('url') not in played and not has_ukrainian_chars(t.get('title', ''))]
             random.shuffle(suitable)
             bot_data['radio_playlist'] = deque(suitable)
-            logger.info(f"DEBUG: REFILLED PLAYLIST IN BOT_DATA with {len(suitable)} tracks.")
             config['radio_playlist'] = list(suitable)
             save_config(config)
+            logger.info(f"Playlist refilled with {len(suitable)} tracks.")
     except Exception as e:
         logger.error(f"Playlist refill error: {e}")
 
@@ -252,19 +252,16 @@ async def radio_loop(application: Application):
     bot_data = application.bot_data
     while True:
         await asyncio.sleep(5)
-        logger.info(f"DEBUG: Radio loop awake. Playlist size: {len(bot_data.get('radio_playlist', []))}")
         config = load_config()
         if not config.get('is_on'): continue
 
         if not bot_data.get('radio_playlist'):
-            logger.info("DEBUG: Playlist empty, calling refill.")
             await refill_playlist(application)
             if not bot_data.get('radio_playlist'):
                 await asyncio.sleep(60)
                 continue
         
         track_url = bot_data['radio_playlist'].popleft()
-        logger.info(f"DEBUG: Popped track {track_url}")
         try:
             track_info = await download_track(track_url)
             sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
@@ -369,7 +366,6 @@ async def process_poll_results(poll, application: Application):
     application.bot_data['radio_playlist'].clear()
     save_config(config)
     await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{final_winner}**", parse_mode='Markdown')
-    logger.info("DEBUG: Triggering refill from poll results.")
     asyncio.create_task(refill_playlist(application))
 
 # --- Application Setup ---
