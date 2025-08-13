@@ -6,7 +6,7 @@ import random
 import yt_dlp
 import uuid
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Message
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
 from collections import deque
 
@@ -394,6 +394,153 @@ async def radio_loop(application: Application):
         finally:
             if 'track_info' in locals() and track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
+
+async def hourly_voting_loop(application: Application):
+    """Initiates a genre poll every hour if the radio is on."""
+    logger.info("Hourly voting loop started.")
+    while True:
+        await asyncio.sleep(3600) # Wait for 1 hour
+        
+        config = load_config()
+        if not config.get('is_on'):
+            logger.info("[Voting] Radio is off, skipping hourly poll.")
+            continue
+
+        logger.info("[Voting] Starting hourly genre poll.")
+        try:
+            votable_genres = config.get("votable_genres", [])
+            if len(votable_genres) < 10: # Need enough genres to sample from
+                logger.warning("[Voting] Not enough genres in config to start a poll.")
+                continue
+
+            decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
+            
+            # 1. Generate 5 unique "Genre + Decade" options
+            special_options = set()
+            while len(special_options) < 5:
+                genre = random.choice(votable_genres)
+                decade = random.choice(decades)
+                special_options.add(f"{genre} {decade}")
+
+            # 2. Generate 4 unique regular genre options
+            regular_options = set()
+            # Ensure we don't pick genres that might be part of the special options
+            base_genres_in_special = {opt.split(' ')[0] for opt in special_options}
+            pool_for_regular = [g for g in votable_genres if g not in base_genres_in_special and g.lower() != 'pop']
+            
+            # In case the pool is too small after filtering
+            num_to_sample = min(4, len(pool_for_regular))
+            regular_options.update(random.sample(pool_for_regular, k=num_to_sample))
+
+            # 3. Combine, add "Pop", and shuffle
+            options = list(special_options) + list(regular_options)
+            # Ensure we have 9 options before adding Pop, to make a total of 10
+            while len(options) < 9:
+                chosen_genre = random.choice(votable_genres)
+                if chosen_genre not in options:
+                    options.append(chosen_genre)
+
+            options.append("Pop")
+            random.shuffle(options)
+            
+            question = "Выбираем жанр на следующий час!"
+
+            message = await application.bot.send_poll(
+                chat_id=RADIO_CHAT_ID,
+                question=question,
+                options=options[:10], # Ensure we don't exceed 10 options
+                is_anonymous=False,
+                open_period=60, # 1 minute
+            )
+            
+            application.bot_data['genre_poll_id'] = message.poll.id
+            logger.info(f"[Voting] Poll {message.poll.id} sent to chat {RADIO_CHAT_ID}.")
+
+        except Exception as e:
+            logger.error(f"Error in hourly voting loop: {e}", exc_info=True)
+
+async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the result of the hourly genre poll."""
+    poll = update.poll
+    logger.info(f"Received poll update for poll {poll.id}")
+
+    # Check if this is the poll we are waiting for
+    if context.bot_data.get('genre_poll_id') != poll.id:
+        logger.info(f"Poll {poll.id} is not the one we are tracking. Ignoring.")
+        return
+
+    winning_option = None
+    max_votes = -1
+    total_votes = 0
+
+    for option in poll.options:
+        total_votes += option.voter_count
+        if option.voter_count > max_votes:
+            max_votes = option.voter_count
+            winning_option = option.text
+
+    # Default to Pop if no one voted
+    if total_votes == 0:
+        winning_option = "Pop"
+        logger.info("[Voting] No votes received. Defaulting to Pop.")
+    else:
+        logger.info(f"[Voting] Winning genre is '{winning_option}' with {max_votes} vote(s).")
+
+    # Update config
+    config = load_config()
+    config['genre'] = winning_option
+    save_config(config)
+    
+    await context.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Следующий час играет: **{winning_option}**", parse_mode='Markdown')
+
+    # Clean up poll id
+    context.bot_data['genre_poll_id'] = None
+
+# --- Application Setup ---
+async def post_init(application: Application) -> None:
+    """This function is called after initialization but before polling starts."""
+    # Initialize data structures for radio state
+    application.bot_data['played_radio_urls'] = []
+    application.bot_data['radio_message_ids'] = deque()
+    application.bot_data['genre_poll_id'] = None
+    
+    await application.bot.set_my_commands([
+        BotCommand("play", "Найти и скачать трек"),
+        BotCommand("p", "Сокращение для /play"),
+        BotCommand("ron", "Включить радио (только админ)"),
+        BotCommand("rof", "Выключить радио (только админ)"),
+        BotCommand("id", "Показать ID чата"),
+        BotCommand("help", "Помощь по командам"),
+        BotCommand("h", "Сокращение для /help"),
+    ])
+    asyncio.create_task(radio_loop(application))
+    asyncio.create_task(hourly_voting_loop(application))
+
+# --- Main Application Logic (Polling) ---
+def main() -> None:
+    """Runs the bot in polling mode."""
+    if not BOT_TOKEN:
+        logger.critical("FATAL: BOT_TOKEN not found.")
+        return
+
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler(["help", "h"], help_command))
+    application.add_handler(CommandHandler("id", id_command))
+    application.add_handler(CommandHandler(["play", "p"], play_command))
+    application.add_handler(CommandHandler(["radio_on", "ron"], radio_on_command))
+    application.add_handler(CommandHandler(["radio_off", "rof"], radio_off_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(PollHandler(receive_poll_update))
+
+    logger.info("Starting bot in polling mode...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+if __name__ == "__main__":
+    ensure_download_dir()
+    main()
 
 
 # --- Application Setup ---
