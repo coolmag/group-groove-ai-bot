@@ -283,11 +283,6 @@ async def radio_loop(application: Application):
         await asyncio.sleep(config.get('track_interval_seconds', 120))
 
 # --- Voting Logic ---
-# The voting system uses a hybrid approach:
-# 1. A self-managed timer (`schedule_poll_processing`) is used to trigger the result processing, as relying on an update from Telegram was unreliable.
-# 2. A passive `PollHandler` (`receive_poll_update`) listens for user votes to keep a persisted, up-to-date version of the poll object in the config file.
-# 3. When the timer is up, the scheduler reads the final poll state from the config and processes it.
-
 async def hourly_voting_loop(application: Application):
     while True:
         config = load_config()
@@ -300,20 +295,13 @@ async def _create_and_send_poll(application: Application) -> bool:
     try:
         votable_genres = config.get("votable_genres", [])
         if len(votable_genres) < 10: return False
-
-        # --- Poll Option Generation ---
-        # To create variety, we generate a mix of options:
-        # 1. 5 options of "Genre + Decade" (e.g., "Rock 80-х")
-        # 2. 4 unique random genres.
-        # 3. "Pop" is always included as a default.
         decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
         special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
         regular_pool = [g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop']
         num_to_sample = min(4, len(regular_pool))
         regular = set(random.sample(regular_pool, k=num_to_sample))
-        
         options = list(special | regular)
-        while len(options) < 9: # Ensure we have 9 diverse options before adding Pop
+        while len(options) < 9: 
             chosen = random.choice(votable_genres)
             if chosen not in options: options.append(chosen)
         options.append("Pop")
@@ -322,8 +310,11 @@ async def _create_and_send_poll(application: Application) -> bool:
         poll_duration = 60
         message = await application.bot.send_poll(RADIO_CHAT_ID, "Выбираем жанр на следующий час!", options[:10], is_anonymous=False, open_period=poll_duration)
         
-        config['active_poll'] = message.poll.to_dict()
+        poll_data = message.poll.to_dict()
+        poll_data['close_timestamp'] = datetime.now().timestamp() + poll_duration
+        config['active_poll'] = poll_data
         save_config(config)
+
         logger.info(f"Poll {message.poll.id} sent, processing in {poll_duration}s.")
         asyncio.create_task(schedule_poll_processing(application, message.poll.id, poll_duration))
         return True
@@ -381,21 +372,16 @@ async def post_init(application: Application) -> None:
     bot_data['played_radio_urls'] = config.get('played_radio_urls', [])
     bot_data['radio_message_ids'] = deque(config.get('radio_message_ids', []))
     
-    if config.get('active_poll'):
-        logger.warning("Found active poll from previous session. Cannot restore timer.")
+    active_poll = config.get('active_poll')
+    if active_poll:
+        close_timestamp = active_poll.get('close_timestamp')
+        if close_timestamp:
+            remaining_time = close_timestamp - datetime.now().timestamp()
+            if remaining_time > 0:
+                logger.info(f"[Init] Found an active poll. Rescheduling processing in {remaining_time:.0f}s.")
+                asyncio.create_task(schedule_poll_processing(application, active_poll['id'], remaining_time))
 
-    await application.bot.set_my_commands([
-        BotCommand("play", "/p <название>"),
-        BotCommand("ron", "/ron <жанр>"),
-        BotCommand("rof", "Выключить радио"),
-        BotCommand("votestart", "Запустить голосование"),
-        BotCommand("id", "Показать ID чата"),
-        BotCommand("help", "Помощь"),
-    ])
-    asyncio.create_task(radio_loop(application))
-    asyncio.create_task(hourly_voting_loop(application))
-
-def main() -> None:
+def main() -> None: 
     if not BOT_TOKEN: logger.critical("FATAL: BOT_TOKEN not found."); return
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     handlers = [
