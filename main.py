@@ -5,8 +5,9 @@ import json
 import random
 import yt_dlp
 import uuid
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Message
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Message, Poll
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
 from collections import deque
 
@@ -45,11 +46,10 @@ def load_config():
     config.setdefault('radio_playlist', [])
     config.setdefault('played_radio_urls', [])
     config.setdefault('radio_message_ids', [])
-    # Timing and limits configuration
     config.setdefault('voting_interval_seconds', 3600)
     config.setdefault('track_interval_seconds', 120)
     config.setdefault('message_cleanup_limit', 30)
-    config.setdefault('genre_poll_id', None) # Persist the poll ID
+    config.setdefault('active_poll', None) # Stores info about an ongoing poll
     
     return config
 
@@ -484,8 +484,34 @@ async def hourly_voting_loop(application: Application):
 
         await _create_and_send_poll(application)
 
+async def hourly_voting_loop(application: Application):
+    """Initiates a genre poll periodically if the radio is on."""
+    logger.info("Hourly voting loop started.")
+    while True:
+        config = load_config()
+        interval = config.get('voting_interval_seconds', 3600)
+        
+        # Wait for the configured interval. Check every minute to see if it has changed.
+        for _ in range(int(interval / 60)):
+            await asyncio.sleep(60)
+            current_config = load_config()
+            if not current_config.get('is_on') or current_config.get('voting_interval_seconds', 3600) != interval:
+                break # Stop waiting if radio is turned off or interval changes
+
+        config = load_config() # Reload config in case it changed
+        if not config.get('is_on'):
+            logger.info("[Voting] Radio is off, skipping poll.")
+            continue
+
+        if config.get('active_poll'):
+            logger.info("[Voting] Hourly poll skipped: a poll is already active.")
+            continue
+
+        await _create_and_send_poll(application)
+
+
 async def _create_and_send_poll(application: Application) -> bool:
-    """Generates options and sends the genre poll."""
+    """Generates options, sends the genre poll, and schedules its closing."""
     logger.info("[Voting] Starting genre poll.")
     config = load_config()
     try:
@@ -519,22 +545,27 @@ async def _create_and_send_poll(application: Application) -> bool:
         random.shuffle(options)
         
         question = "Выбираем жанр на следующий час!"
+        poll_duration = 60 # seconds
 
         message = await application.bot.send_poll(
             chat_id=RADIO_CHAT_ID,
             question=question,
             options=options[:10],
             is_anonymous=False,
-            open_period=60,
+            open_period=poll_duration,
         )
         
-        # Persist the poll ID to be resilient against restarts
-        poll_id = message.poll.id
-        application.bot_data['genre_poll_id'] = poll_id
-        config['genre_poll_id'] = poll_id
+        # Persist poll info to be resilient against restarts
+        config['active_poll'] = {
+            'poll_id': message.poll.id,
+            'message_id': message.message_id,
+            'close_date': datetime.now().timestamp() + poll_duration
+        }
         save_config(config)
+        logger.info(f"[Voting] Poll {message.poll.id} sent. Scheduled to close in {poll_duration}s.")
 
-        logger.info(f"[Voting] Poll {poll_id} sent to chat {RADIO_CHAT_ID} and persisted.")
+        # Schedule the task to close the poll and process results
+        asyncio.create_task(schedule_poll_processing(application, message.message_id, poll_duration))
         return True
 
     except Exception as e:
@@ -542,80 +573,224 @@ async def _create_and_send_poll(application: Application) -> bool:
         return False
 
 
-async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the result of the hourly genre poll."""
-    poll = update.poll
-    # Enhanced logging to debug the issue
-    logger.info(f"Received poll update. Poll object: {poll.to_dict()}")
+async def schedule_poll_processing(application: Application, message_id: int, delay: int):
+    """Waits for the poll duration, then stops it and processes the result."""
+    logger.info(f"[Voting Processor] Task scheduled to process poll in {delay} seconds.")
+    await asyncio.sleep(delay)
 
-    # We only want to process the results when the poll is officially closed by Telegram
-    if not poll.is_closed:
-        return
+    logger.info(f"[Voting Processor] Time is up. Stopping poll and processing results.")
+    try:
+        # It might have been processed already if the bot restarted right at the deadline
+        config = load_config()
+        if not config.get('active_poll') or config['active_poll']['message_id'] != message_id:
+            logger.info(f"[Voting Processor] Poll {message_id} seems to have been processed already. Skipping.")
+            return
 
-    # Check if this is the poll we are waiting for
-    if context.bot_data.get('genre_poll_id') != poll.id:
-        logger.info(f"Poll {poll.id} is not the one we are tracking. Ignoring.")
-        return
+        poll = await application.bot.stop_poll(chat_id=RADIO_CHAT_ID, message_id=message_id)
+        await process_poll_results(poll, application)
+    except Exception as e:
+        logger.error(f"[Voting Processor] Could not stop or process poll {message_id}: {e}", exc_info=True)
+        # Clean up the poll from config if it fails
+        config = load_config()
+        if config.get('active_poll') and config['active_poll']['message_id'] == message_id:
+            config['active_poll'] = None
+            save_config(config)
 
-    # Clean up poll id immediately
-    context.bot_data['genre_poll_id'] = None
-    config['genre_poll_id'] = None
-    # We don't save the config yet, it will be saved after the winner is processed
 
-    # Check if radio is still on
+async def process_poll_results(poll: Poll, application: Application):
+    """Handles the logic of counting votes and setting the new genre."""
+    logger.info(f"[Voting Processor] Processing results for poll {poll.id}")
     config = load_config()
+
+    # Ensure this poll is the one we think is active
+    active_poll_info = config.get('active_poll')
+    if not active_poll_info or active_poll_info['poll_id'] != poll.id:
+        logger.warning(f"[Voting Processor] Processed a poll ({poll.id}) that was not marked as active. Ignoring.")
+        return
+
+    # Clean up poll from config
+    config['active_poll'] = None
+
     if not config.get('is_on'):
-        logger.info("[Voting] Radio was turned off during the poll. Ignoring results.")
-        # No need to announce cancellation if the poll just silently ended
+        logger.info("[Voting Processor] Radio was turned off during the poll. Ignoring results.")
+        save_config(config) # Save the cleaned-up poll info
         return
 
     winning_options = []
     max_votes = 0
-    total_votes = 0
 
     for option in poll.options:
-        total_votes += option.voter_count
         if option.voter_count > max_votes:
             max_votes = option.voter_count
-            winning_options = [option.text] # New winner, reset list
+            winning_options = [option.text]
         elif option.voter_count == max_votes and max_votes > 0:
-            winning_options.append(option.text) # Tie, add to list
+            winning_options.append(option.text)
 
-    # Decide the final winner
-    if not winning_options: # This means total_votes == 0
-        final_winner = "Pop" # Default to Pop if no one voted
-        logger.info("[Voting] No votes received. Defaulting to Pop.")
+    if not winning_options:
+        final_winner = "Pop"
+        logger.info("[Voting Processor] No votes received. Defaulting to Pop.")
     elif len(winning_options) == 1:
         final_winner = winning_options[0]
-        logger.info(f"[Voting] Winning genre is '{final_winner}' with {max_votes} vote(s).")
-    else: # Handle tie
+        logger.info(f"[Voting Processor] Winning genre is '{final_winner}' with {max_votes} vote(s).")
+    else:
         final_winner = random.choice(winning_options)
-        logger.info(f"[Voting] Tie between {winning_options} with {max_votes} votes. Randomly selected: '{final_winner}'.")
+        logger.info(f"[Voting Processor] Tie between {winning_options}. Randomly selected: '{final_winner}'.")
 
-    # Update config
     config['genre'] = final_winner
-    # Clear the playlist so the new genre takes effect immediately
     config['radio_playlist'] = []
-    context.bot_data['radio_playlist'] = deque()
+    application.bot_data['radio_playlist'] = deque()
     save_config(config)
     
-    await context.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Следующий час играет: **{final_winner}**", parse_mode='Markdown')
+    await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Следующий час играет: **{final_winner}**", parse_mode='Markdown')
+
 
 # --- Application Setup ---
 async def post_init(application: Application) -> None:
     """This function is called after initialization but before polling starts."""
-    # Load persisted state from config
     config = load_config()
     application.bot_data['radio_playlist'] = deque(config.get('radio_playlist', []))
     application.bot_data['played_radio_urls'] = config.get('played_radio_urls', [])
     application.bot_data['radio_message_ids'] = deque(config.get('radio_message_ids', []))
-    application.bot_data['genre_poll_id'] = config.get('genre_poll_id', None)
+    
+    # On startup, check if a poll was active and needs to be processed
+    active_poll = config.get('active_poll')
+    if active_poll and active_poll.get('close_date'):
+        now = datetime.now().timestamp()
+        remaining_time = active_poll['close_date'] - now
+        logger.info(f"[Init] Found an active poll {active_poll['poll_id']}. Remaining time: {remaining_time:.2f}s")
+        if remaining_time > 0:
+            asyncio.create_task(schedule_poll_processing(application, active_poll['message_id'], remaining_time))
+        else:
+            # If time is already up, try to process it immediately
+            logger.info("[Init] Poll time is already up. Processing immediately.")
+            asyncio.create_task(schedule_poll_processing(application, active_poll['message_id'], 0))
 
-    logger.info(f"Loaded {len(application.bot_data['radio_playlist'])} tracks into playlist.")
-    logger.info(f"Loaded {len(application.bot_data['played_radio_urls'])} played URLs.")
-    logger.info(f"Loaded {len(application.bot_data['radio_message_ids'])} message IDs.")
-    if application.bot_data['genre_poll_id']:
-        logger.info(f"Loaded active poll ID: {application.bot_data['genre_poll_id']}")
+    await application.bot.set_my_commands([
+        BotCommand("play", "Найти и скачать трек"),
+        BotCommand("p", "Сокращение для /play"),
+        BotCommand("ron", "Включить радио (только админ)"),
+        BotCommand("rof", "Выключить радио (только админ)"),
+        BotCommand("votestart", "Запустить голосование за жанр (админ)"),
+        BotCommand("id", "Показать ID чата"),
+        BotCommand("help", "Помощь по командам"),
+        BotCommand("h", "Сокращение для /help"),
+    ])
+    asyncio.create_task(radio_loop(application))
+    asyncio.create_task(hourly_voting_loop(application))
+
+
+# --- Main Application Logic (Polling) ---
+def main() -> None:
+    """Runs the bot in polling mode."""
+    if not BOT_TOKEN:
+        logger.critical("FATAL: BOT_TOKEN not found.")
+        return
+
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler(["help", "h"], help_command))
+    application.add_handler(CommandHandler("id", id_command))
+    application.add_handler(CommandHandler(["play", "p"], play_command))
+    application.add_handler(CommandHandler(["radio_on", "ron"], radio_on_command))
+    application.add_handler(CommandHandler(["radio_off", "rof"], radio_off_command))
+    application.add_handler(CommandHandler("votestart", start_vote_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    logger.info("Starting bot in polling mode...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    ensure_download_dir()
+    main()
+
+
+async def schedule_poll_processing(application: Application, message_id: int, delay: int):
+    """Waits for the poll duration, then stops it and processes the result."""
+    logger.info(f"[Voting Processor] Task scheduled to process poll in {delay} seconds.")
+    await asyncio.sleep(delay)
+
+    logger.info(f"[Voting Processor] Time is up. Stopping poll and processing results.")
+    try:
+        poll = await application.bot.stop_poll(chat_id=RADIO_CHAT_ID, message_id=message_id)
+        await process_poll_results(poll, application)
+    except Exception as e:
+        logger.error(f"[Voting Processor] Could not stop or process poll {message_id}: {e}", exc_info=True)
+        # Clean up the poll from config if it fails
+        config = load_config()
+        if config.get('active_poll') and config['active_poll']['message_id'] == message_id:
+            config['active_poll'] = None
+            save_config(config)
+
+async def process_poll_results(poll: Poll, application: Application):
+    """Handles the logic of counting votes and setting the new genre."""
+    logger.info(f"[Voting Processor] Processing results for poll {poll.id}")
+    config = load_config()
+
+    # Ensure this poll is the one we think is active
+    active_poll_info = config.get('active_poll')
+    if not active_poll_info or active_poll_info['poll_id'] != poll.id:
+        logger.warning(f"[Voting Processor] Processed a poll ({poll.id}) that was not marked as active. Ignoring.")
+        return
+
+    # Clean up poll from config
+    config['active_poll'] = None
+
+    if not config.get('is_on'):
+        logger.info("[Voting Processor] Radio was turned off during the poll. Ignoring results.")
+        save_config(config) # Save the cleaned-up poll info
+        return
+
+    winning_options = []
+    max_votes = 0
+
+    for option in poll.options:
+        if option.voter_count > max_votes:
+            max_votes = option.voter_count
+            winning_options = [option.text]
+        elif option.voter_count == max_votes and max_votes > 0:
+            winning_options.append(option.text)
+
+    if not winning_options:
+        final_winner = "Pop"
+        logger.info("[Voting Processor] No votes received. Defaulting to Pop.")
+    elif len(winning_options) == 1:
+        final_winner = winning_options[0]
+        logger.info(f"[Voting Processor] Winning genre is '{final_winner}' with {max_votes} vote(s).")
+    else:
+        final_winner = random.choice(winning_options)
+        logger.info(f"[Voting Processor] Tie between {winning_options}. Randomly selected: '{final_winner}'.")
+
+    config['genre'] = final_winner
+    config['radio_playlist'] = []
+    application.bot_data['radio_playlist'] = deque()
+    save_config(config)
+    
+    await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Следующий час играет: **{final_winner}**", parse_mode='Markdown')
+
+
+# --- Application Setup ---
+async def post_init(application: Application) -> None:
+    """This function is called after initialization but before polling starts."""
+    config = load_config()
+    application.bot_data['radio_playlist'] = deque(config.get('radio_playlist', []))
+    application.bot_data['played_radio_urls'] = config.get('played_radio_urls', [])
+    application.bot_data['radio_message_ids'] = deque(config.get('radio_message_ids', []))
+    
+    # On startup, check if a poll was active and needs to be processed
+    active_poll = config.get('active_poll')
+    if active_poll and active_poll.get('close_date'):
+        now = datetime.now().timestamp()
+        remaining_time = active_poll['close_date'] - now
+        logger.info(f"[Init] Found an active poll {active_poll['poll_id']}. Remaining time: {remaining_time:.2f}s")
+        if remaining_time > 0:
+            asyncio.create_task(schedule_poll_processing(application, active_poll['message_id'], remaining_time))
+        else:
+            # If time is already up, try to process it immediately
+            logger.info("[Init] Poll time is already up. Processing immediately.")
+            asyncio.create_task(schedule_poll_processing(application, active_poll['message_id'], 0))
 
     await application.bot.set_my_commands([
         BotCommand("play", "Найти и скачать трек"),
@@ -637,6 +812,9 @@ def main() -> None:
         logger.critical("FATAL: BOT_TOKEN not found.")
         return
 
+    # Add this import at the top of the file
+    from datetime import datetime
+
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Add handlers
@@ -648,7 +826,8 @@ def main() -> None:
     application.add_handler(CommandHandler(["radio_off", "rof"], radio_off_command))
     application.add_handler(CommandHandler("votestart", start_vote_command))
     application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(PollHandler(receive_poll_update))
+    # The PollHandler is no longer needed for this logic
+    # application.add_handler(PollHandler(receive_poll_update))
 
     logger.info("Starting bot in polling mode...")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
