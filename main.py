@@ -207,6 +207,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = int(page_num_str)
         reply_markup = await get_paginated_keyboard(search_id, context, page)
         await query.edit_message_text('Выберите трек:', reply_markup=reply_markup)
+    
+    elif command == "status_refresh":
+        await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global radio_task, voting_task
@@ -227,6 +230,8 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         voting_task = asyncio.create_task(hourly_voting_loop(context.application))
     
     await update.message.reply_text(f"Радио включено. Жанр: {genre}.")
+    # Immediately start filling the playlist in the background
+    asyncio.create_task(refill_playlist(context.application))
 
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global radio_task, voting_task
@@ -252,6 +257,43 @@ async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Голосование запущено.")
     else:
         await update.message.reply_text("Ошибка запуска голосования.")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the radio status panel."""
+    if update.effective_user.id != ADMIN_ID: return
+    await send_status_panel(context.application, update.message.chat_id)
+
+# --- UI Panel Logic ---
+async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
+    """Sends or updates the radio control panel."""
+    config = load_config()
+    status = "🟢 ВКЛ" if config.get('is_on') else "🔴 ВЫКЛ"
+    genre = config.get('genre', '-')
+
+    text = (
+        f"**Панель Управления Радио**\n\n"
+        f"**Статус:** {status}\n"
+        f"**Жанр:** `{genre}`"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🔄 Обновить", callback_data="status_refresh")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        if message_id:
+            await application.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text, 
+                reply_markup=reply_markup, parse_mode='Markdown'
+            )
+        else:
+            await application.bot.send_message(
+                chat_id=chat_id, text=text, 
+                reply_markup=reply_markup, parse_mode='Markdown'
+            )
+    except Exception as e:
+        print(f"Error sending status panel: {e}")
 
 # --- Music & Radio Logic ---
 async def download_track(url: str):
@@ -519,6 +561,7 @@ def main() -> None:
         CommandHandler(["ron"], radio_on_command),
         CommandHandler(["rof"], radio_off_command),
         CommandHandler("votestart", start_vote_command),
+        CommandHandler("status", status_command),
         CallbackQueryHandler(button_callback),
         PollHandler(receive_poll_update)
     ]
