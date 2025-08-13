@@ -35,10 +35,26 @@ def format_duration(seconds):
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {"is_on": False, "genre": "lo-fi hip hop"}
+            config = json.load(f)
+            # Ensure all keys are present
+            config.setdefault('is_on', False)
+            config.setdefault('genre', 'lo-fi hip hop')
+            config.setdefault('radio_playlist', [])
+            config.setdefault('played_radio_urls', [])
+            config.setdefault('radio_message_ids', [])
+            return config
+    return {
+        "is_on": False, 
+        "genre": "lo-fi hip hop",
+        "radio_playlist": [],
+        "played_radio_urls": [],
+        "radio_message_ids": []
+    }
 
 def save_config(config):
+    # When saving, convert deque to list for JSON serialization
+    if isinstance(config.get('radio_message_ids'), deque):
+        config['radio_message_ids'] = list(config['radio_message_ids'])
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -216,9 +232,15 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config['is_on'] = True
     config['genre'] = genre
+    # Clear old playlist data for the new genre
+    config['radio_playlist'] = []
+    config['played_radio_urls'] = []
+    context.bot_data['radio_playlist'] = deque()
+    context.bot_data['played_radio_urls'] = []
+    
     save_config(config)
-    await update.message.reply_text(f"Режим радио ВКЛ. Жанр: {genre}.\n\nГотовлю первый трек, это может занять до минуты...")
-    logger.info(f"Radio mode turned ON by admin {user_id} with genre '{genre}'")
+    await update.message.reply_text(f"Режим радио ВКЛ. Жанр: {genre}.\n\nГотовлю плейлист, это может занять до минуты...")
+    logger.info(f"Radio mode turned ON by admin {user_id} with genre '{genre}'. Playlist cleared.")
 
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -235,7 +257,60 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Radio mode turned OFF by admin {user_id}")
 
 # --- Music Handling ---
-async def download_track(url: str = None, query: str = None, bot_data: dict = None):
+async def _refill_radio_playlist(config: dict, bot_data: dict) -> bool:
+    """Searches for new tracks and refills the radio playlist."""
+    logger.info("[Radio] Playlist is empty. Refilling...")
+    genre_query = config.get('genre', 'lo-fi hip hop')
+    played_urls = set(bot_data.get('played_radio_urls', []))
+    new_playlist = []
+
+    ydl_opts = {
+        'format': 'bestaudio',
+        'noplaylist': True,
+        'quiet': True,
+        'extract_flat': 'in_playlist',
+        'default_search': 'scsearch50', # Search for 50 tracks
+    }
+
+    # Diversify search to get varied results
+    search_suffixes = ["beats", "mix", "instrumental", "chill", "study", "hip hop", "music", "session", "vibes", "radio", "live", "remix"]
+    diversified_query = f"{genre_query} {random.choice(search_suffixes)}"
+    logger.info(f"[Radio] Searching for new tracks with query: '{diversified_query}'")
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            search_result = ydl.extract_info(diversified_query, download=False)
+
+        if not search_result or not search_result.get('entries'):
+            logger.warning(f"[Radio] Search for '{diversified_query}' yielded no results.")
+            return False
+
+        # Filter tracks by duration and whether they have been played recently
+        for track in search_result['entries']:
+            if not (track and track.get('url')):
+                continue
+            
+            duration = track.get('duration')
+            url = track.get('url')
+
+            if url not in played_urls and duration and 60 < duration < 900:
+                new_playlist.append(url)
+        
+        if not new_playlist:
+            logger.warning("[Radio] No new, suitable tracks found from the search.")
+            return False
+
+        random.shuffle(new_playlist) # Shuffle to make the playlist less predictable
+        bot_data['radio_playlist'].extend(new_playlist)
+        config['radio_playlist'] = list(bot_data['radio_playlist']) # Update config for saving
+        logger.info(f"[Radio] Refilled playlist with {len(new_playlist)} new tracks.")
+        return True
+
+    except Exception as e:
+        logger.error(f"[Radio] Failed to refill playlist: {e}", exc_info=True)
+        return False
+
+async def download_track(url: str, bot_data: dict = None):
     ensure_download_dir()
     unique_id = uuid.uuid4()
     out_template = os.path.join(DOWNLOAD_DIR, f'{unique_id}.%(ext)s')
@@ -248,83 +323,21 @@ async def download_track(url: str = None, query: str = None, bot_data: dict = No
         'quiet': True,
     }
     
-    search_query = url if url else query
-    if not search_query:
+    if not url:
         return None
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # If it's a search query (from radio), we apply advanced filtering and playlist logic
-            if query:
-                # --- Radio Playlist Logic ---
-                if bot_data and 'played_radio_urls' in bot_data:
-                    if len(bot_data['played_radio_urls']) >= 30:
-                        logger.info("[Radio] Played 30 tracks, clearing session playlist.")
-                        bot_data['played_radio_urls'].clear()
-                elif bot_data and 'played_radio_urls' not in bot_data:
-                    bot_data['played_radio_urls'] = []
-
-
-                # --- Search Diversification & Uniqueness Check ---
-                for attempt in range(10): # Max 10 attempts to find a new track
-                    search_suffixes = [
-                        "beats", "mix", "instrumental", "chill", "study", "hip hop", 
-                        "music", "session", "vibes", "radio", "live", "remix"
-                    ]
-                    diversified_query = f"{query} {random.choice(search_suffixes)}"
-                    logger.info(f"[Radio Attempt {attempt+1}/10] Diversified search: '{diversified_query}'")
-
-                    search_result_opts = ydl_opts.copy()
-                    search_result_opts.pop('postprocessors', None)
-                    search_result_opts['extract_flat'] = 'in_playlist'
-                    search_result_opts['default_search'] = 'scsearch100'
-
-                    with yt_dlp.YoutubeDL(search_result_opts) as ydl_search:
-                        search_result = ydl_search.extract_info(diversified_query.replace("scsearch1:", ""), download=False)
-                    
-                    if not search_result or not search_result.get('entries'):
-                        logger.warning(f"Radio search for '{diversified_query}' yielded no results.")
-                        continue # Try again with a different suffix
-
-                    suitable_tracks = [t for t in search_result['entries'] if t.get('duration') and 60 < t['duration'] < 900]
-
-                    if not suitable_tracks:
-                        logger.warning(f"No suitable tracks found for '{diversified_query}' in the 1-15 minute range.")
-                        continue # Try again
-
-                    # Find an unplayed track from the suitable tracks
-                    # random.shuffle(suitable_tracks) # Shuffle to not always pick the top ones
-                    
-                    for track_to_download in suitable_tracks:
-                        track_url = track_to_download['url']
-                        
-                        # Check if track has been played (only if bot_data is available for radio mode)
-                        if bot_data and track_url in bot_data.get('played_radio_urls', []):
-                            logger.info(f"Track '{track_to_download['title']}' already played. Trying another from the same search results.")
-                            continue # Try next track in suitable_tracks
-                        
-                        # Found a new track
-                        if bot_data:
-                            bot_data['played_radio_urls'].append(track_url)
-                            logger.info(f"Found new track: {track_to_download['title']}. Playlist size: {len(bot_data['played_radio_urls'])}")
-                        
-                        info = ydl.extract_info(track_url, download=True)
-                        filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
-                        return {"filepath": filename, "title": info.get('title', 'Unknown Title'), "duration": info.get('duration', 0)}
-
-                logger.warning("[Radio] Could not find a new, unplayed track after 10 attempts with multiple searches.")
-                return None
-
-            else: # If it's a direct URL from /play command
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
-                return {
-                    "filepath": filename,
-                    "title": info.get('title', 'Unknown Title'),
-                    "duration": info.get('duration', 0)
-                }
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+            return {
+                "filepath": filename,
+                "title": info.get('title', 'Unknown Title'),
+                "duration": info.get('duration', 0),
+                "url": url # Return the original URL
+            }
     except Exception as e:
-        logger.error(f"Failed to download track {search_query}: {e}", exc_info=True)
+        logger.error(f"Failed to download track {url}: {e}", exc_info=True)
         return None
 
 async def send_track(track_info: dict, chat_id: int, bot) -> Message | None:
@@ -344,6 +357,7 @@ async def send_track(track_info: dict, chat_id: int, bot) -> Message | None:
 async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
     """Deletes the 10 oldest track messages from the chat."""
     logger.info(f"Track limit reached. Clearing 10 oldest tracks.")
+    config = load_config()
     for _ in range(10):
         if context.bot_data['radio_message_ids']:
             chat_id, message_id = context.bot_data['radio_message_ids'].popleft()
@@ -353,36 +367,64 @@ async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(1) # Avoid hitting rate limits
             except Exception as e:
                 logger.error(f"Failed to delete message {message_id}: {e}")
+    # Persist the changes to the message queue
+    config['radio_message_ids'] = list(context.bot_data['radio_message_ids'])
+    save_config(config)
 
 async def radio_loop(application: Application):
     logger.info("Radio loop started.")
+    bot_data = application.bot_data
+
     while True:
         await asyncio.sleep(5) # Check every 5 seconds
         config = load_config()
         
         if not config.get('is_on'):
-            await asyncio.sleep(15) # Sleep longer when inactive
+            await asyncio.sleep(15)
             continue
 
         try:
-            logger.info("[Radio] Searching for a track...")
-            genre_query = f"{config['genre']}"
-            track_info = await download_track(query=genre_query, bot_data=application.bot_data)
+            # Refill playlist if it's empty
+            if not bot_data.get('radio_playlist'):
+                refill_successful = await _refill_radio_playlist(config, bot_data)
+                if not refill_successful:
+                    logger.warning("[Radio] Failed to refill playlist. Retrying in 60s.")
+                    await asyncio.sleep(60)
+                    continue
+                save_config(config) # Save the newly filled playlist
+
+            # Get next track from the playlist
+            track_url = bot_data['radio_playlist'].popleft()
+            logger.info(f"[Radio] Processing next track from playlist: {track_url}")
+
+            track_info = await download_track(url=track_url, bot_data=bot_data)
 
             if not track_info:
-                logger.warning("[Radio] Could not fetch a track. Retrying in 60s.")
-                await asyncio.sleep(60)
+                logger.warning(f"[Radio] Could not download track URL: {track_url}. Skipping.")
+                # Persist the state change immediately
+                config['radio_playlist'] = list(bot_data['radio_playlist'])
+                save_config(config)
                 continue
             
             logger.info(f"[Radio] Sending track: {track_info['title']}")
             sent_message = await send_track(track_info, RADIO_CHAT_ID, application.bot)
             
             if sent_message:
-                application.bot_data['radio_message_ids'].append((sent_message.chat_id, sent_message.message_id))
-                logger.info(f"Radio messages in queue: {len(application.bot_data['radio_message_ids'])}")
-                
-                if len(application.bot_data['radio_message_ids']) >= 30:
+                # Manage played tracks history (session)
+                bot_data['played_radio_urls'].append(track_info['url'])
+                if len(bot_data['played_radio_urls']) > 50: # Keep history of last 50
+                    bot_data['played_radio_urls'].pop(0)
+
+                # Manage message queue for deletion
+                bot_data['radio_message_ids'].append((sent_message.chat_id, sent_message.message_id))
+                if len(bot_data['radio_message_ids']) >= 30:
                     await clear_old_tracks(application)
+
+                # Persist state after sending a track
+                config['radio_playlist'] = list(bot_data['radio_playlist'])
+                config['played_radio_urls'] = bot_data['played_radio_urls']
+                config['radio_message_ids'] = list(bot_data['radio_message_ids'])
+                save_config(config)
 
             # Wait for 2 minutes before the next track
             logger.info("[Radio] Waiting for 120 seconds...")
@@ -390,7 +432,7 @@ async def radio_loop(application: Application):
 
         except Exception as e:
             logger.error(f"Error in radio loop: {e}", exc_info=True)
-            await asyncio.sleep(30) # Wait before retrying after an error
+            await asyncio.sleep(30)
         finally:
             if 'track_info' in locals() and track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
@@ -469,6 +511,16 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"Poll {poll.id} is not the one we are tracking. Ignoring.")
         return
 
+    # Clean up poll id immediately
+    context.bot_data['genre_poll_id'] = None
+
+    # Check if radio is still on
+    config = load_config()
+    if not config.get('is_on'):
+        logger.info("[Voting] Radio was turned off during the poll. Ignoring results.")
+        await context.bot.send_message(RADIO_CHAT_ID, "Голосование отменено, так как радио было выключено.")
+        return
+
     winning_option = None
     max_votes = -1
     total_votes = 0
@@ -487,23 +539,28 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"[Voting] Winning genre is '{winning_option}' with {max_votes} vote(s).")
 
     # Update config
-    config = load_config()
     config['genre'] = winning_option
+    # Clear the playlist so the new genre takes effect immediately
+    config['radio_playlist'] = []
+    context.bot_data['radio_playlist'] = deque()
     save_config(config)
     
     await context.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Следующий час играет: **{winning_option}**", parse_mode='Markdown')
 
-    # Clean up poll id
-    context.bot_data['genre_poll_id'] = None
-
 # --- Application Setup ---
 async def post_init(application: Application) -> None:
     """This function is called after initialization but before polling starts."""
-    # Initialize data structures for radio state
-    application.bot_data['played_radio_urls'] = []
-    application.bot_data['radio_message_ids'] = deque()
-    application.bot_data['genre_poll_id'] = None
-    
+    # Load persisted state from config
+    config = load_config()
+    application.bot_data['radio_playlist'] = deque(config.get('radio_playlist', []))
+    application.bot_data['played_radio_urls'] = config.get('played_radio_urls', [])
+    application.bot_data['radio_message_ids'] = deque(config.get('radio_message_ids', []))
+    application.bot_data['genre_poll_id'] = None # This should not be persisted
+
+    logger.info(f"Loaded {len(application.bot_data['radio_playlist'])} tracks into playlist.")
+    logger.info(f"Loaded {len(application.bot_data['played_radio_urls'])} played URLs.")
+    logger.info(f"Loaded {len(application.bot_data['radio_message_ids'])} message IDs.")
+
     await application.bot.set_my_commands([
         BotCommand("play", "Найти и скачать трек"),
         BotCommand("p", "Сокращение для /play"),
@@ -534,50 +591,6 @@ def main() -> None:
     application.add_handler(CommandHandler(["radio_off", "rof"], radio_off_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(PollHandler(receive_poll_update))
-
-    logger.info("Starting bot in polling mode...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-if __name__ == "__main__":
-    ensure_download_dir()
-    main()
-
-
-# --- Application Setup ---
-async def post_init(application: Application) -> None:
-    """This function is called after initialization but before polling starts."""
-    # Initialize data structures for radio state
-    application.bot_data['played_radio_urls'] = []
-    application.bot_data['radio_message_ids'] = deque()
-    
-    await application.bot.set_my_commands([
-        BotCommand("play", "Найти и скачать трек"),
-        BotCommand("p", "Сокращение для /play"),
-        BotCommand("ron", "Включить радио (только админ)"),
-        BotCommand("rof", "Выключить радио (только админ)"),
-        BotCommand("id", "Показать ID чата"),
-        BotCommand("help", "Помощь по командам"),
-        BotCommand("h", "Сокращение для /help"),
-    ])
-    asyncio.create_task(radio_loop(application))
-
-# --- Main Application Logic (Polling) ---
-def main() -> None:
-    """Runs the bot in polling mode."""
-    if not BOT_TOKEN:
-        logger.critical("FATAL: BOT_TOKEN not found.")
-        return
-
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler(["help", "h"], help_command))
-    application.add_handler(CommandHandler("id", id_command))
-    application.add_handler(CommandHandler(["play", "p"], play_command))
-    application.add_handler(CommandHandler(["radio_on", "ron"], radio_on_command))
-    application.add_handler(CommandHandler(["radio_off", "rof"], radio_off_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Starting bot in polling mode...")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
