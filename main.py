@@ -116,7 +116,7 @@ def ensure_download_dir():
 
 # --- Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я музыкальный бот. 🎵\nИспользуй /play для поиска или /ron для радио.")
+    await update.message.reply_text("**ТЕСТОВАЯ ВЕРСИЯ v2.0**\n\nБот был обновлен. Проверяем запуск.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
