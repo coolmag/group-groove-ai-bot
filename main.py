@@ -13,6 +13,13 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from dotenv import load_dotenv
 from collections import deque
 
+# --- Setup ---
+load_dotenv()
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # --- Global Task References ---
 radio_task = None
 voting_task = None
@@ -22,7 +29,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
 CONFIG_FILE = "radio_config.json"
-DOWNLOAD_DIR = "downloads"
+downLOAD_DIR = "downloads"
+
+# --- Genre Definitions ---
+GENRE_KEYWORDS = {
+    "electronic": ["electronic", "synth", "synthwave", "synth pop", "new wave", "edm", "house", "techno", "trance", "dance"],
+    "rock": ["rock", "punk", "hard rock", "metal", "grunge", "garage", "alternative"],
+    "pop": ["pop", "dance pop", "synthpop", "electropop"],
+    "hip": ["hip hop", "rap", "trap", "r&b", "hiphop"],
+    "jazz": ["jazz", "swing", "smooth jazz", "fusion"],
+    "blues": ["blues", "rhythm and blues", "r&b"],
+    "classical": ["classical", "orchestra", "symphony", "piano", "violin"],
+    "reggae": ["reggae", "ska", "dub"],
+    "country": ["country", "bluegrass", "folk"],
+    "metal": ["metal", "heavy metal", "death metal", "black metal", "thrash"],
+    "lo-fi": ["lo-fi", "lofi", "chillhop", "chill"],
+    "disco": ["disco", "funk", "boogie"],
+}
 
 # --- Helper Functions ---
 def format_duration(seconds):
@@ -33,14 +56,32 @@ def format_duration(seconds):
 def has_ukrainian_chars(text):
     return any(char in text for char in 'іІїЇєЄґҐ')
 
-def parse_genre_query(genre_string: str) -> str:
-    match = re.search(r'(70|80|90|2000|2010)-х$', genre_string)
-    if match:
-        decade_part = match.group(1)
-        core_genre = genre_string[:match.start()].strip()
-        modifier = f"{decade_part}s" if decade_part in ['70', '80', '90'] else decade_part
-        return f"{core_genre} {modifier}"
-    return genre_string
+def build_search_queries(genre_str):
+    decade_match = re.search(r'(70|80|90|2000|2010)-х$', genre_str)
+    if decade_match:
+        decade = decade_match.group(1)
+        core_genre = genre_str[:decade_match.start()].strip().lower()
+    else:
+        decade, core_genre = None, genre_str.lower()
+
+    base_keywords = GENRE_KEYWORDS.get(core_genre.split()[0], [core_genre])
+    queries = []
+    for kw in base_keywords:
+        if decade:
+            queries.append(f"{decade}s {kw} hits")
+            queries.append(f"{decade}s {kw} best")
+            queries.append(f"{decade}s {kw} playlist")
+        else:
+            queries.append(f"{kw} hits")
+            queries.append(f"{kw} best")
+            queries.append(f"{kw} playlist")
+    return queries
+
+def is_genre_match(track, genre_str):
+    core_genre = genre_str.split()[0].lower()
+    keywords = GENRE_KEYWORDS.get(core_genre, [core_genre])
+    text = (track.get('title', '') + ' ' + track.get('description', '')).lower()
+    return any(kw in text for kw in keywords)
 
 # --- Config & FS Management ---
 def load_config():
@@ -243,22 +284,59 @@ async def refill_playlist(application: Application):
     print("Refilling radio playlist...")
     config = load_config()
     raw_genre = config.get('genre', 'lo-fi hip hop')
-    search_query = parse_genre_query(raw_genre)
-    print(f"Original: '{raw_genre}', Parsed: '{search_query}'")
-    ydl_opts = {'format': 'bestaudio', 'noplaylist': True, 'quiet': True, 'default_search': 'scsearch50', 'extract_flat': 'in_playlist'}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_query, download=False)
-        if info and info.get('entries'):
-            played = set(bot_data.get('played_radio_urls', []))
-            suitable = [t['url'] for t in info['entries'] if t and 60 < t.get('duration', 0) < 900 and t.get('url') not in played and not has_ukrainian_chars(t.get('title', ''))]
-            random.shuffle(suitable)
-            bot_data['radio_playlist'] = deque(suitable)
-            config['radio_playlist'] = list(suitable)
-            save_config(config)
-            print(f"Playlist refilled with {len(suitable)} tracks.")
-    except Exception as e:
-        print(f"Playlist refill error: {e}")
+    search_queries = build_search_queries(raw_genre)
+    played = set(bot_data.get('played_radio_urls', []))
+    suitable_tracks = []
+
+    for query in search_queries:
+        print(f"Searching: {query}")
+        ydl_opts = {
+            'format': 'bestaudio',
+            'noplaylist': True,
+            'quiet': True,
+            'default_search': 'scsearch50',
+            'extract_flat': 'in_playlist'
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(query, download=False)
+            if not info or not info.get('entries'):
+                continue
+
+            for t in info['entries']:
+                if not t:
+                    continue
+                if not (60 < t.get('duration', 0) < 900):
+                    continue
+                if t.get('url') in played:
+                    continue
+                if has_ukrainian_chars(t.get('title', '')):
+                    continue
+                if not is_genre_match(t, raw_genre):
+                    continue
+                suitable_tracks.append(t)
+        except Exception as e:
+            print(f"Search error for '{query}': {e}")
+
+    unique_tracks = {}
+    for t in suitable_tracks:
+        if t['url'] not in unique_tracks:
+            unique_tracks[t['url']]=t
+    suitable_tracks = list(unique_tracks.values())
+
+    suitable_tracks.sort(
+        key=lambda tr: (tr.get('play_count', 0) or 0) + (tr.get('like_count', 0) or 0),
+        reverse=True
+    )
+
+    final_urls = [t['url'] for t in suitable_tracks[:50]]
+    random.shuffle(final_urls)
+
+    bot_data['radio_playlist'] = deque(final_urls)
+    config['radio_playlist'] = final_urls
+    save_config(config)
+
+    print(f"Playlist refilled with {len(final_urls)} tracks.")
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
@@ -267,7 +345,7 @@ async def radio_loop(application: Application):
             await asyncio.sleep(5)
             config = load_config()
             if not config.get('is_on'): 
-                await asyncio.sleep(30) # Sleep longer if radio is off
+                await asyncio.sleep(30)
                 continue
 
             if not bot_data.get('radio_playlist'):
