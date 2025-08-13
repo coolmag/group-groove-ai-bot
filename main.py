@@ -36,20 +36,21 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             config = json.load(f)
-            # Ensure all keys are present
-            config.setdefault('is_on', False)
-            config.setdefault('genre', 'lo-fi hip hop')
-            config.setdefault('radio_playlist', [])
-            config.setdefault('played_radio_urls', [])
-            config.setdefault('radio_message_ids', [])
-            return config
-    return {
-        "is_on": False, 
-        "genre": "lo-fi hip hop",
-        "radio_playlist": [],
-        "played_radio_urls": [],
-        "radio_message_ids": []
-    }
+    else:
+        config = {}
+
+    # Ensure all keys are present with defaults
+    config.setdefault('is_on', False)
+    config.setdefault('genre', 'lo-fi hip hop')
+    config.setdefault('radio_playlist', [])
+    config.setdefault('played_radio_urls', [])
+    config.setdefault('radio_message_ids', [])
+    # Timing and limits configuration
+    config.setdefault('voting_interval_seconds', 3600)
+    config.setdefault('track_interval_seconds', 120)
+    config.setdefault('message_cleanup_limit', 30)
+    
+    return config
 
 def save_config(config):
     # When saving, convert deque to list for JSON serialization
@@ -256,6 +257,26 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Режим радио ВЫКЛ.")
     logger.info(f"Radio mode turned OFF by admin {user_id}")
 
+async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually starts a genre vote poll."""
+    user_id = update.effective_user.id
+    logger.info(f"Received /votestart command from user {user_id}")
+    if user_id != ADMIN_ID:
+        logger.warning(f"Unauthorized /votestart attempt by user {user_id}")
+        await update.message.reply_text("Вы не авторизованы.")
+        return
+
+    config = load_config()
+    if not config.get('is_on'):
+        await update.message.reply_text("Нельзя начать голосование, когда радио выключено.")
+        return
+
+    success = await _create_and_send_poll(context.application)
+    if success:
+        await update.message.reply_text("Голосование за жанр запущено.")
+    else:
+        await update.message.reply_text("Не удалось запустить голосование. Проверьте логи.")
+
 # --- Music Handling ---
 async def _refill_radio_playlist(config: dict, bot_data: dict) -> bool:
     """Searches for new tracks and refills the radio playlist."""
@@ -272,17 +293,16 @@ async def _refill_radio_playlist(config: dict, bot_data: dict) -> bool:
         'default_search': 'scsearch50', # Search for 50 tracks
     }
 
-    # Diversify search to get varied results
-    search_suffixes = ["beats", "mix", "instrumental", "chill", "study", "hip hop", "music", "session", "vibes", "radio", "live", "remix"]
-    diversified_query = f"{genre_query} {random.choice(search_suffixes)}"
-    logger.info(f"[Radio] Searching for new tracks with query: '{diversified_query}'")
+    # Use a clean, direct query for the best results.
+    direct_query = f"{genre_query}"
+    logger.info(f"[Radio] Searching for new tracks with query: '{direct_query}'")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            search_result = ydl.extract_info(diversified_query, download=False)
+            search_result = ydl.extract_info(direct_query, download=False)
 
         if not search_result or not search_result.get('entries'):
-            logger.warning(f"[Radio] Search for '{diversified_query}' yielded no results.")
+            logger.warning(f"[Radio] Search for '{direct_query}' yielded no results.")
             return False
 
         # Filter tracks by duration and whether they have been played recently
@@ -300,7 +320,8 @@ async def _refill_radio_playlist(config: dict, bot_data: dict) -> bool:
             logger.warning("[Radio] No new, suitable tracks found from the search.")
             return False
 
-        random.shuffle(new_playlist) # Shuffle to make the playlist less predictable
+        # Do not shuffle the playlist. Play tracks in order of popularity from SoundCloud.
+        # random.shuffle(new_playlist)
         bot_data['radio_playlist'].extend(new_playlist)
         config['radio_playlist'] = list(bot_data['radio_playlist']) # Update config for saving
         logger.info(f"[Radio] Refilled playlist with {len(new_playlist)} new tracks.")
@@ -383,6 +404,9 @@ async def radio_loop(application: Application):
             await asyncio.sleep(15)
             continue
 
+        track_interval = config.get('track_interval_seconds', 120)
+        cleanup_limit = config.get('message_cleanup_limit', 30)
+
         try:
             # Refill playlist if it's empty
             if not bot_data.get('radio_playlist'):
@@ -417,7 +441,7 @@ async def radio_loop(application: Application):
 
                 # Manage message queue for deletion
                 bot_data['radio_message_ids'].append((sent_message.chat_id, sent_message.message_id))
-                if len(bot_data['radio_message_ids']) >= 30:
+                if len(bot_data['radio_message_ids']) >= cleanup_limit:
                     await clear_old_tracks(application)
 
                 # Persist state after sending a track
@@ -426,9 +450,9 @@ async def radio_loop(application: Application):
                 config['radio_message_ids'] = list(bot_data['radio_message_ids'])
                 save_config(config)
 
-            # Wait for 2 minutes before the next track
-            logger.info("[Radio] Waiting for 120 seconds...")
-            await asyncio.sleep(120)
+            # Wait for the configured interval before the next track
+            logger.info(f"[Radio] Waiting for {track_interval} seconds...")
+            await asyncio.sleep(track_interval)
 
         except Exception as e:
             logger.error(f"Error in radio loop: {e}", exc_info=True)
@@ -438,68 +462,79 @@ async def radio_loop(application: Application):
                 os.remove(track_info['filepath'])
 
 async def hourly_voting_loop(application: Application):
-    """Initiates a genre poll every hour if the radio is on."""
+    """Initiates a genre poll periodically if the radio is on."""
     logger.info("Hourly voting loop started.")
     while True:
-        await asyncio.sleep(3600) # Wait for 1 hour
-        
         config = load_config()
+        interval = config.get('voting_interval_seconds', 3600)
+        
+        # Wait for the configured interval. Check every minute to see if it has changed.
+        # This loop allows the interval to be changed dynamically without restarting the bot.
+        for _ in range(int(interval / 60)):
+            await asyncio.sleep(60)
+            current_config = load_config()
+            if not current_config.get('is_on') or current_config.get('voting_interval_seconds', 3600) != interval:
+                break # Stop waiting if radio is turned off or interval changes
+
+        config = load_config() # Reload config in case it changed
         if not config.get('is_on'):
-            logger.info("[Voting] Radio is off, skipping hourly poll.")
+            logger.info("[Voting] Radio is off, skipping poll.")
             continue
 
-        logger.info("[Voting] Starting hourly genre poll.")
-        try:
-            votable_genres = config.get("votable_genres", [])
-            if len(votable_genres) < 10: # Need enough genres to sample from
-                logger.warning("[Voting] Not enough genres in config to start a poll.")
-                continue
+        await _create_and_send_poll(application)
 
-            decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
-            
-            # 1. Generate 5 unique "Genre + Decade" options
-            special_options = set()
-            while len(special_options) < 5:
-                genre = random.choice(votable_genres)
-                decade = random.choice(decades)
-                special_options.add(f"{genre} {decade}")
+async def _create_and_send_poll(application: Application) -> bool:
+    """Generates options and sends the genre poll."""
+    logger.info("[Voting] Starting genre poll.")
+    config = load_config()
+    try:
+        votable_genres = config.get("votable_genres", [])
+        if len(votable_genres) < 10:
+            logger.warning("[Voting] Not enough genres in config to start a poll.")
+            return False
 
-            # 2. Generate 4 unique regular genre options
-            regular_options = set()
-            # Ensure we don't pick genres that might be part of the special options
-            base_genres_in_special = {opt.split(' ')[0] for opt in special_options}
-            pool_for_regular = [g for g in votable_genres if g not in base_genres_in_special and g.lower() != 'pop']
-            
-            # In case the pool is too small after filtering
-            num_to_sample = min(4, len(pool_for_regular))
-            regular_options.update(random.sample(pool_for_regular, k=num_to_sample))
+        decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
+        
+        special_options = set()
+        while len(special_options) < 5:
+            genre = random.choice(votable_genres)
+            decade = random.choice(decades)
+            special_options.add(f"{genre} {decade}")
 
-            # 3. Combine, add "Pop", and shuffle
-            options = list(special_options) + list(regular_options)
-            # Ensure we have 9 options before adding Pop, to make a total of 10
-            while len(options) < 9:
-                chosen_genre = random.choice(votable_genres)
-                if chosen_genre not in options:
-                    options.append(chosen_genre)
+        regular_options = set()
+        base_genres_in_special = {opt.split(' ')[0] for opt in special_options}
+        pool_for_regular = [g for g in votable_genres if g not in base_genres_in_special and g.lower() != 'pop']
+        
+        num_to_sample = min(4, len(pool_for_regular))
+        regular_options.update(random.sample(pool_for_regular, k=num_to_sample))
 
-            options.append("Pop")
-            random.shuffle(options)
-            
-            question = "Выбираем жанр на следующий час!"
+        options = list(special_options) + list(regular_options)
+        while len(options) < 9:
+            chosen_genre = random.choice(votable_genres)
+            if chosen_genre not in options:
+                options.append(chosen_genre)
 
-            message = await application.bot.send_poll(
-                chat_id=RADIO_CHAT_ID,
-                question=question,
-                options=options[:10], # Ensure we don't exceed 10 options
-                is_anonymous=False,
-                open_period=60, # 1 minute
-            )
-            
-            application.bot_data['genre_poll_id'] = message.poll.id
-            logger.info(f"[Voting] Poll {message.poll.id} sent to chat {RADIO_CHAT_ID}.")
+        options.append("Pop")
+        random.shuffle(options)
+        
+        question = "Выбираем жанр на следующий час!"
 
-        except Exception as e:
-            logger.error(f"Error in hourly voting loop: {e}", exc_info=True)
+        message = await application.bot.send_poll(
+            chat_id=RADIO_CHAT_ID,
+            question=question,
+            options=options[:10],
+            is_anonymous=False,
+            open_period=60,
+        )
+        
+        application.bot_data['genre_poll_id'] = message.poll.id
+        logger.info(f"[Voting] Poll {message.poll.id} sent to chat {RADIO_CHAT_ID}.")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error in _create_and_send_poll: {e}", exc_info=True)
+        return False
+
 
 async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the result of the hourly genre poll."""
@@ -566,6 +601,7 @@ async def post_init(application: Application) -> None:
         BotCommand("p", "Сокращение для /play"),
         BotCommand("ron", "Включить радио (только админ)"),
         BotCommand("rof", "Выключить радио (только админ)"),
+        BotCommand("votestart", "Запустить голосование за жанр (админ)"),
         BotCommand("id", "Показать ID чата"),
         BotCommand("help", "Помощь по командам"),
         BotCommand("h", "Сокращение для /help"),
@@ -589,6 +625,7 @@ def main() -> None:
     application.add_handler(CommandHandler(["play", "p"], play_command))
     application.add_handler(CommandHandler(["radio_on", "ron"], radio_on_command))
     application.add_handler(CommandHandler(["radio_off", "rof"], radio_off_command))
+    application.add_handler(CommandHandler("votestart", start_vote_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(PollHandler(receive_poll_update))
 

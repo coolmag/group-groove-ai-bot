@@ -11,3 +11,6 @@ __pycache__/
 
 # Downloaded media
 downloads/
+
+# Radio state file
+radio_config.json
