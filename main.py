@@ -13,12 +13,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from dotenv import load_dotenv
 from collections import deque
 
-# --- Setup ---
-load_dotenv()
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# --- Global Task References ---
+radio_task = None
+voting_task = None
 
 # --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -29,8 +26,7 @@ DOWNLOAD_DIR = "downloads"
 
 # --- Helper Functions ---
 def format_duration(seconds):
-    if not seconds or seconds == 0:
-        return "--:--"
+    if not seconds or seconds == 0: return "--:--"
     minutes, seconds = divmod(int(seconds), 60)
     return f"{minutes:02d}:{seconds:02d}"
 
@@ -137,9 +133,9 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         search_id = uuid.uuid4().hex[:10]
         context.bot_data.setdefault('paginated_searches', {})[search_id] = info['entries']
         reply_markup = await get_paginated_keyboard(search_id, context)
-        await message.edit_text(f'Найдено: {len(info["entries"]) }. Выберите трек:', reply_markup=reply_markup)
+        await message.edit_text(f'Найдено: {len(info["entries"])}. Выберите трек:', reply_markup=reply_markup)
     except Exception as e:
-        logger.error(f"Error in /play: {e}")
+        print(f"Error in /play: {e}")
         await message.edit_text("Ошибка поиска.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,21 +166,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text('Выберите трек:', reply_markup=reply_markup)
 
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global radio_task, voting_task
     if update.effective_user.id != ADMIN_ID: return
-    if not context.args: await update.message.reply_text("Укажите жанр: `/ron <жанр>`"); return
+    if not context.args: 
+        await update.message.reply_text("Укажите жанр: `/ron <жанр>`")
+        return
     
     genre = " ".join(context.args)
     config = load_config()
     config.update({'is_on': True, 'genre': genre, 'radio_playlist': [], 'played_radio_urls': []})
     context.bot_data.update({'radio_playlist': deque(), 'played_radio_urls': []})
     save_config(config)
+    
+    if not radio_task or radio_task.done():
+        radio_task = asyncio.create_task(radio_loop(context.application))
+    if not voting_task or voting_task.done():
+        voting_task = asyncio.create_task(hourly_voting_loop(context.application))
+    
     await update.message.reply_text(f"Радио включено. Жанр: {genre}.")
 
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global radio_task, voting_task
     if update.effective_user.id != ADMIN_ID: return
     config = load_config()
     config['is_on'] = False
     save_config(config)
+    
+    if radio_task and not radio_task.done():
+        radio_task.cancel()
+    if voting_task and not voting_task.done():
+        voting_task.cancel()
+    
     await update.message.reply_text("Радио выключено.")
 
 async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,7 +228,7 @@ async def send_track(track_info: dict, chat_id: int, bot):
         with open(track_info['filepath'], 'rb') as audio_file:
             return await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
     except Exception as e:
-        logger.error(f"Failed to send track {track_info.get('filepath')}: {e}")
+        print(f"Failed to send track {track_info.get('filepath')}: {e}")
         return None
 
 async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
@@ -224,15 +236,15 @@ async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
         if context.bot_data['radio_message_ids']:
             chat_id, msg_id = context.bot_data['radio_message_ids'].popleft()
             try: await context.bot.delete_message(chat_id, msg_id)
-            except Exception as e: logger.warning(f"Failed to delete msg {msg_id}: {e}")
+            except Exception as e: print(f"Failed to delete msg {msg_id}: {e}")
 
 async def refill_playlist(application: Application):
     bot_data = application.bot_data
-    logger.info("Refilling radio playlist...")
+    print("Refilling radio playlist...")
     config = load_config()
     raw_genre = config.get('genre', 'lo-fi hip hop')
     search_query = parse_genre_query(raw_genre)
-    logger.info(f"Original: '{raw_genre}', Parsed: '{search_query}'")
+    print(f"Original: '{raw_genre}', Parsed: '{search_query}'")
     ydl_opts = {'format': 'bestaudio', 'noplaylist': True, 'quiet': True, 'default_search': 'scsearch50', 'extract_flat': 'in_playlist'}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -244,52 +256,68 @@ async def refill_playlist(application: Application):
             bot_data['radio_playlist'] = deque(suitable)
             config['radio_playlist'] = list(suitable)
             save_config(config)
-            logger.info(f"Playlist refilled with {len(suitable)} tracks.")
+            print(f"Playlist refilled with {len(suitable)} tracks.")
     except Exception as e:
-        logger.error(f"Playlist refill error: {e}")
+        print(f"Playlist refill error: {e}")
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
     while True:
-        await asyncio.sleep(5)
-        config = load_config()
-        if not config.get('is_on'): continue
-
-        if not bot_data.get('radio_playlist'):
-            await refill_playlist(application)
-            if not bot_data.get('radio_playlist'):
-                await asyncio.sleep(60)
-                continue
-        
-        track_url = bot_data['radio_playlist'].popleft()
         try:
-            track_info = await download_track(track_url)
-            sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
-            if sent_msg:
-                bot_data.setdefault('radio_message_ids', deque()).append((sent_msg.chat_id, sent_msg.message_id))
-                bot_data.setdefault('played_radio_urls', []).append(track_url)
-                if len(bot_data['played_radio_urls']) > 100: bot_data['played_radio_urls'].pop(0)
-                if len(bot_data['radio_message_ids']) >= config.get('message_cleanup_limit', 30): await clear_old_tracks(application)
-                
-                config['radio_playlist'] = list(bot_data['radio_playlist'])
-                config['played_radio_urls'] = bot_data['played_radio_urls']
-                config['radio_message_ids'] = list(bot_data['radio_message_ids'])
-                save_config(config)
+            await asyncio.sleep(5)
+            config = load_config()
+            if not config.get('is_on'): 
+                await asyncio.sleep(30) # Sleep longer if radio is off
+                continue
 
+            if not bot_data.get('radio_playlist'):
+                await refill_playlist(application)
+                if not bot_data.get('radio_playlist'):
+                    await asyncio.sleep(60)
+                    continue
+            
+            track_url = bot_data['radio_playlist'].popleft()
+            try:
+                track_info = await download_track(track_url)
+                sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
+                if sent_msg:
+                    bot_data.setdefault('radio_message_ids', deque()).append((sent_msg.chat_id, sent_msg.message_id))
+                    bot_data.setdefault('played_radio_urls', []).append(track_url)
+                    if len(bot_data['played_radio_urls']) > 100: bot_data['played_radio_urls'].pop(0)
+                    if len(bot_data['radio_message_ids']) >= config.get('message_cleanup_limit', 30): await clear_old_tracks(application)
+                    
+                    config['radio_playlist'] = list(bot_data['radio_playlist'])
+                    config['played_radio_urls'] = bot_data['played_radio_urls']
+                    config['radio_message_ids'] = list(bot_data['radio_message_ids'])
+                    save_config(config)
+
+            except Exception as e:
+                print(f"Radio loop track error: {e}")
+            finally:
+                if 'track_info' in locals() and os.path.exists(track_info['filepath']): os.remove(track_info['filepath'])
+            
+            await asyncio.sleep(config.get('track_interval_seconds', 120))
+        except asyncio.CancelledError:
+            print("Radio loop cancelled.")
+            break
         except Exception as e:
-            logger.error(f"Radio loop track error: {e}")
-        finally:
-            if 'track_info' in locals() and os.path.exists(track_info['filepath']): os.remove(track_info['filepath'])
-        
-        await asyncio.sleep(config.get('track_interval_seconds', 120))
+            print(f"FATAL error in radio_loop: {e}")
+            await asyncio.sleep(60)
 
 # --- Voting Logic ---
 async def hourly_voting_loop(application: Application):
     while True:
-        config = load_config()
-        await asyncio.sleep(config.get('voting_interval_seconds', 3600))
-        if config.get('is_on') and not config.get('active_poll'):
-            await _create_and_send_poll(application)
+        try:
+            config = load_config()
+            await asyncio.sleep(config.get('voting_interval_seconds', 3600))
+            if config.get('is_on') and not config.get('active_poll'):
+                await _create_and_send_poll(application)
+        except asyncio.CancelledError:
+            print("Voting loop cancelled.")
+            break
+        except Exception as e:
+            print(f"Error in hourly_voting_loop: {e}")
+            await asyncio.sleep(60)
 
 async def _create_and_send_poll(application: Application) -> bool:
     config = load_config()
@@ -316,16 +344,16 @@ async def _create_and_send_poll(application: Application) -> bool:
         config['active_poll'] = poll_data
         save_config(config)
 
-        logger.info(f"Poll {message.poll.id} sent, processing in {poll_duration}s.")
+        print(f"Poll {message.poll.id} sent, processing in {poll_duration}s.")
         asyncio.create_task(schedule_poll_processing(application, message.poll.id, poll_duration))
         return True
     except Exception as e:
-        logger.error(f"Create poll error: {e}")
+        print(f"Create poll error: {e}")
         return False
 
 async def schedule_poll_processing(application: Application, poll_id: str, delay: int):
     await asyncio.sleep(delay + 2)
-    logger.info(f"Processing poll {poll_id}...")
+    print(f"Processing poll {poll_id}...")
     config = load_config()
     active_poll_dict = config.get('active_poll')
 
@@ -341,7 +369,7 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
     if active_poll_dict and active_poll_dict['id'] == update.poll.id:
         config['active_poll'] = update.poll.to_dict()
         save_config(config)
-        logger.info(f"Updated state for poll {update.poll.id}.")
+        print(f"Updated state for poll {update.poll.id}.")
 
 async def process_poll_results(poll, application: Application):
     config = load_config()
@@ -360,21 +388,28 @@ async def process_poll_results(poll, application: Application):
             winning_options.append(option.text)
 
     final_winner = "Pop" if not winning_options else random.choice(winning_options)
-    logger.info(f"Winner: '{final_winner}'.")
+    print(f"Winner: '{final_winner}'.")
     config['genre'] = final_winner
     config['radio_playlist'] = []
     application.bot_data['radio_playlist'].clear()
     save_config(config)
     await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{final_winner}**", parse_mode='Markdown')
+    # Immediately trigger the playlist refill for the new genre
     asyncio.create_task(refill_playlist(application))
 
 # --- Application Setup ---
 async def post_init(application: Application) -> None:
+    global radio_task, voting_task
     config = load_config()
     bot_data = application.bot_data
     bot_data['radio_playlist'] = deque(config.get('radio_playlist', []))
     bot_data['played_radio_urls'] = config.get('played_radio_urls', [])
     bot_data['radio_message_ids'] = deque(config.get('radio_message_ids', []))
+    
+    if config.get('is_on'):
+        print("Radio was ON at startup. Starting background tasks.")
+        radio_task = asyncio.create_task(radio_loop(application))
+        voting_task = asyncio.create_task(hourly_voting_loop(application))
     
     active_poll = config.get('active_poll')
     if active_poll:
@@ -382,11 +417,11 @@ async def post_init(application: Application) -> None:
         if close_timestamp:
             remaining_time = close_timestamp - datetime.now().timestamp()
             if remaining_time > 0:
-                logger.info(f"[Init] Found an active poll. Rescheduling processing in {remaining_time:.0f}s.")
+                print(f"[Init] Found an active poll. Rescheduling processing in {remaining_time:.0f}s.")
                 asyncio.create_task(schedule_poll_processing(application, active_poll['id'], remaining_time))
 
 def main() -> None: 
-    if not BOT_TOKEN: logger.critical("FATAL: BOT_TOKEN not found."); return
+    if not BOT_TOKEN: print("FATAL: BOT_TOKEN not found."); return
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     handlers = [
         CommandHandler("start", start_command),
