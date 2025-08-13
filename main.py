@@ -545,7 +545,8 @@ async def _create_and_send_poll(application: Application) -> bool:
 async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the result of the hourly genre poll."""
     poll = update.poll
-    logger.info(f"Received poll update for poll {poll.id}. Is closed: {poll.is_closed}")
+    # Enhanced logging to debug the issue
+    logger.info(f"Received poll update. Poll object: {poll.to_dict()}")
 
     # We only want to process the results when the poll is officially closed by Telegram
     if not poll.is_closed:
