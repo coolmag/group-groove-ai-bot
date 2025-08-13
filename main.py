@@ -61,6 +61,7 @@ def load_config():
     config.setdefault('voting_interval_seconds', 3600)
     config.setdefault('track_interval_seconds', 120)
     config.setdefault('message_cleanup_limit', 30)
+    config.setdefault('poll_duration_seconds', 60)
     config.setdefault('active_poll', None)
     return config
 
@@ -307,7 +308,7 @@ async def _create_and_send_poll(application: Application) -> bool:
         options.append("Pop")
         random.shuffle(options)
         
-        poll_duration = 60
+        poll_duration = config.get('poll_duration_seconds', 60)
         message = await application.bot.send_poll(RADIO_CHAT_ID, "Выбираем жанр на следующий час!", options[:10], is_anonymous=False, open_period=poll_duration)
         
         poll_data = message.poll.to_dict()
@@ -345,7 +346,9 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def process_poll_results(poll, application: Application):
     config = load_config()
     config['active_poll'] = None
-    if not config.get('is_on'): save_config(config); return
+    if not config.get('is_on'): 
+        save_config(config)
+        return
 
     winning_options = []
     max_votes = 0
