@@ -530,7 +530,7 @@ def main() -> None:
     logger.info("Handlers added.")
 
     logger.info("Running application.run_polling()...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling()
     logger.info("--- Bot Stopped ---")
 
 if __name__ == "__main__":
