@@ -49,8 +49,7 @@ GENRE_KEYWORDS = {
 
 def escape_markdown(text: str) -> str:
     """Escapes special characters for MarkdownV2."""
-    escape_chars = r'_[]()~`>#+-=|{}.!'
-    return re.sub(f'([\\{escape_chars}])', r'\\\1', text)
+    return re.sub(r'([_*[\\\\]()~`>#+\-=|}{}.!])', r'\\\\\1', text)
 
 # --- Config & FS Management ---
 def load_config():
@@ -87,18 +86,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "🎧 **Команды бота**\n\n"
-        "`/play <название>` - Поиск трека.\n"
-        "`/id` - ID чата.\n"
-        "**Админ-команды:**\n"
-        "`/ron <жанр>` - Включить радио.\n"
-        "`/rof` - Выключить радио.\n"
-        "`/votestart` - Запустить голосование."
+        "*Команды бота*\n\n"
+        "/play <название> - Поиск трека.\n"
+        "/id - ID чата.\n"
+        "*Админ-команды:*
+"
+        "/ron <жанр> - Включить радио.\n"
+        "/rof - Выключить радио.\n"
+        "/votestart - Запустить голосование."
     )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode='MarkdownV2')
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"ID этого чата: `{update.message.chat_id}`", parse_mode='Markdown')
+    await update.message.reply_text(f"ID этого чата: `{update.message.chat_id}`", parse_mode='MarkdownV2')
 
 async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     page_size = 5
