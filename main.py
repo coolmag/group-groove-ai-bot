@@ -351,8 +351,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 ────────────────────────
 "
             else:
-                text += f"\n*Сейчас играет:* — тишина...
-────────────────────────
+                text += f"\n*Сейчас играет:* — тишина...\n────────────────────────
 "
 
             keyboard = []
