@@ -49,7 +49,7 @@ GENRE_KEYWORDS = {
 
 def escape_markdown(text: str) -> str:
     """Escapes special characters for MarkdownV2."""
-    escape_chars = r'_[]()~`>#+-=|{}.!''
+    escape_chars = r'_[]()~`>#+-=|{}.!'
     return re.sub(f'([\\{escape_chars}])', r'\\\1', text)
 
 # --- Config & FS Management ---
