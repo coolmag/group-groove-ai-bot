@@ -121,13 +121,15 @@ def build_search_queries(genre: str):
     return [f"{genre} music", f"{genre} best tracks", f"{genre} playlist"]
 
 def escape_markdown(text: str) -> str:
-    return re.sub(r'([_*[\\()~`>#+\-=|}{}.!])', r'\\\1', text)
+    """Escape special characters for Telegram MarkdownV2."""
+    special_chars = r'([_*[\]()~`>#+=|{}.!\\-])'
+    return re.sub(special_chars, r'\\\1', text)
 
 # --- Config & FS Management ---
 async def notify_admins(application: Application, message: str):
     for admin_id in ADMIN_IDS:
         try:
-            await application.bot.send_message(admin_id, message)
+            await application.bot.send_message(admin_id, message, parse_mode='MarkdownV2')
         except Exception as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
 
@@ -153,7 +155,7 @@ def save_config(config: RadioConfig):
     temp_path = config_path.with_suffix('.tmp')
     try:
         with temp_path.open('w', encoding='utf-8') as f:
-            json.dump(config.dict(), f, indent=4, ensure_ascii=False)
+            json.dump(config.model_dump(), f, indent=4, ensure_ascii=False)
         temp_path.replace(config_path)
     except Exception as e:
         logger.error(f"Error saving config: {e}")
@@ -301,7 +303,17 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(context.application))
     
     if isinstance(update, Update) and update.message:
-        await update.message.reply_text(f"Радио включено. Жанр: {escape_markdown(genre)}.", parse_mode='MarkdownV2')
+        try:
+            await update.message.reply_text(
+                f"Радио включено. Жанр: {escape_markdown(genre)}.",
+                parse_mode='MarkdownV2'
+            )
+        except TelegramError as e:
+            logger.error(f"Failed to send radio_on message: {e}")
+            await update.message.reply_text(
+                f"Радио включено. Жанр: {genre}",
+                parse_mode=None
+            )
     await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
 
 @admin_only
