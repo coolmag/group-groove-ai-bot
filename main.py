@@ -47,6 +47,26 @@ GENRE_KEYWORDS = {
     "disco": ["disco", "funk", "boogie"],
 }
 
+def format_duration(seconds):
+    if not seconds or seconds == 0: return "--:--"
+    minutes, seconds = divmod(int(seconds), 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+def has_ukrainian_chars(text: str) -> bool:
+    return bool(re.search(r"[А-ЩЬЮЯЄІЇҐа-щьюяєіїґ]", text))
+
+def is_genre_match(track: dict, genre: str) -> bool:
+    title = track.get('title', '').lower()
+    for key, keywords in GENRE_KEYWORDS.items():
+        if key in genre.lower():
+            return any(kw in title for kw in keywords)
+    return True
+
+def build_search_queries(genre: str):
+    return [f"{genre} music", f"{genre} best tracks", f"{genre} playlist"]
+
+
+# --- Helper Functions ---
 def escape_markdown(text: str) -> str:
     """Escapes special characters for MarkdownV2."""
     return re.sub(r'([_*[\\\\]()~`>#+\-=|}{}.!])', r'\\\\\1', text)
@@ -522,11 +542,16 @@ async def process_poll_results(poll, application: Application):
     print(f"Winner: '{final_winner}'.")
     config['genre'] = final_winner
     config['radio_playlist'] = []
-    application.bot_data['radio_playlist'].clear()
+    if isinstance(application.bot_data.get('radio_playlist'), deque):
+        application.bot_data['radio_playlist'].clear()
+    else:
+        application.bot_data['radio_playlist'] = deque()
     save_config(config)
-    await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{final_winner}**", parse_mode='Markdown')
+    await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{escape_markdown(final_winner)}**", parse_mode='MarkdownV2')
     # Immediately trigger the playlist refill for the new genre
     asyncio.create_task(refill_playlist(application))
+    if not radio_task or radio_task.done():
+        radio_task = asyncio.create_task(radio_loop(application))
 
 # --- Application Setup ---
 async def post_init(application: Application) -> None:
