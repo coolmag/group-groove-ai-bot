@@ -306,15 +306,15 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'voting_task' not in context.bot_data or context.bot_data['voting_task'].done():
         context.bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(context.application))
     
-    if isinstance(update, Update) and update.message:
+    if isinstance(update, Update) and update.effective_message:
         try:
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 f"Радио включено. Жанр: {escape_markdown(genre)}.",
                 parse_mode='MarkdownV2'
             )
         except TelegramError as e:
             logger.error(f"Failed to send radio_on message: {e}")
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 f"Радио включено. Жанр: {genre}",
                 parse_mode=None
             )
@@ -332,24 +332,43 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'voting_task' in context.bot_data and not context.bot_data['voting_task'].done():
         context.bot_data['voting_task'].cancel()
     
-    if isinstance(update, Update) and update.message:
-        await update.message.reply_text("Радио выключено.")
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text("Радио выключено.")
     await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
 
 @admin_only
 async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     if not config.is_on:
-        await update.message.reply_text("Радио выключено.")
+        if update.effective_message:
+            await update.effective_message.reply_text("Радио выключено.")
+        else:
+            await update.callback_query.message.reply_text("Радио выключено.")
         return
     if config.active_poll:
-        await update.message.reply_text("Голосование уже идет.")
+        if update.effective_message:
+            await update.effective_message.reply_text("Голосование уже идет.")
+        else:
+            await update.callback_query.message.reply_text("Голосование уже идет.")
         return
     
-    if await _create_and_send_poll(context.application):
-        await update.message.reply_text("Голосование запущено.")
-    else:
-        await update.message.reply_text("Ошибка запуска голосования.")
+    try:
+        if await _create_and_send_poll(context.application):
+            if update.effective_message:
+                await update.effective_message.reply_text("Голосование запущено.")
+            else:
+                await update.callback_query.message.reply_text("Голосование запущено.")
+        else:
+            if update.effective_message:
+                await update.effective_message.reply_text("Ошибка запуска голосования.")
+            else:
+                await update.callback_query.message.reply_text("Ошибка запуска голосования.")
+    except Exception as e:
+        logger.error(f"Error in start_vote_command: {e}")
+        if update.effective_message:
+            await update.effective_message.reply_text("Ошибка запуска голосования.")
+        else:
+            await update.callback_query.message.reply_text("Ошибка запуска голосования.")
 
 @admin_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -363,8 +382,8 @@ async def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if isinstance(update, Update) and update.callback_query:
         await update.callback_query.answer("Пропускаем трек...")
-    elif isinstance(update, Update) and update.message:
-        await update.message.reply_text("Пропускаем трек...")
+    elif isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text("Пропускаем трек...")
 
 rate_limiter = AsyncLimiter(20, 1)
 
@@ -560,11 +579,19 @@ async def refill_playlist(application: Application):
 
     logger.info(f"Playlist refilled with {len(final_urls)} tracks.")
     if not final_urls:
-        await application.bot.send_message(
-            RADIO_CHAT_ID,
-            "Не удалось найти треки для плейлиста. Пробуем снова через минуту...",
-            parse_mode='MarkdownV2'
-        )
+        try:
+            await application.bot.send_message(
+                RADIO_CHAT_ID,
+                "Не удалось найти треки для плейлиста. Пробуем снова через минуту...",
+                parse_mode='MarkdownV2'
+            )
+        except TelegramError as e:
+            logger.error(f"Failed to send playlist error message: {e}")
+            await application.bot.send_message(
+                RADIO_CHAT_ID,
+                "Не удалось найти треки для плейлиста. Пробуем снова через минуту...",
+                parse_mode=None
+            )
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
@@ -604,18 +631,34 @@ async def radio_loop(application: Application):
                     save_config(config)
                     await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
                 else:
-                    await application.bot.send_message(
-                        RADIO_CHAT_ID,
-                        "Ошибка отправки трека, пробуем следующий...",
-                        parse_mode='MarkdownV2'
-                    )
+                    try:
+                        await application.bot.send_message(
+                            RADIO_CHAT_ID,
+                            "Ошибка отправки трека, пробуем следующий...",
+                            parse_mode='MarkdownV2'
+                        )
+                    except TelegramError as e:
+                        logger.error(f"Failed to send track error message: {e}")
+                        await application.bot.send_message(
+                            RADIO_CHAT_ID,
+                            "Ошибка отправки трека, пробуем следующий...",
+                            parse_mode=None
+                        )
         except Exception as e:
             logger.error(f"Radio loop track error: {e}")
-            await application.bot.send_message(
-                RADIO_CHAT_ID,
-                "Ошибка воспроизведения трека, пробуем следующий...",
-                parse_mode='MarkdownV2'
-            )
+            try:
+                await application.bot.send_message(
+                    RADIO_CHAT_ID,
+                    "Ошибка воспроизведения трека, пробуем следующий...",
+                    parse_mode='MarkdownV2'
+                )
+            except TelegramError as e:
+                logger.error(f"Failed to send track error message: {e}")
+                await application.bot.send_message(
+                    RADIO_CHAT_ID,
+                    "Ошибка воспроизведения трека, пробуем следующий...",
+                    parse_mode=None
+                )
         finally:
             if track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
@@ -810,8 +853,8 @@ async def shutdown(application: Application):
     tasks = []
     if 'radio_task' in application.bot_data:
         tasks.append(application.bot_data['radio_task'])
-    if 'voting_task' in context.bot_data:
-        tasks.append(context.bot_data['voting_task'])
+    if 'voting_task' in application.bot_data:
+        tasks.append(application.bot_data['voting_task'])
     if tasks:
         for task in tasks:
             task.cancel()
