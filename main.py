@@ -745,7 +745,6 @@ async def cleanup_cache():
         await asyncio.sleep(24 * 3600)
 
 async def post_init(application: Application) -> None:
-    global application
     config = load_config()
     bot_data = application.bot_data
     bot_data['radio_playlist'] = deque(config.radio_playlist)
@@ -787,7 +786,6 @@ def main() -> None:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
     try:
-        global application
         application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
         loop = asyncio.get_event_loop()
         loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown(application)))
