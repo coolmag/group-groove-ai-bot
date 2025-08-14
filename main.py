@@ -16,10 +16,12 @@ from pydantic import BaseModel, root_validator
 from typing import List, Deque, Optional
 from pathlib import Path
 import time
+import shutil
 from cachetools import TTLCache
 from aiolimiter import AsyncLimiter
 from telegram.error import TelegramError, RetryAfter
 from yt_dlp.utils import DownloadError
+from functools import wraps
 import signal
 
 # --- Constants ---
@@ -29,6 +31,7 @@ class Constants:
     POLL_DURATION_SECONDS = 60
     MESSAGE_CLEANUP_LIMIT = 30
     MAX_RETRIES = 3
+    MIN_DISK_SPACE = 1_000_000_000  # 1GB
 
 # --- Setup ---
 load_dotenv()
@@ -78,12 +81,14 @@ class RadioConfig(BaseModel):
     active_poll: Optional[dict] = None
     votable_genres: List[str] = list(GENRE_KEYWORDS.keys())
     status_message_id: Optional[int] = None
+    now_playing: Optional[dict] = None
 
     @root_validator
     def validate_poll_and_status(cls, values):
         if not values.get('is_on'):
             values['active_poll'] = None
             values['status_message_id'] = None
+            values['now_playing'] = None
         return values
 
 # --- Helper Functions ---
@@ -104,6 +109,13 @@ def is_genre_match(track: dict, genre: str) -> bool:
     logger.warning(f"Genre '{genre}' not found in GENRE_KEYWORDS, allowing track")
     return True
 
+def is_safe_track(track: dict) -> bool:
+    """Проверка безопасности трека (например, отсутствие откровенного контента)."""
+    title = track.get('title', '').lower()
+    description = track.get('description', '').lower()
+    unsafe_keywords = ['explicit', '18+', 'nsfw', 'offensive']
+    return not any(kw in title or kw in description for kw in unsafe_keywords)
+
 def build_search_queries(genre: str):
     return [f"{genre} music", f"{genre} best tracks", f"{genre} playlist"]
 
@@ -111,6 +123,13 @@ def escape_markdown(text: str) -> str:
     return re.sub(r'([_*[\\()~`>#+\-=|}{}.!])', r'\\\1', text)
 
 # --- Config & FS Management ---
+async def notify_admins(application: Application, message: str):
+    for admin_id in ADMIN_IDS:
+        try:
+            await application.bot.send_message(admin_id, message)
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id}: {e}")
+
 def load_config() -> RadioConfig:
     config_path = Path(CONFIG_FILE)
     if config_path.exists():
@@ -122,6 +141,10 @@ def load_config() -> RadioConfig:
                 backup_path = config_path.with_suffix(f'.bak.{int(time.time())}')
                 config_path.rename(backup_path)
                 logger.info(f"Created backup of corrupted config at {backup_path}")
+                asyncio.create_task(notify_admins(
+                    application,
+                    f"Ошибка загрузки конфигурации, создана резервная копия: {backup_path}"
+                ))
     return RadioConfig()
 
 def save_config(config: RadioConfig):
@@ -155,6 +178,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /ron <жанр> - Включить радио
 /rof - Выключить радио
 /votestart - Запустить голосование
+/status - Показать панель управления
+/skip - Пропустить трек
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -187,7 +212,7 @@ async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_T
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Укажите название песни: `/play <название>`")
+        await update.message.reply_text("Укажите название песни: `/play <название>`", parse_mode='Markdown')
         return
 
     query = " ".join(context.args)
@@ -207,7 +232,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.edit_text(f'Найдено: {len(info["entries"])}. Выберите трек:', reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error in /play: {e}")
-        await message.edit_text("Ошибка поиска.")
+        await message.edit_text("Ошибка поиска. Попробуйте позже.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -248,11 +273,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == "status_refresh":
         await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
+# --- Admin Commands ---
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not await is_admin(update, context):
+            await update.message.reply_text("Только администраторы могут использовать эту команду.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+@admin_only
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        await update.message.reply_text("Только администраторы могут использовать эту команду.")
-        return
-    
     genre = " ".join(context.args) if context.args else load_config().genre
     config = load_config()
     config.is_on = True
@@ -268,10 +300,8 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Радио включено. Жанр: {escape_markdown(genre)}.", parse_mode='MarkdownV2')
     await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
 
+@admin_only
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        await update.message.reply_text("Только администраторы могут использовать эту команду.")
-        return
     config = load_config()
     config.is_on = False
     config.now_playing = None
@@ -286,10 +316,8 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Радио выключено.")
     await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
 
+@admin_only
 async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        await update.message.reply_text("Только администраторы могут использовать эту команду.")
-        return
     config = load_config()
     if not config.is_on:
         await update.message.reply_text("Радио выключено.")
@@ -303,26 +331,23 @@ async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("Ошибка запуска голосования.")
 
+@admin_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        await update.message.reply_text("Только администраторы могут использовать эту команду.")
-        return
     await send_status_panel(context.application, update.effective_chat.id)
 
-async def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        if isinstance(update, Update) and update.callback_query:
-            await update.callback_query.answer("Эта кнопка не для вас.", show_alert=True)
-        return
-
-    if 'radio_task' in context.bot_data and not context.bot_data['radio_task'].done():
-        context.bot_data['radio_task'].cancel()
-        context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
-
+@admin_only
+async Asc def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(update, Update) and update.callback_query:
         await update.callback_query.answer("Пропускаем трек...")
+        if 'radio_task' in context.bot_data and not context.bot_data['radio_task'].done():
+            context.bot_data['radio_task'].cancel()
+            context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
+    else:
+        if 'radio_task' in context.bot_data and not context.bot_data['radio_task'].done():
+            context.bot_data['radio_task'].cancel()
+            context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
 
-rate_limiter = AsyncLimiter(30, 1)
+rate_limiter = AsyncLimiter(20, 1)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
     async with rate_limiter:
@@ -344,15 +369,19 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
             if is_on and now_playing:
                 title = escape_markdown(now_playing.get('title', 'Неизвестный трек'))
                 duration = escape_markdown(format_duration(now_playing.get('duration', 0)))
-                text += f"\n────────────────────────
+                text += f"""\
+────────────────────────
 *Сейчас играет:*
 `{title}`
 `{duration}`
 ────────────────────────
-"
+"""
             else:
-                text += f"\n*Сейчас играет:* — тишина...\n────────────────────────
-"
+                text += """\
+────────────────────────
+*Сейчас играет:* — тишина...
+────────────────────────
+"""
 
             keyboard = []
             if is_on:
@@ -360,8 +389,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
                     InlineKeyboardButton("⏭ Пропустить", callback_data="skip_track:0"),
                     InlineKeyboardButton("⏹️ Стоп", callback_data="toggle_radio:0")
                 ])
-                keyboard.append([InlineKeyboardButton("🗳️ Голосование", callback_data="start_vote:0"),
-                ])
+                keyboard.append([InlineKeyboardButton("🗳️ Голосование", callback_data="start_vote:0")])
             else:
                 keyboard.append([InlineKeyboardButton("▶️ Запустить Радио", callback_data="toggle_radio:0")])
 
@@ -485,10 +513,7 @@ async def refill_playlist(application: Application):
                 continue
             suitable_tracks.append(t)
 
-    unique_tracks = {}
-    for t in suitable_tracks:
-        if t['url'] not in unique_tracks:
-            unique_tracks[t['url']]=t
+    unique_tracks = {t['url']: t for t in suitable_tracks}
     suitable_tracks = list(unique_tracks.values())
 
     suitable_tracks.sort(
@@ -504,6 +529,12 @@ async def refill_playlist(application: Application):
     save_config(config)
 
     logger.info(f"Playlist refilled with {len(final_urls)} tracks.")
+    if not final_urls:
+        await application.bot.send_message(
+            RADIO_CHAT_ID,
+            "Не удалось найти треки для плейлиста. Пробуем снова через минуту...",
+            parse_mode='MarkdownV2'
+        )
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
@@ -541,8 +572,19 @@ async def radio_loop(application: Application):
                         'duration': track_info.get('duration', 0)
                     }
                     save_config(config)
+                else:
+                    await application.bot.send_message(
+                        RADIO_CHAT_ID,
+                        "Ошибка отправки трека, пробуем следующий...",
+                        parse_mode='MarkdownV2'
+                    )
         except Exception as e:
             logger.error(f"Radio loop track error: {e}")
+            await application.bot.send_message(
+                RADIO_CHAT_ID,
+                "Ошибка воспроизведения трека, пробуем следующий...",
+                parse_mode='MarkdownV2'
+            )
         finally:
             if track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
@@ -568,21 +610,30 @@ async def _create_and_send_poll(application: Application) -> bool:
     config = load_config()
     try:
         votable_genres = config.votable_genres
-        if len(votable_genres) < 10: return False
+        if len(votable_genres) < 10:
+            logger.error("Not enough votable genres.")
+            return False
         decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
         special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
         regular_pool = [g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop']
         num_to_sample = min(4, len(regular_pool))
         regular = set(random.sample(regular_pool, k=num_to_sample))
         options = list(special | regular)
-        while len(options) < 9: 
+        while len(options) < 9:
             chosen = random.choice(votable_genres)
-            if chosen not in options: options.append(chosen)
+            if chosen not in options:
+                options.append(chosen)
         options.append("Pop")
         random.shuffle(options)
         
         poll_duration = config.poll_duration_seconds
-        message = await application.bot.send_poll(RADIO_CHAT_ID, "Выбираем жанр на следующий час!", options[:10], is_anonymous=False, open_period=poll_duration)
+        message = await application.bot.send_poll(
+            RADIO_CHAT_ID,
+            "Выбираем жанр на следующий час!",
+            options[:10],
+            is_anonymous=False,
+            open_period=poll_duration
+        )
         
         poll_data = message.poll.to_dict()
         poll_data['close_timestamp'] = datetime.now().timestamp() + poll_duration
@@ -625,7 +676,7 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def process_poll_results(poll, application: Application):
     config = load_config()
     config.active_poll = None
-    if not config.is_on: 
+    if not config.is_on:
         save_config(config)
         return
 
@@ -638,8 +689,8 @@ async def process_poll_results(poll, application: Application):
         elif option.voter_count == max_votes and max_votes > 0:
             winning_options.append(option.text)
 
-    final_winner = "Pop" if not winning_options else random.choice(winning_options)
-    logger.info(f"Winner: '{final_winner}'.")
+    final_winner = config.genre if not winning_options else random.choice(winning_options)
+    logger.info(f"Poll winner: '{final_winner}'.")
     config.genre = final_winner
     config.radio_playlist = []
     if isinstance(application.bot_data.get('radio_playlist'), deque):
@@ -674,19 +725,25 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def cleanup_download_dir():
     while True:
         try:
+            total, used, free = shutil.disk_usage(DOWNLOAD_DIR)
+            if free < Constants.MIN_DISK_SPACE:
+                logger.warning("Low disk space, cleaning up immediately...")
+                for file in Path(DOWNLOAD_DIR).glob('*.mp3'):
+                    file.unlink()
             for file in Path(DOWNLOAD_DIR).glob('*.mp3'):
-                if file.stat().st_mtime < time.time() - 3600:  # Delete files older than 1 hour
+                if file.stat().st_mtime < time.time() - 3600:
                     file.unlink()
         except Exception as e:
             logger.error(f"Error cleaning up download directory: {e}")
-        await asyncio.sleep(3600)  # Run hourly
+        await asyncio.sleep(3600)
 
 async def cleanup_cache():
     while True:
         search_cache.clear()
-        await asyncio.sleep(24 * 3600)  # Clear cache daily
+        await asyncio.sleep(24 * 3600)
 
 async def post_init(application: Application) -> None:
+    global application
     config = load_config()
     bot_data = application.bot_data
     bot_data['radio_playlist'] = deque(config.radio_playlist)
@@ -712,17 +769,23 @@ async def post_init(application: Application) -> None:
 
 async def shutdown(application: Application):
     config = load_config()
+    tasks = []
     if 'radio_task' in application.bot_data:
-        application.bot_data['radio_task'].cancel()
+        tasks.append(application.bot_data['radio_task'])
     if 'voting_task' in application.bot_data:
-        application.bot_data['voting_task'].cancel()
+        tasks.append(application.bot_data['voting_task'])
+    if tasks:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     save_config(config)
 
-def main() -> None: 
+def main() -> None:
     if not BOT_TOKEN:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
     try:
+        global application
         application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
         loop = asyncio.get_event_loop()
         loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown(application)))
