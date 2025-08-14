@@ -113,6 +113,10 @@ async def schedule_config_save():
     await asyncio.sleep(CONFIG_SAVE_INTERVAL)
     await _save_to_disk_safe()
 
+def ensure_download_dir():
+    if not os.path.exists(DOWNLOAD_DIR):
+        os.makedirs(DOWNLOAD_DIR)
+
 # --- Bot Commands & Handlers ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
