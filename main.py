@@ -121,8 +121,8 @@ def build_search_queries(genre: str):
     return [f"{genre} music", f"{genre} best tracks", f"{genre} playlist"]
 
 def escape_markdown(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    special_chars = r'([_*[\]()~`>#+=|{}.!\\-])'
+    """Escape special characters for Telegram MarkdownV2, including period."""
+    special_chars = r'([_*[\]()~`>#+=|{}.!-])'
     return re.sub(special_chars, r'\\\1', text)
 
 # --- Config & FS Management ---
@@ -130,8 +130,12 @@ async def notify_admins(application: Application, message: str):
     for admin_id in ADMIN_IDS:
         try:
             await application.bot.send_message(admin_id, message, parse_mode='MarkdownV2')
-        except Exception as e:
+        except TelegramError as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
+            try:
+                await application.bot.send_message(admin_id, message, parse_mode=None)
+            except Exception as e2:
+                logger.error(f"Failed to send fallback message to admin {admin_id}: {e2}")
 
 def load_config() -> RadioConfig:
     config_path = Path(CONFIG_FILE)
@@ -411,12 +415,23 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
             keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="status_refresh:0")])
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            if message_id:
-                await application.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup, parse_mode='MarkdownV2')
-            else:
-                sent_message = await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode='MarkdownV2')
-                config.status_message_id = sent_message.message_id
-                save_config(config)
+            try:
+                if message_id:
+                    await application.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup, parse_mode='MarkdownV2')
+                else:
+                    sent_message = await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode='MarkdownV2')
+                    config.status_message_id = sent_message.message_id
+                    save_config(config)
+            except TelegramError as e:
+                logger.error(f"Failed to send status panel with MarkdownV2: {e}")
+                # Fallback to plain text
+                text = text.replace('\\', '').replace('*', '').replace('`', '')
+                if message_id:
+                    await application.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup, parse_mode=None)
+                else:
+                    sent_message = await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=None)
+                    config.status_message_id = sent_message.message_id
+                    save_config(config)
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)
             await send_status_panel(application, chat_id, message_id)
@@ -587,6 +602,7 @@ async def radio_loop(application: Application):
                         'duration': track_info.get('duration', 0)
                     }
                     save_config(config)
+                    await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
                 else:
                     await application.bot.send_message(
                         RADIO_CHAT_ID,
@@ -716,11 +732,19 @@ async def process_poll_results(poll, application: Application):
     config.now_playing = None
     save_config(config)
 
-    await application.bot.send_message(
-        RADIO_CHAT_ID,
-        f"Голосование завершено! Играет: **{escape_markdown(final_winner)}**",
-        parse_mode='MarkdownV2'
-    )
+    try:
+        await application.bot.send_message(
+            RADIO_CHAT_ID,
+            f"Голосование завершено! Играет: **{escape_markdown(final_winner)}**",
+            parse_mode='MarkdownV2'
+        )
+    except TelegramError as e:
+        logger.error(f"Failed to send poll result message: {e}")
+        await application.bot.send_message(
+            RADIO_CHAT_ID,
+            f"Голосование завершено! Играет: {final_winner}",
+            parse_mode=None
+        )
 
     asyncio.create_task(refill_playlist(application))
 
@@ -786,8 +810,8 @@ async def shutdown(application: Application):
     tasks = []
     if 'radio_task' in application.bot_data:
         tasks.append(application.bot_data['radio_task'])
-    if 'voting_task' in application.bot_data:
-        tasks.append(application.bot_data['voting_task'])
+    if 'voting_task' in context.bot_data:
+        tasks.append(context.bot_data['voting_task'])
     if tasks:
         for task in tasks:
             task.cancel()
