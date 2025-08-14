@@ -12,6 +12,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
 from collections import deque
+from pydantic import BaseModel
+from typing import List, Deque, Optional
+from pathlib import Path
+import time
 
 # --- Setup ---
 load_dotenv()
@@ -69,29 +73,51 @@ def escape_markdown(text: str) -> str:
     return re.sub(r'([_*[\\\\]()~`>#+\-=|}{}.!])', r'\\\\\1', text)
 
 # --- Config & FS Management ---
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-    else:
-        config = {}
-    config.setdefault('is_on', False)
-    config.setdefault('genre', 'lo-fi hip hop')
-    config.setdefault('radio_playlist', [])
-    config.setdefault('played_radio_urls', [])
-    config.setdefault('radio_message_ids', [])
-    config.setdefault('voting_interval_seconds', 3600)
-    config.setdefault('track_interval_seconds', 120)
-    config.setdefault('message_cleanup_limit', 30)
-    config.setdefault('poll_duration_seconds', 60)
-    config.setdefault('active_poll', None)
-    return config
+class RadioConfig(BaseModel):
+    is_on: bool = False
+    genre: str = "lo-fi hip hop"
+    radio_playlist: List[str] = []
+    played_radio_urls: List[str] = []
+    radio_message_ids: List[int] = []
+    voting_interval_seconds: int = 3600
+    track_interval_seconds: int = 120
+    message_cleanup_limit: int = 30
+    poll_duration_seconds: int = 60
+    active_poll: Optional[dict] = None
+    votable_genres: List[str] = []
+    status_message_id: Optional[int] = None
 
-def save_config(config):
-    if isinstance(config.get('radio_message_ids'), deque):
-        config['radio_message_ids'] = list(config['radio_message_ids'])
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
+def load_config() -> RadioConfig:
+    config_path = Path(CONFIG_FILE)
+    if config_path.exists():
+        with config_path.open('r', encoding='utf-8') as f:
+            try:
+                return RadioConfig(**json.load(f))
+            except Exception as e:
+                logger.error(f"Error loading config: {e}")
+                # Create backup of corrupted config
+                backup_path = config_path.with_suffix(f'.bak.{int(time.time())}')
+                config_path.rename(backup_path)
+                logger.info(f"Created backup of corrupted config at {backup_path}")
+    
+    # Return default config if file doesn't exist or is corrupted
+    return RadioConfig()
+
+def save_config(config: RadioConfig):
+    config_path = Path(CONFIG_FILE)
+    temp_path = config_path.with_suffix('.tmp')
+    
+    try:
+        with temp_path.open('w', encoding='utf-8') as f:
+            json.dump(config.dict(), f, indent=4, ensure_ascii=False)
+        
+        # Atomic write operation
+        temp_path.replace(config_path)
+    except Exception as e:
+        logger.error(f"Error saving config: {e}")
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
 
 def ensure_download_dir():
     if not os.path.exists(DOWNLOAD_DIR):
@@ -327,17 +353,44 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
             logger.warning(f"Error sending status panel: {e}")
 
 # --- Music & Radio Logic ---
-async def download_track(url: str):
+async def download_track(url: str, max_retries: int = 3):
     ensure_download_dir()
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
-    ydl_opts = {
-        'format': 'bestaudio/best', 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
-        'outtmpl': out_template, 'noplaylist': True, 'quiet': True
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
-        return {'filepath': filename, 'title': info.get('title', 'Unknown'), 'duration': info.get('duration', 0)}
+    
+    for attempt in range(max_retries):
+        try:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
+                'outtmpl': out_template,
+                'noplaylist': True,
+                'quiet': True,
+                'socket_timeout': 30,
+                'retries': 3
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+                
+                # Verify file was actually downloaded
+                if not os.path.exists(filename):
+                    raise FileNotFoundError(f"Downloaded file not found: {filename}")
+                    
+                return {
+                    'filepath': filename,
+                    'title': info.get('title', 'Unknown'),
+                    'duration': info.get('duration', 0),
+                    'url': url
+                }
+                
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Failed to download {url} after {max_retries} attempts: {e}")
+                raise
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            
+    return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
     try:
