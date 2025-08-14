@@ -148,17 +148,24 @@ async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE, use_last_genre: bool = False):
     global radio_task
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Эта команда только для админа.")
+        if isinstance(update, Update) and update.message:
+            await update.message.reply_text("Эта команда только для админа.")
+        elif isinstance(update, Update) and update.callback_query:
+            await update.callback_query.answer("Эта кнопка не для вас.", show_alert=True)
         return
     config = await load_config()
     if config.get('is_on'):
-        await update.message.reply_text("Радио уже включено.")
+        if isinstance(update, Update) and update.message:
+            await update.message.reply_text("Радио уже включено.")
+        elif isinstance(update, Update) and update.callback_query:
+            await update.callback_query.answer("Радио уже включено.")
         return
 
     if not use_last_genre:
         genre = ' '.join(context.args)
         if not genre:
-            await update.message.reply_text("Пожалуйста, укажите жанр. Например: /ron lo-fi hip hop")
+            if isinstance(update, Update) and update.message:
+                await update.message.reply_text("Пожалуйста, укажите жанр. Например: /ron lo-fi hip hop")
             return
         config['genre'] = genre
 
@@ -171,17 +178,26 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         radio_task.cancel()
     radio_task = asyncio.create_task(radio_loop(context.application))
     
-    await update.message.reply_text(f"Радио включено. Жанр: {config['genre']}")
+    if isinstance(update, Update) and update.message:
+        await update.message.reply_text(f"Радио включено. Жанр: {config['genre']}")
+    elif isinstance(update, Update) and update.callback_query:
+        await update.callback_query.answer(f"Радио включено. Жанр: {config['genre']}")
     await update_status_panel_safe(context.application)
 
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global radio_task
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Эта команда только для админа.")
+        if isinstance(update, Update) and update.message:
+            await update.message.reply_text("Эта команда только для админа.")
+        elif isinstance(update, Update) and update.callback_query:
+            await update.callback_query.answer("Эта кнопка не для вас.", show_alert=True)
         return
     config = await load_config()
     if not config.get('is_on'):
-        await update.message.reply_text("Радио уже выключено.")
+        if isinstance(update, Update) and update.message:
+            await update.message.reply_text("Радио уже выключено.")
+        elif isinstance(update, Update) and update.callback_query:
+            await update.callback_query.answer("Радио уже выключено.")
         return
 
     config['is_on'] = False
@@ -191,7 +207,10 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         radio_task.cancel()
         radio_task = None
 
-    await update.message.reply_text("Радио выключено.")
+    if isinstance(update, Update) and update.message:
+        await update.message.reply_text("Радио выключено.")
+    elif isinstance(update, Update) and update.callback_query:
+        await update.callback_query.answer("Радио выключено.")
     await update_status_panel_safe(context.application)
 
 async def prev_track(context: ContextTypes.DEFAULT_TYPE):
