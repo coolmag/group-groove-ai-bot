@@ -36,7 +36,7 @@ class Constants:
 # --- Setup ---
 load_dotenv()
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,6 @@ def save_config(config: RadioConfig):
 def ensure_download_dir():
     if not os.path.exists(DOWNLOAD_DIR):
         os.makedirs(DOWNLOAD_DIR)
-    # Ensure directory is writable
     os.chmod(DOWNLOAD_DIR, 0o777)
     logger.info(f"Ensured download directory {DOWNLOAD_DIR} exists and is writable")
 
@@ -229,7 +228,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
     message = await update.message.reply_text(f'Ищу "{query}"...')
     
-    ydl_opts = {'format': 'bestaudio', 'noplaylist': True, 'quiet': True, 'default_search': 'scsearch30', 'extract_flat': 'in_playlist'}
+    ydl_opts = {'format': 'bestaudio', 'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch30', 'extract_flat': 'in_playlist'}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
@@ -535,56 +534,65 @@ async def refill_playlist(application: Application):
     search_queries = build_search_queries(raw_genre)
     played = set(bot_data.get('played_radio_urls', []))
     suitable_tracks = []
+    max_attempts = 3
+    attempt = 0
 
-    for query in search_queries:
-        logger.info(f"Searching: {query}")
-        cache_key = f"{query}:{raw_genre}"
-        if cache_key in search_cache:
-            info = search_cache[cache_key]
-            logger.info(f"Using cached search results for {query}")
-        else:
-            ydl_opts = {
-                'format': 'bestaudio',
-                'noplaylist': True,
-                'quiet': True,
-                'default_search': 'scsearch50',
-                'extract_flat': 'in_playlist'
-            }
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(query, download=False)
-                search_cache[cache_key] = info
-                logger.info(f"Cached search results for {query}")
-            except Exception as e:
-                logger.error(f"Search error for '{query}': {e}")
-                info = None
-        
-        if not info or not info.get('entries'):
-            logger.warning(f"No entries found for query: {query}")
-            continue
+    while not suitable_tracks and attempt < max_attempts:
+        attempt += 1
+        logger.info(f"Playlist refill attempt {attempt}/{max_attempts}")
+        for query in search_queries:
+            logger.info(f"Searching: {query}")
+            cache_key = f"{query}:{raw_genre}"
+            if cache_key in search_cache:
+                info = search_cache[cache_key]
+                logger.info(f"Using cached search results for {query}")
+            else:
+                ydl_opts = {
+                    'format': 'bestaudio',
+                    'noplaylist': True,
+                    'quiet': True,
+                    'default_search': 'ytsearch50',  # Switch to YouTube search
+                    'extract_flat': 'in_playlist'
+                }
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(query, download=False)
+                    search_cache[cache_key] = info
+                    logger.info(f"Cached search results for {query}")
+                except Exception as e:
+                    logger.error(f"Search error for '{query}': {e}")
+                    info = None
+            
+            if not info or not info.get('entries'):
+                logger.warning(f"No entries found for query: {query}")
+                continue
 
-        for t in info['entries']:
-            if not t:
-                logger.debug("Skipping empty track entry")
-                continue
-            if not (30 < t.get('duration', 0) < 1200):  # Relaxed duration range
-                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: duration {t.get('duration', 0)}")
-                continue
-            if t.get('url') in played:
-                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: already played")
-                continue
-            if has_ukrainian_chars(t.get('title', '')):
-                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: contains Ukrainian characters")
-                continue
-            if not is_safe_track(t):
-                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: unsafe content")
-                continue
-            # Relax genre match to allow more tracks
-            # if not is_genre_match(t, raw_genre):
-            #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: genre mismatch")
-            #     continue
-            suitable_tracks.append(t)
-            logger.debug(f"Added track: {t.get('title', 'Unknown')}")
+            logger.debug(f"Found {len(info['entries'])} entries for query: {query}")
+            for t in info['entries']:
+                if not t:
+                    logger.debug("Skipping empty track entry")
+                    continue
+                if not t.get('url'):
+                    logger.debug(f"Skipping track with no URL: {t.get('title', 'Unknown')}")
+                    continue
+                if t.get('url') in played:
+                    logger.debug(f"Track {t.get('title', 'Unknown')} filtered: already played")
+                    continue
+                # Relaxed filters
+                if not (15 < t.get('duration', 0) < 1800):  # Even wider duration range
+                    logger.debug(f"Track {t.get('title', 'Unknown')} filtered: duration {t.get('duration', 0)}")
+                    continue
+                # if has_ukrainian_chars(t.get('title', '')):
+                #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: contains Ukrainian characters")
+                #     continue
+                # if not is_safe_track(t):
+                #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: unsafe content")
+                #     continue
+                # if not is_genre_match(t, raw_genre):
+                #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: genre mismatch")
+                #     continue
+                suitable_tracks.append(t)
+                logger.debug(f"Added track: {t.get('title', 'Unknown')} (URL: {t.get('url')})")
 
     unique_tracks = {t['url']: t for t in suitable_tracks}
     suitable_tracks = list(unique_tracks.values())
@@ -597,7 +605,7 @@ async def refill_playlist(application: Application):
 
     final_urls = [t['url'] for t in suitable_tracks[:50]]
     random.shuffle(final_urls)
-    logger.info(f"Final playlist URLs: {len(final_urls)} tracks")
+    logger.info(f"Final playlist URLs: {len(final_urls)} tracks: {final_urls}")
 
     bot_data['radio_playlist'] = deque(final_urls)
     config.radio_playlist = list(bot_data['radio_playlist'])
@@ -608,17 +616,17 @@ async def refill_playlist(application: Application):
         try:
             await application.bot.send_message(
                 RADIO_CHAT_ID,
-                "Не удалось найти треки для плейлиста. Пробуем снова через минуту...",
+                f"Не удалось найти треки для плейлиста (попытка {attempt}/{max_attempts}). Пробуем снова через минуту...",
                 parse_mode='MarkdownV2'
             )
         except TelegramError as e:
             logger.error(f"Failed to send playlist error message: {e}")
             await application.bot.send_message(
                 RADIO_CHAT_ID,
-                "Не удалось найти треки для плейлиста. Пробуем снова через минуту...",
+                f"Не удалось найти треки для плейлиста (попытка {attempt}/{max_attempts}). Пробуем снова через минуту...",
                 parse_mode=None
             )
-        await notify_admins(application, f"Ошибка: плейлист для жанра '{raw_genre}' пуст после поиска")
+        await notify_admins(application, f"Ошибка: плейлист для жанра '{raw_genre}' пуст после {attempt} попыток")
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
@@ -895,6 +903,7 @@ async def shutdown(application: Application):
     save_config(config)
 
 def main() -> None:
+    logger.info("Starting bot with main.py version: 2025-08-14-v4")
     if not BOT_TOKEN:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
