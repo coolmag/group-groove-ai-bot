@@ -278,7 +278,10 @@ def admin_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         if not await is_admin(update, context):
-            await update.message.reply_text("Только администраторы могут использовать эту команду.")
+            if isinstance(update, Update) and update.callback_query:
+                await update.callback_query.answer("Эта кнопка только для администраторов.", show_alert=True)
+            else:
+                await update.message.reply_text("Только администраторы могут использовать эту команду.")
             return
         return await func(update, context, *args, **kwargs)
     return wrapper
@@ -336,16 +339,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_status_panel(context.application, update.effective_chat.id)
 
 @admin_only
-async Asc def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'radio_task' in context.bot_data and not context.bot_data['radio_task'].done():
+        context.bot_data['radio_task'].cancel()
+        context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
+    
     if isinstance(update, Update) and update.callback_query:
         await update.callback_query.answer("Пропускаем трек...")
-        if 'radio_task' in context.bot_data and not context.bot_data['radio_task'].done():
-            context.bot_data['radio_task'].cancel()
-            context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
-    else:
-        if 'radio_task' in context.bot_data and not context.bot_data['radio_task'].done():
-            context.bot_data['radio_task'].cancel()
-            context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
+    elif isinstance(update, Update) and update.message:
+        await update.message.reply_text("Пропускаем трек...")
 
 rate_limiter = AsyncLimiter(20, 1)
 
