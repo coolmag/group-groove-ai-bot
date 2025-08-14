@@ -53,9 +53,9 @@ def format_duration(seconds):
     return f"{minutes:02d}:{seconds:02d}"
 
 def create_progress_bar(current, total, length=12):
-    if not total or total <= 0: return "[░░░░░░░░░░░░]"
+    if not total or total <= 0: return '[░░░░░░░░░░░░]'
     progress = int(length * current / total)
-    return f"[{"█" * progress}{"░" * (length - progress)}" ]"
+    return f"[{'█' * progress}{'░' * (length - progress)}]"
 
 # --- Config & FS Management ---
 async def load_config():
