@@ -145,6 +145,60 @@ async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Placeholder for the voting functionality
     await update.message.reply_text("Начинаем новое голосование!")
 
+async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE, use_last_genre: bool = False):
+    global radio_task
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Эта команда только для админа.")
+        return
+    config = await load_config()
+    if config.get('is_on'):
+        await update.message.reply_text("Радио уже включено.")
+        return
+
+    if not use_last_genre:
+        genre = ' '.join(context.args)
+        if not genre:
+            await update.message.reply_text("Пожалуйста, укажите жанр. Например: /ron lo-fi hip hop")
+            return
+        config['genre'] = genre
+
+    config['is_on'] = True
+    config['is_paused'] = False
+    pause_event.set()
+    await save_config(config)
+
+    if radio_task and not radio_task.done():
+        radio_task.cancel()
+    radio_task = asyncio.create_task(radio_loop(context.application))
+    
+    await update.message.reply_text(f"Радио включено. Жанр: {config['genre']}")
+    await update_status_panel_safe(context.application)
+
+async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global radio_task
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Эта команда только для админа.")
+        return
+    config = await load_config()
+    if not config.get('is_on'):
+        await update.message.reply_text("Радио уже выключено.")
+        return
+
+    config['is_on'] = False
+    await save_config(config)
+
+    if radio_task and not radio_task.done():
+        radio_task.cancel()
+        radio_task = None
+
+    await update.message.reply_text("Радио выключено.")
+    await update_status_panel_safe(context.application)
+
+async def prev_track(context: ContextTypes.DEFAULT_TYPE):
+    # Placeholder for prev_track functionality
+    logger.info("prev_track called")
+    pass
+
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -277,6 +331,79 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         if "message is not modified" not in str(e).lower():
             logger.warning(f"Error sending status panel: {e}")
 
+async def refill_playlist_and_play(application: Application):
+    config = await load_config()
+    genre = config.get('genre', 'lo-fi hip hop')
+    logger.info(f"Refilling playlist for genre: {genre}")
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'default_search': 'ytsearch30',
+        'quiet': True,
+        'extract_flat': True
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            search_results = ydl.extract_info(genre, download=False)['entries']
+            new_playlist = [entry['url'] for entry in search_results]
+            application.bot_data['radio_playlist'] = deque(new_playlist)
+            config['radio_playlist'] = new_playlist
+            await save_config(config)
+            logger.info(f"Playlist refilled with {len(new_playlist)} tracks.")
+        except Exception as e:
+            logger.error(f"Error refilling playlist: {e}")
+
+async def download_track(url):
+    logger.info(f"Downloading track: {url}")
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(id)s.%(ext)s'),
+        'noplaylist': True,
+        'quiet': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=True)
+            return {
+                'title': info['title'],
+                'duration': info['duration'],
+                'filepath': ydl.prepare_filename(info),
+            }
+        except Exception as e:
+            logger.error(f"Error downloading track: {e}")
+            return None
+
+async def send_track(track_info, chat_id, bot):
+    logger.info(f"Sending track: {track_info['title']}")
+    try:
+        with open(track_info['filepath'], 'rb') as audio_file:
+            await bot.send_audio(
+                chat_id=chat_id,
+                audio=audio_file,
+                title=track_info['title'],
+                duration=track_info['duration']
+            )
+    except Exception as e:
+        logger.error(f"Error sending track: {e}")
+    finally:
+        if os.path.exists(track_info['filepath']):
+            os.remove(track_info['filepath'])
+
+async def update_status_panel_safe(application: Application):
+    config = await load_config()
+    if config.get('status_message_id'):
+        try:
+            await send_status_panel(application, RADIO_CHAT_ID, config['status_message_id'])
+        except Exception as e:
+            logger.warning(f"Failed to update status panel: {e}")
+
+async def panel_updater_loop(application: Application):
+    while True:
+        await update_status_panel_safe(application)
+        await asyncio.sleep(5) # Update every 5 seconds
+
 # --- Music & Radio Logic ---
 async def radio_loop(application: Application):
     global panel_update_task
@@ -368,6 +495,8 @@ def main() -> None:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("skip", skip_track))
     application.add_handler(CommandHandler("startvote", start_vote_command))
+    application.add_handler(CommandHandler("ron", radio_on_command))
+    application.add_handler(CommandHandler("roff", radio_off_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Running application.run_polling()...")
