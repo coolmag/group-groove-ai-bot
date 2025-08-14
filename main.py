@@ -65,10 +65,7 @@ def is_genre_match(track: dict, genre: str) -> bool:
 def build_search_queries(genre: str):
     return [f"{genre} music", f"{genre} best tracks", f"{genre} playlist"]
 
-
-# --- Helper Functions ---
 def escape_markdown(text: str) -> str:
-    """Escapes special characters for MarkdownV2."""
     return re.sub(r'([_*[\\\\]()~`>#+\-=|}{}.!])', r'\\\\\1', text)
 
 # --- Config & FS Management ---
@@ -105,20 +102,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я музыкальный бот. 🎵\nИспользуй /play для поиска или /ron для радио.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "*Команды бота*\n\n"
-        "/play <название> - Поиск трека.\n"
-        "/id - ID чата.\n"
-        "*Админ-команды:*
-"
-        "/ron <жанр> - Включить радио.\n"
-        "/rof - Выключить радио.\n"
-        "/votestart - Запустить голосование."
-    )
-    await update.message.reply_text(help_text, parse_mode='MarkdownV2')
+    help_text = """
+*Команды бота*
+
+/play <название> - Поиск трека
+/id - ID чата
+
+*Админ-команды:*
+/ron <жанр> - Включить радио
+/rof - Выключить радио
+/votestart - Запустить голосование
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"ID этого чата: `{update.message.chat_id}`", parse_mode='MarkdownV2')
+    await update.message.reply_text(f"ID этого чата: `{update.message.chat_id}`", parse_mode='Markdown')
 
 async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     page_size = 5
@@ -231,6 +229,7 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     config = load_config()
     config['is_on'] = False
+    config['now_playing'] = None
     save_config(config)
     
     if radio_task and not radio_task.done():
@@ -279,25 +278,28 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
     status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
     genre = escape_markdown(config.get('genre', '-'))
     
-    text = (
-        f"*Интерактивная Панель Управления*\n"
-        f"────────────────────────\n"
-        f"*Статус:* {status_icon} *{escape_markdown(status_text)}*\n"
-        f"*Жанр:* `{genre}`\n"
-    )
+    text = f"""
+*Интерактивная Панель Управления*
+────────────────────────
+*Статус:* {status_icon} *{escape_markdown(status_text)}*
+*Жанр:* `{genre}`
+"""
 
     if is_on and now_playing:
         title = escape_markdown(now_playing.get('title', 'Неизвестный трек'))
         duration = escape_markdown(format_duration(now_playing.get('duration', 0)))
-        text += (
-            f"────────────────────────\n"
-            f"*Сейчас играет:*\n"
-            f"`{title}`\n"
-            f"`{duration}`\n"
-            f"────────────────────────\n"
-        )
+        text += f"""
+────────────────────────
+*Сейчас играет:*
+`{title}`
+`{duration}`
+────────────────────────
+"""
     else:
-        text += f"\n*Сейчас играет:* — тишина\.\.\.\n────────────────────────\n"
+        text += f"""
+*Сейчас играет:* — тишина...
+────────────────────────
+"""
 
     keyboard = []
     if is_on:
@@ -345,12 +347,18 @@ async def send_track(track_info: dict, chat_id: int, bot):
         print(f"Failed to send track {track_info.get('filepath')}: {e}")
         return None
 
-async def clear_old_tracks(context: ContextTypes.DEFAULT_TYPE):
+async def clear_old_tracks(app: Application):
+    radio_msgs = app.bot_data.get('radio_message_ids')
+    if not isinstance(radio_msgs, deque) or not radio_msgs:
+        return
     for _ in range(10):
-        if context.bot_data['radio_message_ids']:
-            chat_id, msg_id = context.bot_data['radio_message_ids'].popleft()
-            try: await context.bot.delete_message(chat_id, msg_id)
-            except Exception as e: print(f"Failed to delete msg {msg_id}: {e}")
+        if not radio_msgs:
+            break
+        chat_id, msg_id = radio_msgs.popleft()
+        try:
+            await app.bot.delete_message(chat_id, msg_id)
+        except Exception as e:
+            print(f"Failed to delete msg {msg_id}: {e}")
 
 async def refill_playlist(application: Application):
     bot_data = application.bot_data
@@ -434,12 +442,18 @@ async def radio_loop(application: Application):
                 if sent_msg:
                     bot_data.setdefault('radio_message_ids', deque()).append((sent_msg.chat_id, sent_msg.message_id))
                     bot_data.setdefault('played_radio_urls', []).append(track_url)
-                    if len(bot_data['played_radio_urls']) > 100: bot_data['played_radio_urls'].pop(0)
-                    if len(bot_data['radio_message_ids']) >= config.get('message_cleanup_limit', 30): await clear_old_tracks(application)
-                    
+                    if len(bot_data['played_radio_urls']) > 100:
+                        bot_data['played_radio_urls'].pop(0)
+                    if len(bot_data['radio_message_ids']) >= config.get('message_cleanup_limit', 30):
+                        await clear_old_tracks(application)
+
                     config['radio_playlist'] = list(bot_data['radio_playlist'])
                     config['played_radio_urls'] = bot_data['played_radio_urls']
                     config['radio_message_ids'] = list(bot_data['radio_message_ids'])
+                    config['now_playing'] = {
+                        'title': track_info.get('title', 'Unknown'),
+                        'duration': track_info.get('duration', 0)
+                    }
                     save_config(config)
 
             except Exception as e:
@@ -523,6 +537,7 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
         print(f"Updated state for poll {update.poll.id}.")
 
 async def process_poll_results(poll, application: Application):
+    global radio_task
     config = load_config()
     config['active_poll'] = None
     if not config.get('is_on'): 
@@ -546,10 +561,18 @@ async def process_poll_results(poll, application: Application):
         application.bot_data['radio_playlist'].clear()
     else:
         application.bot_data['radio_playlist'] = deque()
+
+    config['now_playing'] = None
     save_config(config)
-    await application.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Играет: **{escape_markdown(final_winner)}**", parse_mode='MarkdownV2')
-    # Immediately trigger the playlist refill for the new genre
+
+    await application.bot.send_message(
+        RADIO_CHAT_ID,
+        f"Голосование завершено! Играет: **{escape_markdown(final_winner)}**",
+        parse_mode='MarkdownV2'
+    )
+
     asyncio.create_task(refill_playlist(application))
+
     if not radio_task or radio_task.done():
         radio_task = asyncio.create_task(radio_loop(application))
 
