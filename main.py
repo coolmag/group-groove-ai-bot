@@ -34,8 +34,9 @@ class Constants:
     MIN_DISK_SPACE = 1_000_000_000  # 1GB
     FALLBACK_TRACK_URL = "https://www.youtube.com/watch?v=5qap5aO4i9A"  # Known lo-fi hip hop track
     MAX_FILE_SIZE = 15_000_000  # 15MB
-    MAX_DURATION = 300  # 5 minutes
+    MAX_DURATION = 180  # 3 minutes
     MIN_DURATION = 30   # 30 seconds
+    DOWNLOAD_TIMEOUT = 10  # 10 seconds
 
 # --- Setup ---
 load_dotenv()
@@ -256,8 +257,10 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'extract_flat': 'in_playlist'
     }
     try:
+        start_time = time.time()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
+        logger.info(f"Search for '{query}' took {time.time() - start_time:.2f}s")
         if not info.get('entries'):
             await message.edit_text("Треки не найдены.")
             return
@@ -508,7 +511,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                     'outtmpl': out_template,
                     'noplaylist': True,
                     'quiet': True,
-                    'socket_timeout': 30,
+                    'socket_timeout': 10,
                     'retries': 3
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -522,6 +525,10 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                         os.remove(filename)
                         raise ValueError(f"File size {file_size} exceeds {Constants.MAX_FILE_SIZE} bytes")
                     duration = time.time() - start_time
+                    if duration > Constants.DOWNLOAD_TIMEOUT:
+                        logger.warning(f"Download took too long: {duration:.2f}s for {url}, removing")
+                        os.remove(filename)
+                        raise TimeoutError(f"Download exceeded {Constants.DOWNLOAD_TIMEOUT}s")
                     logger.info(f"Successfully downloaded track: {filename}, size: {file_size} bytes, took: {duration:.2f}s")
                     return {
                         'filepath': filename,
@@ -529,7 +536,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                         'duration': info.get('duration', 0),
                         'url': url
                     }
-            except (DownloadError, FileNotFoundError, ValueError) as e:
+            except (DownloadError, FileNotFoundError, ValueError, TimeoutError) as e:
                 logger.error(f"Download attempt {attempt + 1}/{max_retries} failed for {url}: {e}")
                 if attempt == max_retries - 1:
                     raise
@@ -590,12 +597,14 @@ async def refill_playlist(application: Application):
                     'format': 'bestaudio[abr<=128]',  # Limit to 128kbps
                     'noplaylist': True,
                     'quiet': True,
-                    'default_search': 'scsearch50',
+                    'default_search': 'ytsearch50',  # Switch to YouTube
                     'extract_flat': 'in_playlist'
                 }
                 try:
+                    start_time = time.time()
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(query, download=False)
+                    logger.info(f"Search for '{query}' took {time.time() - start_time:.2f}s")
                     search_cache[cache_key] = info
                     logger.info(f"Cached search results for {query}")
                 except Exception as e:
@@ -938,7 +947,7 @@ async def shutdown(application: Application):
     save_config(config)
 
 def main() -> None:
-    logger.info("Starting bot with main.py version: 2025-08-14-v6")
+    logger.info("Starting bot with main.py version: 2025-08-14-v7")
     if not BOT_TOKEN:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
