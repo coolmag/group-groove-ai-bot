@@ -305,4 +305,30 @@ async def radio_loop(application: Application):
             await save_config(config)
             logger.info("Track finished or skipped.")
 
-# ... (The rest of the file remains the same) ---
+def main() -> None:
+    logger.info("--- Bot Starting ---")
+    
+    if not BOT_TOKEN:
+        logger.critical("FATAL: BOT_TOKEN environment variable not found.")
+        return
+
+    logger.info("BOT_TOKEN found.")
+    
+    if not ADMIN_ID or not RADIO_CHAT_ID:
+        logger.warning(f"ADMIN_ID or RADIO_CHAT_ID are not set. ADMIN_ID: {ADMIN_ID}, RADIO_CHAT_ID: {RADIO_CHAT_ID}")
+
+    logger.info("All environment variables loaded.")
+
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # Add handlers
+    # ... (add all handlers)
+
+    logger.info("Running application.run_polling()...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("--- Bot Stopped ---")
+
+if __name__ == "__main__":
+    ensure_download_dir()
+    main()
+
