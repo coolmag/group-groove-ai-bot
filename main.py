@@ -47,43 +47,10 @@ GENRE_KEYWORDS = {
     "disco": ["disco", "funk", "boogie"],
 }
 
-# --- Helper Functions ---
-def format_duration(seconds):
-    if not seconds or seconds == 0: return "--:--"
-    minutes, seconds = divmod(int(seconds), 60)
-    return f"{minutes:02d}:{seconds:02d}"
-
-def has_ukrainian_chars(text):
-    return any(char in text for char in 'іІїЇєЄґҐ')
-
-def build_search_queries(genre_str):
-    decade_match = re.search(r'(70|80|90|2000|2010)-х$', genre_str)
-    if decade_match:
-        decade = decade_match.group(1)
-        core_genre = genre_str[:decade_match.start()].strip().lower()
-    else:
-        decade, core_genre = None, genre_str.lower()
-
-    base_keywords = GENRE_KEYWORDS.get(core_genre.split()[0], [core_genre])
-    queries = []
-    for kw in base_keywords:
-        if decade:
-            queries.append(f"{decade}s {kw} hits")
-            queries.append(f"{decade}s {kw} best")
-            queries.append(f"{decade}s {kw} playlist")
-        else:
-            queries.append(f"{kw} hits")
-            queries.append(f"{kw} best")
-            queries.append(f"{kw} playlist")
-    return queries
-
-def is_genre_match(track, genre_str):
-    core_genre = genre_str.split()[0].lower()
-    keywords = GENRE_KEYWORDS.get(core_genre, [core_genre])
-    title = track.get('title') or ''
-    description = track.get('description') or ''
-    text = (title + ' ' + description).lower()
-    return any(kw in text for kw in keywords)
+def escape_markdown(text: str) -> str:
+    """Escapes special characters for MarkdownV2."""
+    escape_chars = r'_[]()~`>#+-=|{}.!''
+    return re.sub(f'([\\{escape_chars}])', r'\\\1', text)
 
 # --- Config & FS Management ---
 def load_config():
@@ -236,7 +203,7 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         voting_task = asyncio.create_task(hourly_voting_loop(context.application))
     
     if isinstance(update, Update) and update.message:
-        await update.message.reply_text(f"Радио включено. Жанр: {genre}.")
+        await update.message.reply_text(f"Радио включено. Жанр: {escape_markdown(genre)}.", parse_mode='MarkdownV2')
     await send_status_panel(context.application, update.effective_chat.id, config.get('status_message_id'))
 
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,27 +257,27 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 
     status_icon = "🟢" if is_on else "🔴"
     status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
-    genre = config.get('genre', '-')
+    genre = escape_markdown(config.get('genre', '-'))
     
     text = (
         f"*Интерактивная Панель Управления*\n"
         f"────────────────────────\n"
-        f"*Статус:* {status_icon} *{status_text}*\n"
+        f"*Статус:* {status_icon} *{escape_markdown(status_text)}*\n"
         f"*Жанр:* `{genre}`\n"
     )
 
     if is_on and now_playing:
-        title = now_playing.get('title', 'Неизвестный трек')
-        duration = now_playing.get('duration', 0)
+        title = escape_markdown(now_playing.get('title', 'Неизвестный трек'))
+        duration = escape_markdown(format_duration(now_playing.get('duration', 0)))
         text += (
             f"────────────────────────\n"
             f"*Сейчас играет:*\n"
             f"`{title}`\n"
-            f"`{format_duration(duration)}`\n"
+            f"`{duration}`\n"
             f"────────────────────────\n"
         )
     else:
-        text += "\n*Сейчас играет:* — тишина...\n────────────────────────\n"
+        text += f"\n*Сейчас играет:* — тишина\.\.\.\n────────────────────────\n"
 
     keyboard = []
     if is_on:
