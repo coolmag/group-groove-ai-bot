@@ -33,6 +33,9 @@ class Constants:
     MAX_RETRIES = 3
     MIN_DISK_SPACE = 1_000_000_000  # 1GB
     FALLBACK_TRACK_URL = "https://www.youtube.com/watch?v=5qap5aO4i9A"  # Known lo-fi hip hop track
+    MAX_FILE_SIZE = 15_000_000  # 15MB
+    MAX_DURATION = 300  # 5 minutes
+    MIN_DURATION = 30   # 30 seconds
 
 # --- Setup ---
 load_dotenv()
@@ -245,7 +248,13 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
     message = await update.message.reply_text(f'Ищу "{query}"...')
     
-    ydl_opts = {'format': 'bestaudio', 'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch30', 'extract_flat': 'in_playlist'}
+    ydl_opts = {
+        'format': 'bestaudio[abr<=128]',  # Limit to 128kbps
+        'noplaylist': True,
+        'quiet': True,
+        'default_search': 'ytsearch30',
+        'extract_flat': 'in_playlist'
+    }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
@@ -485,12 +494,17 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
     ensure_download_dir()
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
     logger.info(f"Attempting to download track: {url}")
+    start_time = time.time()
     try:
         for attempt in range(max_retries):
             try:
                 ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
+                    'format': 'bestaudio[abr<=128]/bestaudio',  # Prefer 128kbps
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '128'  # Ensure 128kbps
+                    }],
                     'outtmpl': out_template,
                     'noplaylist': True,
                     'quiet': True,
@@ -502,14 +516,20 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                     filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
                     if not os.path.exists(filename):
                         raise FileNotFoundError(f"Downloaded file not found: {filename}")
-                    logger.info(f"Successfully downloaded track: {filename}")
+                    file_size = os.path.getsize(filename)
+                    if file_size > Constants.MAX_FILE_SIZE:
+                        logger.warning(f"File {filename} too large: {file_size} bytes, removing")
+                        os.remove(filename)
+                        raise ValueError(f"File size {file_size} exceeds {Constants.MAX_FILE_SIZE} bytes")
+                    duration = time.time() - start_time
+                    logger.info(f"Successfully downloaded track: {filename}, size: {file_size} bytes, took: {duration:.2f}s")
                     return {
                         'filepath': filename,
                         'title': info.get('title', 'Unknown'),
                         'duration': info.get('duration', 0),
                         'url': url
                     }
-            except (DownloadError, FileNotFoundError) as e:
+            except (DownloadError, FileNotFoundError, ValueError) as e:
                 logger.error(f"Download attempt {attempt + 1}/{max_retries} failed for {url}: {e}")
                 if attempt == max_retries - 1:
                     raise
@@ -567,10 +587,10 @@ async def refill_playlist(application: Application):
                 logger.info(f"Using cached search results for {query}")
             else:
                 ydl_opts = {
-                    'format': 'bestaudio',
+                    'format': 'bestaudio[abr<=128]',  # Limit to 128kbps
                     'noplaylist': True,
                     'quiet': True,
-                    'default_search': 'scsearch50',  # Try SoundCloud again
+                    'default_search': 'scsearch50',
                     'extract_flat': 'in_playlist'
                 }
                 try:
@@ -597,9 +617,12 @@ async def refill_playlist(application: Application):
                 if t.get('url') in played:
                     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: already played")
                     continue
-                # Temporarily remove all filters for debugging
+                duration = t.get('duration', 0)
+                if not (Constants.MIN_DURATION <= duration <= Constants.MAX_DURATION):
+                    logger.debug(f"Track {t.get('title', 'Unknown')} filtered: duration {duration}s")
+                    continue
                 suitable_tracks.append(t)
-                logger.debug(f"Added track: {t.get('title', 'Unknown')} (URL: {t.get('url')})")
+                logger.debug(f"Added track: {t.get('title', 'Unknown')} (URL: {t.get('url')}, duration: {duration}s)")
 
     unique_tracks = {t['url']: t for t in suitable_tracks}
     suitable_tracks = list(unique_tracks.values())
@@ -915,7 +938,7 @@ async def shutdown(application: Application):
     save_config(config)
 
 def main() -> None:
-    logger.info("Starting bot with main.py version: 2025-08-14-v5")
+    logger.info("Starting bot with main.py version: 2025-08-14-v6")
     if not BOT_TOKEN:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
