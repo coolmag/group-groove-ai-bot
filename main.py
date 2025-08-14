@@ -118,6 +118,34 @@ def ensure_download_dir():
         os.makedirs(DOWNLOAD_DIR)
 
 # --- Bot Commands & Handlers ---
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the status panel."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Эта команда только для админа.")
+        return
+    await send_status_panel(context.application, update.effective_chat.id)
+
+async def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Skips the current track."""
+    if update.effective_user.id != ADMIN_ID:
+        if isinstance(update, Update) and update.callback_query:
+            await update.callback_query.answer("Эта кнопка не для вас.", show_alert=True)
+        return
+    
+    logger.info(f"Skip command received from user {update.effective_user.id}")
+    skip_event.set()
+    if isinstance(update, Update) and update.callback_query:
+        await update.callback_query.answer("Пропускаем трек...")
+
+async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts a new vote for the next genre."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Эта команда только для админа.")
+        return
+    # Placeholder for the voting functionality
+    await update.message.reply_text("Начинаем новое голосование!")
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.from_user.id != ADMIN_ID:
@@ -186,7 +214,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
     genre = escape_markdown(config.get('genre', '-'))
     
     text = (
-        f"*Music Radio Player*\n"
+        f"*Интерактивная Панель Управления*\n"
         f"────────────────────────\n"
         f"*Статус:* {status_icon} *{escape_markdown(status_text)}*\n"
         f"*Жанр:* `{genre}`\n"
@@ -309,6 +337,17 @@ async def radio_loop(application: Application):
             await save_config(config)
             logger.info("Track finished or skipped.")
 
+async def post_init(application: Application) -> None:
+    await load_config()
+    bot_commands = [
+        BotCommand("status", "Показать панель управления"),
+        BotCommand("skip", "Пропустить текущий трек"),
+        BotCommand("startvote", "Начать голосование за жанр"),
+        BotCommand("ron", "Включить радио"),
+        BotCommand("roff", "Выключить радио"),
+    ]
+    await application.bot.set_my_commands(bot_commands)
+
 def main() -> None:
     logger.info("--- Bot Starting ---")
     
@@ -326,7 +365,10 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Add handlers
-    # ... (add all handlers)
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("skip", skip_track))
+    application.add_handler(CommandHandler("startvote", start_vote_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Running application.run_polling()...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
