@@ -111,7 +111,6 @@ def is_genre_match(track: dict, genre: str) -> bool:
     return True
 
 def is_safe_track(track: dict) -> bool:
-    """Проверка безопасности трека (например, отсутствие откровенного контента)."""
     title = track.get('title', '').lower()
     description = track.get('description', '').lower()
     unsafe_keywords = ['explicit', '18+', 'nsfw', 'offensive']
@@ -123,7 +122,9 @@ def build_search_queries(genre: str):
 def escape_markdown(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2, including period."""
     special_chars = r'([_*[\]()~`>#+=|{}.!-])'
-    return re.sub(special_chars, r'\\\1', text)
+    escaped = re.sub(special_chars, r'\\\1', text)
+    logger.debug(f"Escaped MarkdownV2 text: '{text}' -> '{escaped}'")
+    return escaped
 
 # --- Config & FS Management ---
 async def notify_admins(application: Application, message: str):
@@ -170,6 +171,9 @@ def save_config(config: RadioConfig):
 def ensure_download_dir():
     if not os.path.exists(DOWNLOAD_DIR):
         os.makedirs(DOWNLOAD_DIR)
+    # Ensure directory is writable
+    os.chmod(DOWNLOAD_DIR, 0o777)
+    logger.info(f"Ensured download directory {DOWNLOAD_DIR} exists and is writable")
 
 # --- Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,6 +262,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_track(track_info, query.message.chat_id, context.bot)
                 await query.edit_message_text("Трек отправлен!")
         except Exception as e:
+            logger.error(f"Error playing track: {e}")
             await query.edit_message_text(f"Ошибка: {e}")
         finally:
             if track_info and os.path.exists(track_info['filepath']):
@@ -443,7 +448,6 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
                     save_config(config)
             except TelegramError as e:
                 logger.error(f"Failed to send status panel with MarkdownV2: {e}")
-                # Fallback to plain text
                 text = text.replace('\\', '').replace('*', '').replace('`', '')
                 if message_id:
                     await application.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup, parse_mode=None)
@@ -462,6 +466,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
+    logger.info(f"Attempting to download track: {url}")
     try:
         for attempt in range(max_retries):
             try:
@@ -479,6 +484,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                     filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
                     if not os.path.exists(filename):
                         raise FileNotFoundError(f"Downloaded file not found: {filename}")
+                    logger.info(f"Successfully downloaded track: {filename}")
                     return {
                         'filepath': filename,
                         'title': info.get('title', 'Unknown'),
@@ -486,19 +492,25 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                         'url': url
                     }
             except (DownloadError, FileNotFoundError) as e:
+                logger.error(f"Download attempt {attempt + 1}/{max_retries} failed for {url}: {e}")
                 if attempt == max_retries - 1:
-                    logger.error(f"Failed to download {url} after {max_retries} attempts: {e}")
                     raise
                 await asyncio.sleep(2 ** attempt)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to download {url} after {max_retries} attempts: {e}")
+        await notify_admins(application, f"Ошибка загрузки трека {url}: {str(e)}")
         return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
+    logger.info(f"Sending track: {track_info['title']} to chat {chat_id}")
     try:
         with open(track_info['filepath'], 'rb') as audio_file:
-            return await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
+            sent_msg = await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
+            logger.info(f"Track sent successfully: {track_info['title']}")
+            return sent_msg
     except Exception as e:
         logger.error(f"Failed to send track {track_info.get('filepath')}: {e}")
+        await notify_admins(application, f"Ошибка отправки трека {track_info.get('title', 'Unknown')}: {str(e)}")
         return None
 
 async def clear_old_tracks(app: Application):
@@ -509,6 +521,7 @@ async def clear_old_tracks(app: Application):
         msg_id = radio_msgs.popleft()
         try:
             await app.bot.delete_message(RADIO_CHAT_ID, msg_id)
+            logger.info(f"Deleted old message: {msg_id}")
         except Exception as e:
             logger.error(f"Failed to delete msg {msg_id}: {e}")
 
@@ -528,6 +541,7 @@ async def refill_playlist(application: Application):
         cache_key = f"{query}:{raw_genre}"
         if cache_key in search_cache:
             info = search_cache[cache_key]
+            logger.info(f"Using cached search results for {query}")
         else:
             ydl_opts = {
                 'format': 'bestaudio',
@@ -540,30 +554,41 @@ async def refill_playlist(application: Application):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(query, download=False)
                 search_cache[cache_key] = info
+                logger.info(f"Cached search results for {query}")
             except Exception as e:
                 logger.error(f"Search error for '{query}': {e}")
                 info = None
         
         if not info or not info.get('entries'):
+            logger.warning(f"No entries found for query: {query}")
             continue
 
         for t in info['entries']:
             if not t:
+                logger.debug("Skipping empty track entry")
                 continue
-            if not (60 < t.get('duration', 0) < 900):
+            if not (30 < t.get('duration', 0) < 1200):  # Relaxed duration range
+                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: duration {t.get('duration', 0)}")
                 continue
             if t.get('url') in played:
+                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: already played")
                 continue
             if has_ukrainian_chars(t.get('title', '')):
-                continue
-            if not is_genre_match(t, raw_genre):
+                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: contains Ukrainian characters")
                 continue
             if not is_safe_track(t):
+                logger.debug(f"Track {t.get('title', 'Unknown')} filtered: unsafe content")
                 continue
+            # Relax genre match to allow more tracks
+            # if not is_genre_match(t, raw_genre):
+            #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: genre mismatch")
+            #     continue
             suitable_tracks.append(t)
+            logger.debug(f"Added track: {t.get('title', 'Unknown')}")
 
     unique_tracks = {t['url']: t for t in suitable_tracks}
     suitable_tracks = list(unique_tracks.values())
+    logger.info(f"Found {len(suitable_tracks)} suitable tracks")
 
     suitable_tracks.sort(
         key=lambda tr: (tr.get('play_count', 0) or 0) + (tr.get('like_count', 0) or 0),
@@ -572,12 +597,13 @@ async def refill_playlist(application: Application):
 
     final_urls = [t['url'] for t in suitable_tracks[:50]]
     random.shuffle(final_urls)
+    logger.info(f"Final playlist URLs: {len(final_urls)} tracks")
 
     bot_data['radio_playlist'] = deque(final_urls)
     config.radio_playlist = list(bot_data['radio_playlist'])
     save_config(config)
 
-    logger.info(f"Playlist refilled with {len(final_urls)} tracks.")
+    logger.info(f"Playlist refilled with {len(final_urls)} tracks")
     if not final_urls:
         try:
             await application.bot.send_message(
@@ -592,23 +618,28 @@ async def refill_playlist(application: Application):
                 "Не удалось найти треки для плейлиста. Пробуем снова через минуту...",
                 parse_mode=None
             )
+        await notify_admins(application, f"Ошибка: плейлист для жанра '{raw_genre}' пуст после поиска")
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
     while True:
         config = load_config()
         if not config.is_on:
+            logger.info("Radio is off, sleeping for 30s")
             await asyncio.sleep(30)
             continue
         await asyncio.sleep(5)
         
         if not bot_data.get('radio_playlist'):
+            logger.info("Playlist empty, refilling...")
             await refill_playlist(application)
             if not bot_data.get('radio_playlist'):
+                logger.warning("No tracks available after refill, retrying in 60s")
                 await asyncio.sleep(60)
                 continue
         
         track_url = bot_data['radio_playlist'].popleft()
+        logger.info(f"Processing track URL: {track_url}")
         try:
             track_info = await download_track(track_url)
             if track_info:
@@ -631,6 +662,7 @@ async def radio_loop(application: Application):
                     save_config(config)
                     await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
                 else:
+                    logger.warning(f"Failed to send track: {track_url}")
                     try:
                         await application.bot.send_message(
                             RADIO_CHAT_ID,
@@ -645,23 +677,24 @@ async def radio_loop(application: Application):
                             parse_mode=None
                         )
         except Exception as e:
-            logger.error(f"Radio loop track error: {e}")
+            logger.error(f"Radio loop track error for {track_url}: {e}")
             try:
                 await application.bot.send_message(
                     RADIO_CHAT_ID,
-                    "Ошибка воспроизведения трека, пробуем следующий...",
+                    f"Ошибка воспроизведения трека, пробуем следующий... ({str(e)})",
                     parse_mode='MarkdownV2'
                 )
             except TelegramError as e:
                 logger.error(f"Failed to send track error message: {e}")
                 await application.bot.send_message(
                     RADIO_CHAT_ID,
-                    "Ошибка воспроизведения трека, пробуем следующий...",
+                    f"Ошибка воспроизведения трека, пробуем следующий... ({str(e)})",
                     parse_mode=None
                 )
         finally:
             if track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
+                logger.info(f"Cleaned up file: {track_info['filepath']}")
         
         await asyncio.sleep(config.track_interval_seconds)
 
