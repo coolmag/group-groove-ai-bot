@@ -32,6 +32,7 @@ class Constants:
     MESSAGE_CLEANUP_LIMIT = 30
     MAX_RETRIES = 3
     MIN_DISK_SPACE = 1_000_000_000  # 1GB
+    FALLBACK_TRACK_URL = "https://www.youtube.com/watch?v=5qap5aO4i9A"  # Known lo-fi hip hop track
 
 # --- Setup ---
 load_dotenv()
@@ -183,6 +184,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 /play <название> - Поиск трека
 /id - ID чата
+/debug_playlist - Показать состояние плейлиста (админ)
 
 *Админ-команды:*
 /ron <жанр> - Включить радио
@@ -195,6 +197,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"ID этого чата: `{update.message.chat_id}`", parse_mode='Markdown')
+
+async def debug_playlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        await update.message.reply_text("Только администраторы могут использовать эту команду.")
+        return
+    config = load_config()
+    bot_data = context.application.bot_data
+    playlist = bot_data.get('radio_playlist', deque())
+    await update.message.reply_text(
+        f"Состояние плейлиста:\n"
+        f"Радио включено: {config.is_on}\n"
+        f"Жанр: {config.genre}\n"
+        f"Треков в плейлисте: {len(playlist)}\n"
+        f"URLs: {list(playlist)[:10]}"
+    )
 
 async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     page_size = 5
@@ -303,7 +320,9 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config.is_on = True
     config.genre = genre
+    config.radio_playlist = [Constants.FALLBACK_TRACK_URL]  # Ensure playlist isn't empty
     save_config(config)
+    logger.debug(f"Radio turned on with genre: {genre}, initial playlist: {config.radio_playlist}")
     
     if 'radio_task' not in context.bot_data or context.bot_data['radio_task'].done():
         context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
@@ -551,7 +570,7 @@ async def refill_playlist(application: Application):
                     'format': 'bestaudio',
                     'noplaylist': True,
                     'quiet': True,
-                    'default_search': 'ytsearch50',  # Switch to YouTube search
+                    'default_search': 'scsearch50',  # Try SoundCloud again
                     'extract_flat': 'in_playlist'
                 }
                 try:
@@ -578,19 +597,7 @@ async def refill_playlist(application: Application):
                 if t.get('url') in played:
                     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: already played")
                     continue
-                # Relaxed filters
-                if not (15 < t.get('duration', 0) < 1800):  # Even wider duration range
-                    logger.debug(f"Track {t.get('title', 'Unknown')} filtered: duration {t.get('duration', 0)}")
-                    continue
-                # if has_ukrainian_chars(t.get('title', '')):
-                #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: contains Ukrainian characters")
-                #     continue
-                # if not is_safe_track(t):
-                #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: unsafe content")
-                #     continue
-                # if not is_genre_match(t, raw_genre):
-                #     logger.debug(f"Track {t.get('title', 'Unknown')} filtered: genre mismatch")
-                #     continue
+                # Temporarily remove all filters for debugging
                 suitable_tracks.append(t)
                 logger.debug(f"Added track: {t.get('title', 'Unknown')} (URL: {t.get('url')})")
 
@@ -604,6 +611,9 @@ async def refill_playlist(application: Application):
     )
 
     final_urls = [t['url'] for t in suitable_tracks[:50]]
+    if not final_urls:
+        logger.warning("No suitable tracks found, adding fallback URL")
+        final_urls = [Constants.FALLBACK_TRACK_URL]
     random.shuffle(final_urls)
     logger.info(f"Final playlist URLs: {len(final_urls)} tracks: {final_urls}")
 
@@ -612,30 +622,32 @@ async def refill_playlist(application: Application):
     save_config(config)
 
     logger.info(f"Playlist refilled with {len(final_urls)} tracks")
-    if not final_urls:
+    if len(final_urls) <= 1 and final_urls[0] == Constants.FALLBACK_TRACK_URL:
         try:
             await application.bot.send_message(
                 RADIO_CHAT_ID,
-                f"Не удалось найти треки для плейлиста (попытка {attempt}/{max_attempts}). Пробуем снова через минуту...",
+                f"Не удалось найти треки для плейлиста (попытка {attempt}/{max_attempts}). Используется запасной трек.",
                 parse_mode='MarkdownV2'
             )
         except TelegramError as e:
             logger.error(f"Failed to send playlist error message: {e}")
             await application.bot.send_message(
                 RADIO_CHAT_ID,
-                f"Не удалось найти треки для плейлиста (попытка {attempt}/{max_attempts}). Пробуем снова через минуту...",
+                f"Не удалось найти треки для плейлиста (попытка {attempt}/{max_attempts}). Используется запасной трек.",
                 parse_mode=None
             )
-        await notify_admins(application, f"Ошибка: плейлист для жанра '{raw_genre}' пуст после {attempt} попыток")
+        await notify_admins(application, f"Ошибка: плейлист для жанра '{raw_genre}' пуст после {attempt} попыток, использован запасной трек")
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
+    logger.debug("Starting radio loop")
     while True:
         config = load_config()
         if not config.is_on:
             logger.info("Radio is off, sleeping for 30s")
             await asyncio.sleep(30)
             continue
+        logger.debug("Radio is on, checking playlist")
         await asyncio.sleep(5)
         
         if not bot_data.get('radio_playlist'):
@@ -903,7 +915,7 @@ async def shutdown(application: Application):
     save_config(config)
 
 def main() -> None:
-    logger.info("Starting bot with main.py version: 2025-08-14-v4")
+    logger.info("Starting bot with main.py version: 2025-08-14-v5")
     if not BOT_TOKEN:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
@@ -915,6 +927,7 @@ def main() -> None:
             CommandHandler("start", start_command),
             CommandHandler(["help", "h"], help_command),
             CommandHandler("id", id_command),
+            CommandHandler("debug_playlist", debug_playlist_command),
             CommandHandler(["play", "p"], play_command),
             CommandHandler(["ron"], radio_on_command),
             CommandHandler(["rof"], radio_off_command),
