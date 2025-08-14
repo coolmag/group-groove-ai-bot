@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler, MessageHandler, filters
 from dotenv import load_dotenv
 from collections import deque
 import time
@@ -487,7 +487,11 @@ async def radio_loop(application: Application):
             await save_config(config)
             logger.info("Track finished or skipped.")
 
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received message: {update.message.text}")
+
 async def post_init(application: Application) -> None:
+    logger.info("post_init called")
     await load_config()
     bot_commands = [
         BotCommand("status", "Показать панель управления"),
@@ -522,6 +526,7 @@ def main() -> None:
     application.add_handler(CommandHandler("ron", radio_on_command))
     application.add_handler(CommandHandler("roff", radio_off_command))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
     logger.info("Handlers added.")
 
     logger.info("Running application.run_polling()...")
