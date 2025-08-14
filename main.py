@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
 from collections import deque
-from pydantic import BaseModel, root_validator
+from pydantic import BaseModel, model_validator
 from typing import List, Deque, Optional
 from pathlib import Path
 import time
@@ -83,9 +83,10 @@ class RadioConfig(BaseModel):
     status_message_id: Optional[int] = None
     now_playing: Optional[dict] = None
 
-    @root_validator
+    @model_validator(mode='before')
+    @classmethod
     def validate_poll_and_status(cls, values):
-        if not values.get('is_on'):
+        if not values.get('is_on', False):
             values['active_poll'] = None
             values['status_message_id'] = None
             values['now_playing'] = None
