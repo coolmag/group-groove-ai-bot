@@ -372,7 +372,7 @@ async def refill_playlist_and_play(application: Application):
             await save_config(config)
             logger.info(f"Playlist refilled with {len(new_playlist)} tracks.")
         except Exception as e:
-            logger.error(f"Error refilling playlist: {e}")
+            logger.error(f"Error refilling playlist with yt-dlp: {e}")
 
 async def download_track(url):
     logger.info(f"Downloading track: {url}")
@@ -391,7 +391,7 @@ async def download_track(url):
                 'filepath': ydl.prepare_filename(info),
             }
         except Exception as e:
-            logger.error(f"Error downloading track: {e}")
+            logger.error(f"Error downloading track with yt-dlp: {e}")
             return None
 
 async def send_track(track_info, chat_id, bot):
@@ -426,6 +426,7 @@ async def panel_updater_loop(application: Application):
 # --- Music & Radio Logic ---
 async def radio_loop(application: Application):
     global panel_update_task
+    logger.info("Radio loop started.")
     while True:
         await pause_event.wait()
         
@@ -439,7 +440,10 @@ async def radio_loop(application: Application):
             playlist = deque(application.bot_data.get('radio_playlist', []))
             if not playlist:
                 logger.info("Playlist empty, refilling...")
-                await refill_playlist_and_play(application)
+                try:
+                    await refill_playlist_and_play(application)
+                except Exception as e:
+                    logger.error(f"Error refilling playlist: {e}")
                 continue
             track_url = playlist.popleft()
             application.bot_data['radio_playlist'] = playlist
@@ -511,12 +515,14 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Add handlers
+    logger.info("Adding handlers...")
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("skip", skip_track))
     application.add_handler(CommandHandler("startvote", start_vote_command))
     application.add_handler(CommandHandler("ron", radio_on_command))
     application.add_handler(CommandHandler("roff", radio_off_command))
     application.add_handler(CallbackQueryHandler(button_callback))
+    logger.info("Handlers added.")
 
     logger.info("Running application.run_polling()...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
