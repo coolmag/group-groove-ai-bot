@@ -102,8 +102,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я музыкальный бот. 🎵\nИспользуй /play для поиска или /ron для радио.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-*Команды бота*
+    help_text = """*Команды бота*
 
 /play <название> - Поиск трека
 /id - ID чата
@@ -114,6 +113,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /votestart - Запустить голосование
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"ID этого чата: `{update.message.chat_id}`", parse_mode='Markdown')
