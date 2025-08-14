@@ -47,6 +47,10 @@ last_config_save = 0
 CONFIG_SAVE_INTERVAL = 5  # seconds
 
 # --- Helper Functions ---
+def escape_markdown(text: str) -> str:
+    """Escapes special characters for MarkdownV2."""
+    return re.sub(r'([_*[\\\]()~`>#+\-=|"{}!])', r'\\\1', text)
+
 def format_duration(seconds):
     if not seconds or seconds <= 0: return "00:00"
     minutes, seconds = divmod(int(seconds), 60)
@@ -175,17 +179,17 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 
     status_icon = "⏸️" if is_paused else ("🟢" if is_on else "🔴")
     status_text = "ПАУЗА" if is_paused else ("В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО")
-    genre = config.get('genre', '-')
+    genre = escape_markdown(config.get('genre', '-'))
     
     text = (
-        f"🎧 **Music Radio Player**\n"
+        f"*Music Radio Player*\n"
         f"────────────────────────\n"
-        f"**Статус:** {status_icon} *{status_text}*\n"
-        f"**Жанр:** `{genre}`\n"
+        f"*Статус:* {status_icon} *{escape_markdown(status_text)}*\n"
+        f"*Жанр:* `{genre}`\n"
     )
 
     if is_on and now_playing:
-        title = now_playing.get('title', 'Неизвестный трек')
+        title = escape_markdown(now_playing.get('title', 'Неизвестный трек'))
         duration = now_playing.get('duration', 0)
         start_time_str = now_playing.get('start_time')
         
@@ -198,15 +202,18 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
                 elapsed = now_playing.get('elapsed_at_pause', 0)
 
         progress_bar = create_progress_bar(elapsed, duration)
+        duration_str = format_duration(duration)
+        elapsed_str = format_duration(elapsed)
+
         text += (
             f"────────────────────────\n"
-            f"**Сейчас играет:**\n"
+            f"*Сейчас играет:*\n"
             f"`{title}`\n\n"
-            f"{progress_bar} {format_duration(elapsed)} / {format_duration(duration)}\n"
+            f"`{progress_bar} {elapsed_str} / {duration_str}`\n"
             f"────────────────────────\n"
         )
     else:
-        text += "\n*Сейчас играет:* — тишина...\n────────────────────────\n"
+        text += "\n*Сейчас играет:* — тишина\.\.\.\n────────────────────────\n"
 
     keyboard = []
     if is_on:
@@ -298,4 +305,4 @@ async def radio_loop(application: Application):
             await save_config(config)
             logger.info("Track finished or skipped.")
 
-# ... (The rest of the file)
+# ... (The rest of the file remains the same) ---
