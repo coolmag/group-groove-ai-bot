@@ -114,7 +114,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'noplaylist': True, 'quiet': True,
-        'default_search': 'ytsearch50', 'extract_flat': 'in_playlist',
+        'default_search': 'scsearch50', 'extract_flat': 'in_playlist',
         'match_filter': lambda i: Constants.MIN_DURATION < i.get('duration', 0) <= Constants.MAX_DURATION,
         'force-ipv4': True, 'no-cache-dir': True,
         'sleep_interval': 1,
@@ -350,7 +350,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = await update.message.reply_text(f'Ищу "{query}"...')
     ydl_opts = {
         'format': 'bestaudio', 'noplaylist': True, 'quiet': True,
-        'default_search': 'ytsearch30', 'extract_flat': 'in_playlist',
+        'default_search': 'scsearch30', 'extract_flat': 'in_playlist',
         'match_filter': lambda info: Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION,
     }
     try:
