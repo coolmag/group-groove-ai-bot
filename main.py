@@ -314,7 +314,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == "status_refresh":
         await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
-rate_limiter = AsyncLimiter(5, 1)
+rate_limiter = AsyncLimiter(3, 1)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
     async with rate_limiter:
@@ -366,6 +366,24 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
+    logger.info(f"Checking availability of {url}")
+    try:
+        ydl_opts = {
+            'format': 'bestaudio',
+            'noplaylist': True,
+            'quiet': True,
+            'extract_flat': 'in_playlist',
+            'force_generic_extractor': True,
+            'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            logger.error(f"Track not available: {url}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to check availability of {url}: {e}")
+        return None
     for attempt in range(max_retries):
         logger.info(f"Downloading track {url}, attempt {attempt + 1}/{max_retries}")
         try:
@@ -374,22 +392,15 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 'outtmpl': out_template,
                 'noplaylist': True,
                 'quiet': False,
-                'socket_timeout': 300,
+                'socket_timeout': 600,
                 'fragment_retries': 10,
-                'retries': 10,
+                'retries': 15,
                 'no_check_certificate': True,
                 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
                 filename = ydl.prepare_filename(info)
-                if filename.endswith('.webm') or filename.endswith('.m4a'):
-                    filename = filename.rsplit('.', 1)[0] + '.mp3'
                 file_size = os.path.getsize(filename) if os.path.exists(filename) else 0
                 if file_size > Constants.MAX_FILE_SIZE:
                     logger.error(f"Track too large: {file_size} bytes for {url}")
@@ -408,7 +419,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 logger.error(f"Failed to download {url} after {max_retries} attempts")
                 await notify_admins(application, f"Не удалось загрузить трек {url}: {e}")
                 return None
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(5)
     return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
@@ -480,18 +491,18 @@ async def refill_playlist(application: Application):
                         logger.error(f"Search attempt {attempt + 1}/{Constants.MAX_RETRIES} failed for {query}: {e}")
                         if attempt == Constants.MAX_RETRIES - 1:
                             info = None
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(5)
             if not info or not info.get('entries'):
                 continue
             for t in info['entries']:
-                if not t or t.get('url') in played:
+                if not t or not t.get('url') or t.get('url') in played:
                     continue
                 if not (15 < t.get('duration', 0) < 1800):
                     continue
                 suitable_tracks.append(t)
-    unique_tracks = {t['url']: t for t in suitable_tracks}
+    unique_tracks = {t['url']: t for t in suitable_tracks if t.get('url')}
     suitable_tracks = list(unique_tracks.values())
-    final_urls = [t['url'] for t in suitable_tracks[:50]]
+    final_urls = [t['url'] for t in suitable_tracks[:30]]
     random.shuffle(final_urls)
     logger.info(f"Refilled playlist with {len(final_urls)} tracks")
     bot_data['radio_playlist'] = deque(final_urls)
@@ -515,6 +526,7 @@ async def radio_loop(application: Application):
             logger.info("Radio is off, sleeping for 30s")
             await asyncio.sleep(30)
             continue
+        logger.info("Checking playlist")
         await asyncio.sleep(5)
         if not bot_data.get('radio_playlist'):
             logger.info("Playlist empty, refilling")
@@ -531,6 +543,10 @@ async def radio_loop(application: Application):
                 await asyncio.sleep(60)
                 continue
             retry_count = 0
+        if not bot_data['radio_playlist']:
+            logger.error("Playlist is empty after refill")
+            await asyncio.sleep(5)
+            continue
         track_url = bot_data['radio_playlist'].popleft()
         logger.info(f"Processing track: {track_url}")
         try:
@@ -553,6 +569,7 @@ async def radio_loop(application: Application):
                     }
                     save_config(config)
                     await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
+                    logger.info(f"Successfully played track: {track_info['title']}")
                 else:
                     logger.warning(f"Failed to send track {track_url}")
             else:
