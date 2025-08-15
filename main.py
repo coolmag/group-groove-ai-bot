@@ -134,10 +134,9 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     await update_status_panel(context)
 
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/best', # Prefer m4a
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
         'noplaylist': True, 'quiet': True, 'noprogress': True,
-        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
         'force-ipv4': True, 'no-cache-dir': True,
         'sleep_interval': 1,
         'max_sleep_interval': 3
@@ -147,7 +146,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         download_task = asyncio.to_thread(yt_dlp.YoutubeDL(ydl_opts).extract_info, url, download=True)
         info = await asyncio.wait_for(download_task, timeout=Constants.DOWNLOAD_TIMEOUT)
         
-        filepath = DOWNLOAD_DIR / f"{info['id']}.mp3"
+        filepath = Path(info['filepath'])
         if not filepath.exists() or filepath.stat().st_size > Constants.MAX_FILE_SIZE:
             raise ValueError(f"File error for {url}")
 
