@@ -115,12 +115,13 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
         'format': 'bestaudio',
         'noplaylist': True,
         'extract_flat': 'in_playlist',
+        'quiet': True,
         'match_filter': lambda i: Constants.MIN_DURATION < i.get('duration', 0) <= Constants.MAX_DURATION,
     }
     try:
         search_query = f"ytsearch50:{state.genre} music"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, search_query, download=False)
+            info = await asyncio.to_thread(ydl.extract_info, search_query)
         entries = info.get('entries', [])
         unplayed = [e['url'] for e in entries if e and e.get('url') not in state.played_radio_urls]
         if unplayed:
@@ -356,7 +357,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         search_query = f"ytsearch30:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, search_query, download=False)
+            info = await asyncio.to_thread(ydl.extract_info, search_query)
         if not info.get('entries'):
             return await message.edit_text("Треки не найдены.")
         
