@@ -29,9 +29,9 @@ class Constants:
     MESSAGE_CLEANUP_LIMIT = 30
     MAX_RETRIES = 5
     MIN_DISK_SPACE = 1_000_000_000
-    MAX_FILE_SIZE = 50_000_000  # 50 MB
+    MAX_FILE_SIZE = 100_000_000  # 100 MB
     DEBOUNCE_SECONDS = 5
-    MAX_DURATION = 1800  # 30 minutes
+    MAX_DURATION = 3600  # 1 hour
 
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -84,6 +84,7 @@ class RadioConfig(BaseModel):
         return values
 
 status_lock = Lock()
+poll_lock = Lock()
 
 def format_duration(seconds):
     if not seconds or seconds <= 0:
@@ -92,9 +93,9 @@ def format_duration(seconds):
     return f"{minutes:02d}:{seconds:02d}"
 
 def build_search_queries(genre: str):
-    queries = [f"{genre} music", f"{genre} best tracks", f"{genre} playlist", genre]
+    queries = [f"{genre} music -live -stream", f"{genre} best tracks -live -stream", f"{genre} playlist -live -stream", f"{genre} -live -stream"]
     if genre == "lo-fi hip hop":
-        queries.extend(["lofi music", "chill music", "chillhop"])
+        queries.extend(["lofi music -live -stream", "chill music -live -stream", "chillhop -live -stream"])
     return queries
 
 def escape_markdown(text: str) -> str:
@@ -276,15 +277,16 @@ async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not config.is_on:
         await update.effective_message.reply_text("Радио выключено.")
         return
-    if config.active_poll:
-        await update.effective_message.reply_text("Голосование уже идет.")
-        return
-    if await _create_and_send_poll(context.application):
-        await update.effective_message.reply_text("Голосование запущено.")
-        logger.info("Voting started")
-    else:
-        await update.effective_message.reply_text("Ошибка голосования.")
-        logger.error("Failed to start voting")
+    async with poll_lock:
+        if config.active_poll:
+            await update.effective_message.reply_text("Голосование уже идет.")
+            return
+        if await _create_and_send_poll(context.application):
+            await update.effective_message.reply_text("Голосование запущено.")
+            logger.info("Voting started")
+        else:
+            await update.effective_message.reply_text("Ошибка голосования.")
+            logger.error("Failed to start voting")
 
 @admin_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,7 +363,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
         genre = config.genre
         text = f"Панель управления\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
-        if is_on and now_playing:
+        if is_on and now_playing and 'title' in now_playing:
             title = now_playing.get('title', 'Неизвестный трек')
             duration = format_duration(now_playing.get('duration', 0))
             text += f"\nСейчас играет: {title} ({duration})"
@@ -493,10 +495,10 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                     'url': url
                 }
         except Exception as e:
-            logger.error(f"Download attempt {attempt + 1} failed for {url}: {e}")
+            logger.error(f"Download attempt {attempt + 1} failed for {url}: {str(e)}")
             if attempt == max_retries - 1:
                 logger.error(f"Failed to download {url} after {max_retries} attempts")
-                await notify_admins(application, f"Не удалось загрузить трек {url}: {e}")
+                await notify_admins(application, f"Не удалось загрузить трек {url}: {str(e)}")
                 return None
             await asyncio.sleep(2)
     return None
@@ -516,12 +518,15 @@ async def send_track(track_info: dict, chat_id: int, bot):
                 title=track_info['title'],
                 duration=track_info['duration']
             )
-            logger.info(f"Sent track {track_info['title']} to chat {chat_id}")
+            logger.info(f"Sent track {track_info['title']} to chat {chat_id}, message_id: {sent_message.message_id}")
             return sent_message
     except Exception as e:
-        logger.error(f"Failed to send track {filepath}: {e}")
-        await notify_admins(bot.application, f"Не удалось отправить трек {track_info['title']}: {e}")
+        logger.error(f"Failed to send track {track_info['title']} from {filepath}: {str(e)}")
+        await notify_admins(bot.application, f"Не удалось отправить трек {track_info['title']}: {str(e)}")
         return None
+    finally:
+        if os.path.exists(filepath):
+            os.remove(filepath)
 
 async def clear_old_tracks(app: Application):
     radio_msgs = app.bot_data.get('radio_message_ids', deque())
@@ -543,7 +548,9 @@ async def refill_playlist(application: Application):
     search_queries = build_search_queries(raw_genre)
     played = set(bot_data.get('played_radio_urls', []))
     suitable_tracks = []
-    for query in search_queries:
+    query_index = 0
+    while not suitable_tracks and query_index < len(search_queries):
+        query = search_queries[query_index]
         logger.info(f"Searching: {query} with ytsearch50")
         cache_key = f"{query}:{raw_genre}:ytsearch50"
         if cache_key in search_cache:
@@ -573,6 +580,7 @@ async def refill_playlist(application: Application):
                     await asyncio.sleep(2)
             if not info or not info.get('entries'):
                 logger.warning(f"No results for {query}")
+                query_index += 1
                 continue
         for t in info['entries']:
             if not t or not t.get('url') or t.get('url') in played:
@@ -586,6 +594,7 @@ async def refill_playlist(application: Application):
                 logger.warning(f"Skipping track with duration {duration}s: {t.get('title', 'Unknown')}")
                 continue
             suitable_tracks.append(t)
+        query_index += 1
     unique_tracks = {t['url']: t for t in suitable_tracks if t.get('url')}
     suitable_tracks = list(unique_tracks.values())
     final_urls = [t['url'] for t in suitable_tracks[:20]]
@@ -653,24 +662,24 @@ async def radio_loop(application: Application):
                     config.radio_message_ids = list(bot_data['radio_message_ids'])
                     config.now_playing = {
                         'title': track_info.get('title', 'Unknown'),
-                        'duration': track_info.get('duration', 0)
+                        'duration': track_info.get('duration', 0),
+                        'url': track_url
                     }
                     save_config(config)
                     async with status_lock:
                         await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
                     logger.info(f"Successfully played track: {track_info['title']}")
                 else:
-                    logger.warning(f"Failed to send track {track_url}")
+                    logger.warning(f"Failed to send track {track_url}, trying next track")
+                    continue
             else:
-                logger.warning(f"Failed to download track {track_url}")
+                logger.warning(f"Failed to download track {track_url}, trying next track")
+                continue
             await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Radio loop error: {e}")
             await notify_admins(application, f"Ошибка в radio_loop: {e}")
             await asyncio.sleep(2)
-        finally:
-            if 'track_info' in locals() and track_info and os.path.exists(track_info['filepath']):
-                os.remove(track_info['filepath'])
         logger.info(f"Sleeping for {config.track_interval_seconds}s before next track")
         await asyncio.sleep(config.track_interval_seconds)
 
@@ -682,12 +691,13 @@ async def hourly_voting_loop(application: Application):
                 logger.info("Radio is off, skipping voting loop")
                 await asyncio.sleep(60)
                 continue
-            if config.active_poll:
-                logger.info("Active poll exists, skipping new poll creation")
-                await asyncio.sleep(60)
-                continue
-            logger.info("Starting hourly voting")
-            await _create_and_send_poll(application)
+            async with poll_lock:
+                if config.active_poll:
+                    logger.info("Active poll exists, skipping new poll creation")
+                    await asyncio.sleep(60)
+                    continue
+                logger.info("Starting hourly voting")
+                await _create_and_send_poll(application)
             await asyncio.sleep(config.voting_interval_seconds)
         except asyncio.CancelledError:
             logger.info("Voting loop cancelled")
@@ -700,39 +710,43 @@ async def hourly_voting_loop(application: Application):
 async def _create_and_send_poll(application: Application) -> bool:
     config = load_config()
     try:
-        votable_genres = config.votable_genres
-        if len(votable_genres) < 2:
-            logger.error("Not enough genres for voting")
-            await notify_admins(application, "Недостаточно жанров для голосования")
-            return False
-        decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
-        special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
-        regular_pool = [g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop']
-        num_to_sample = min(4, len(regular_pool))
-        regular = set(random.sample(regular_pool, k=num_to_sample)) if regular_pool else set()
-        options = list(special | regular)
-        while len(options) < 9:
-            chosen = random.choice(votable_genres)
-            if chosen not in options:
-                options.append(chosen)
-        options.append("Pop")
-        random.shuffle(options)
-        poll_duration = config.poll_duration_seconds
-        async with rate_limiter:
-            message = await application.bot.send_poll(
-                RADIO_CHAT_ID,
-                "Выбери жанр на следующий час!",
-                options[:10],
-                is_anonymous=False,
-                open_period=poll_duration
-            )
-        poll_data = message.poll.to_dict()
-        poll_data['close_timestamp'] = datetime.now().timestamp() + poll_duration
-        config.active_poll = poll_data
-        save_config(config)
-        logger.info(f"Poll created successfully: {message.poll.id}")
-        asyncio.create_task(schedule_poll_processing(application, message.poll.id, poll_duration))
-        return True
+        async with poll_lock:
+            if config.active_poll:
+                logger.info("Active poll exists, skipping poll creation")
+                return False
+            votable_genres = config.votable_genres
+            if len(votable_genres) < 2:
+                logger.error("Not enough genres for voting")
+                await notify_admins(application, "Недостаточно жанров для голосования")
+                return False
+            decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
+            special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
+            regular_pool = [g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop']
+            num_to_sample = min(4, len(regular_pool))
+            regular = set(random.sample(regular_pool, k=num_to_sample)) if regular_pool else set()
+            options = list(special | regular)
+            while len(options) < 9:
+                chosen = random.choice(votable_genres)
+                if chosen not in options:
+                    options.append(chosen)
+            options.append("Pop")
+            random.shuffle(options)
+            poll_duration = config.poll_duration_seconds
+            async with rate_limiter:
+                message = await application.bot.send_poll(
+                    RADIO_CHAT_ID,
+                    "Выбери жанр на следующий час!",
+                    options[:10],
+                    is_anonymous=False,
+                    open_period=poll_duration
+                )
+            poll_data = message.poll.to_dict()
+            poll_data['close_timestamp'] = datetime.now().timestamp() + poll_duration
+            config.active_poll = poll_data
+            save_config(config)
+            logger.info(f"Poll created successfully: {message.poll.id}")
+            asyncio.create_task(schedule_poll_processing(application, message.poll.id, poll_duration))
+            return True
     except Exception as e:
         logger.error(f"Create poll error: {e}")
         await notify_admins(application, f"Ошибка создания голосования: {e}")
