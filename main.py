@@ -144,11 +144,13 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         if not filepath.exists() or filepath.stat().st_size > Constants.MAX_FILE_SIZE:
             raise ValueError(f"File error for {url}")
 
-        state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=info.get('duration', 0), url=url)
-        
-        with open(filepath, 'rb') as audio_file:
-            await context.bot.send_audio(RADIO_CHAT_ID, audio_file, title=state.now_playing.title, duration=state.now_playing.duration)
-        filepath.unlink()
+        try:
+            state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=info.get('duration', 0), url=url)
+            with open(filepath, 'rb') as audio_file:
+                await context.bot.send_audio(RADIO_CHAT_ID, audio_file, title=state.now_playing.title, duration=state.now_playing.duration)
+        finally:
+            if filepath.exists():
+                filepath.unlink()
 
     except asyncio.TimeoutError:
         logger.error(f"Download timed out for {url}")
@@ -195,7 +197,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
     text = f"Статус: {status_icon} {('В ЭФИРЕ' if state.is_on else 'ВЫКЛЮЧЕНО')}\n"
     text += f"Жанр: {state.genre}\n"
     if state.is_on and state.now_playing:
-        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
+        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})"
     elif state.is_on:
         text += "Сейчас играет: ...загрузка..."
 
