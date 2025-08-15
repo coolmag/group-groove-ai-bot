@@ -11,7 +11,6 @@ from collections import deque
 from datetime import datetime
 import yt_dlp
 import shutil
-import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
@@ -196,7 +195,6 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in /play: {e}")
         await message.edit_text("Ошибка поиска.")
-        await notify_admins(context.application, f"Ошибка в /play для '{query}': {e}")
 
 def admin_only(func):
     @wraps(func)
@@ -328,7 +326,8 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         status_icon = "🟢" if is_on else "🔴"
         status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
         genre = config.genre
-        text = f"Панель управления\n────────────────────────\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        text = f"Панель управления\n────────────────────────\nСтатус: {status_icon} {status_text}\nЖанр: {genre}\nОбновлено в: {timestamp}"
         if is_on and now_playing:
             title = now_playing.get('title', 'Неизвестный трек')
             duration = format_duration(now_playing.get('duration', 0))
@@ -349,24 +348,13 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         text = escape_markdown(text)
         try:
             if message_id:
-                try:
-                    await application.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=text,
-                        reply_markup=reply_markup,
-                        parse_mode='MarkdownV2'
-                    )
-                except TelegramError as e:
-                    if "message is not modified" not in str(e).lower():
-                        text = text.replace('\\', '').replace('*', '').replace('`', '')
-                        await application.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=text,
-                            reply_markup=reply_markup,
-                            parse_mode=None
-                        )
+                await application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode='MarkdownV2'
+                )
             else:
                 sent_message = await application.bot.send_message(
                     chat_id=chat_id,
@@ -376,6 +364,26 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
                 )
                 config.status_message_id = sent_message.message_id
                 save_config(config)
+        except TelegramError as e:
+            if "message is not modified" not in str(e).lower():
+                text = text.replace('\\', '').replace('*', '').replace('`', '')
+                if message_id:
+                    await application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        reply_markup=reply_markup,
+                        parse_mode=None
+                    )
+                else:
+                    sent_message = await application.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=reply_markup,
+                        parse_mode=None
+                    )
+                    config.status_message_id = sent_message.message_id
+                    save_config(config)
         except RetryAfter as e:
             logger.warning(f"RetryAfter in send_status_panel: {e}")
             await asyncio.sleep(e.retry_after)
@@ -387,17 +395,6 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
-    logger.info(f"Checking availability of {url}")
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.head(url, follow_redirects=True)
-            if response.status_code != 200:
-                logger.error(f"Track not available: {url}, status: {response.status_code}")
-                return None
-    except Exception as e:
-        logger.error(f"Failed to check availability of {url}: {e}")
-        await notify_admins(application, f"Не удалось проверить доступность {url}: {e}")
-        return None
     for attempt in range(max_retries):
         logger.info(f"Downloading track {url}, attempt {attempt + 1}/{max_retries}")
         try:
@@ -407,8 +404,8 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 'noplaylist': True,
                 'quiet': False,
                 'socket_timeout': 900,
-                'fragment_retries': 15,
-                'retries': 20,
+                'fragment_retries': 10,
+                'retries': 15,
                 'no_check_certificate': True,
                 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
                 'geo_bypass': True,
@@ -493,20 +490,21 @@ async def refill_playlist(application: Application):
                     'quiet': True,
                     'default_search': provider,
                     'extract_flat': 'in_playlist',
-                    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                    'socket_timeout': 900,
-                    'retries': 10,
+                    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 }
-                try:
-                    async with rate_limiter:
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            info = await asyncio.to_thread(ydl.extract_info, query, download=False)
-                    search_cache[cache_key] = info
-                    logger.info(f"Found {len(info.get('entries', []))} entries for {query} with {provider}")
-                except Exception as e:
-                    logger.error(f"Search failed for {query} with {provider}: {e}")
-                    await notify_admins(application, f"Ошибка поиска '{query}' с {provider}: {e}")
-                    info = None
+                for attempt in range(Constants.MAX_RETRIES):
+                    try:
+                        async with rate_limiter:
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(query, download=False)
+                        search_cache[cache_key] = info
+                        logger.info(f"Found {len(info.get('entries', []))} entries for {query} with {provider}")
+                        break
+                    except Exception as e:
+                        logger.error(f"Search attempt {attempt + 1}/{Constants.MAX_RETRIES} failed for {query}: {e}")
+                        if attempt == Constants.MAX_RETRIES - 1:
+                            info = None
+                        await asyncio.sleep(5)
             if not info or not info.get('entries'):
                 continue
             for t in info['entries']:
@@ -514,16 +512,7 @@ async def refill_playlist(application: Application):
                     continue
                 if not (15 < t.get('duration', 0) < 600):
                     continue
-                try:
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        response = await client.head(t['url'], follow_redirects=True)
-                        if response.status_code != 200:
-                            logger.warning(f"Skipping unavailable track {t['url']}, status: {response.status_code}")
-                            continue
-                    suitable_tracks.append(t)
-                except Exception as e:
-                    logger.warning(f"Skipping track {t.get('url', 'unknown')} due to availability check failure: {e}")
-                    continue
+                suitable_tracks.append(t)
     unique_tracks = {t['url']: t for t in suitable_tracks if t.get('url')}
     suitable_tracks = list(unique_tracks.values())
     final_urls = [t['url'] for t in suitable_tracks[:20]]
@@ -672,14 +661,15 @@ async def _create_and_send_poll(application: Application) -> bool:
         return False
 
 async def schedule_poll_processing(application: Application, poll_id: str, delay: int):
+    logger.info(f"Scheduling poll processing for poll {poll_id} in {delay}s")
+    await asyncio.sleep(delay + 2)
+    config = load_config()
+    active_poll_dict = config.active_poll
+    if not active_poll_dict or active_poll_dict['id'] != poll_id:
+        logger.warning(f"Poll {poll_id} is no longer active or was replaced")
+        return
+    logger.info(f"Processing poll {poll_id}")
     try:
-        await asyncio.sleep(delay + 2)
-        config = load_config()
-        active_poll_dict = config.active_poll
-        if not active_poll_dict or active_poll_dict['id'] != poll_id:
-            logger.warning(f"Poll {poll_id} is no longer active or was replaced")
-            return
-        logger.info(f"Processing poll {poll_id}")
         poll = Poll.from_dict(active_poll_dict, application.bot)
         await process_poll_results(poll, application)
     except Exception as e:
@@ -734,7 +724,7 @@ async def process_poll_results(poll, application: Application):
         except TelegramError:
             await application.bot.send_message(RADIO_CHAT_ID, msg, parse_mode=None)
         await refill_playlist(application)
-        if 'radio_task' not in application.bot_data or application.bot_data['radio_task'].done():
+        if 'radio_task' in application.bot_data or application.bot_data['radio_task'].done():
             application.bot_data['radio_task'] = asyncio.create_task(radio_loop(application))
         logger.info(f"Poll processed, new genre: {final_winner}")
     except Exception as e:
