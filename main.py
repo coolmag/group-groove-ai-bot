@@ -1,3 +1,4 @@
+```python
 import logging
 import os
 import asyncio
@@ -31,7 +32,7 @@ class Constants:
     MIN_DISK_SPACE = 1_000_000_000
     MAX_FILE_SIZE = 100_000_000  # 100 MB
     DEBOUNCE_SECONDS = 5
-    MAX_DURATION = 3600  # 1 hour
+    MAX_DURATION = 600  # 10 minutes for lo-fi hip hop
 
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -93,9 +94,13 @@ def format_duration(seconds):
     return f"{minutes:02d}:{seconds:02d}"
 
 def build_search_queries(genre: str):
-    queries = [f"{genre} music -live -stream", f"{genre} best tracks -live -stream", f"{genre} playlist -live -stream", f"{genre} -live -stream"]
+    queries = [f"{genre} music -live -stream -playlist -mix -album", 
+               f"{genre} best tracks -live -stream -playlist -mix -album", 
+               f"{genre} -live -stream -playlist -mix -album"]
     if genre == "lo-fi hip hop":
-        queries.extend(["lofi music -live -stream", "chill music -live -stream", "chillhop -live -stream"])
+        queries.extend(["lofi music -live -stream -playlist -mix -album", 
+                        "chill music -live -stream -playlist -mix -album", 
+                        "chillhop -live -stream -playlist -mix -album"])
     return queries
 
 def escape_markdown(text: str) -> str:
@@ -549,7 +554,8 @@ async def refill_playlist(application: Application):
     played = set(bot_data.get('played_radio_urls', []))
     suitable_tracks = []
     query_index = 0
-    while not suitable_tracks and query_index < len(search_queries):
+    max_query_retries = len(search_queries)
+    while not suitable_tracks and query_index < max_query_retries:
         query = search_queries[query_index]
         logger.info(f"Searching: {query} with ytsearch50")
         cache_key = f"{query}:{raw_genre}:ytsearch50"
@@ -604,12 +610,12 @@ async def refill_playlist(application: Application):
     config.radio_playlist = list(bot_data['radio_playlist'])
     save_config(config)
     if not final_urls:
-        logger.warning(f"No tracks found for '{raw_genre}', switching to 'chill music'")
+        logger.warning(f"No valid tracks found for '{raw_genre}' after trying all queries, switching to 'chill music'")
         config.genre = "chill music"
         config.radio_playlist = []
         bot_data['radio_playlist'] = deque()
         save_config(config)
-        await notify_admins(application, f"Не удалось найти треки для '{raw_genre}'. Переключено на 'chill music'.")
+        await notify_admins(application, f"Не удалось найти подходящие треки для '{raw_genre}'. Переключено на 'chill music'.")
         await refill_playlist(application)
 
 async def radio_loop(application: Application):
@@ -623,7 +629,6 @@ async def radio_loop(application: Application):
                 await asyncio.sleep(30)
                 continue
             logger.info("Checking playlist")
-            await asyncio.sleep(2)
             if not bot_data.get('radio_playlist'):
                 logger.info("Playlist empty, refilling")
                 await refill_playlist(application)
@@ -646,7 +651,7 @@ async def radio_loop(application: Application):
                 await asyncio.sleep(5)
                 continue
             track_url = bot_data['radio_playlist'].popleft()
-            logger.info(f"Processing track: {track_url}")
+            logger.info(f"Attempting to process track: {track_url}")
             track_info = await download_track(track_url)
             if track_info:
                 sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
