@@ -1,4 +1,3 @@
-
 import logging
 import os
 import asyncio
@@ -210,13 +209,18 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
 async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     status_icon = "🟢" if state.is_on else "🔴"
-    text = f"Статус: {status_icon} ({'В ЭФИРЕ' if state.is_on else 'ВЫКЛЮЧЕНО'})\n"
-    text += f"Жанр: {state.genre}\n"
+    
+    lines = []
+    lines.append(f"Статус: {status_icon} {('В ЭФИРЕ' if state.is_on else 'ВЫКЛЮЧЕНО')}")
+    lines.append(f"Жанр: {state.genre}")
+
     if state.is_on and state.now_playing:
-        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})"
-"
+        now_playing_text = f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
+        lines.append(now_playing_text)
     elif state.is_on:
-        text += "Сейчас играет: ...загрузка..."
+        lines.append("Сейчас играет: ...загрузка...")
+    
+    text = "\n".join(lines)
 
     keyboard = [
         [InlineKeyboardButton("🔄 Обновить", callback_data="status:refresh")],
@@ -228,10 +232,10 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if state.status_message_id:
-            logger.info(f"Editing status message {state.status_message_id}")
+            logger.debug(f"Editing status message {state.status_message_id}")
             await context.bot.edit_message_text(chat_id=RADIO_CHAT_ID, message_id=state.status_message_id, text=text, reply_markup=reply_markup)
         else:
-            logger.info("Sending new status message")
+            logger.debug("Sending new status message")
             msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=reply_markup)
             state.status_message_id = msg.message_id
     except TelegramError as e:
@@ -364,7 +368,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {'url': t['url'], 'title': t['title'], 'duration': t['duration']} for t in info['entries']
         ]
         reply_markup = await get_paginated_keyboard(search_id, context)
-        await message.edit_text(f'Найдено: {len(info["entries"]) }. Выбери трек:', reply_markup=reply_markup)
+        await message.edit_text(f'Найдено: {len(info["entries"])}. Выбери трек:', reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Search error for query '{query}': {e}")
         await message.edit_text(f"Ошибка поиска: {e}")
