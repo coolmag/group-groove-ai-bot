@@ -28,7 +28,7 @@ class Constants:
     TRACK_INTERVAL_SECONDS = 30
     POLL_DURATION_SECONDS = 60
     MESSAGE_CLEANUP_LIMIT = 30
-    MAX_RETRIES = 3
+    MAX_RETRIES = 5  # Increased retries for yt-dlp
     MIN_DISK_SPACE = 1_000_000_000  # 1GB
     MAX_FILE_SIZE = 50_000_000      # 50MB
     DEBOUNCE_SECONDS = 5
@@ -44,6 +44,7 @@ ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",")
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
 CONFIG_FILE = "radio_config.json"
 DOWNLOAD_DIR = "downloads"
+PROXY_URL = os.getenv("PROXY_URL", None)  # Optional proxy for yt-dlp
 
 GENRE_KEYWORDS = {
     "electronic": ["electronic", "synth", "synthwave", "edm", "house", "techno", "trance"],
@@ -204,8 +205,15 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'quiet': True,
         'default_search': 'ytsearch30',
         'extract_flat': 'in_playlist',
-        'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-        'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range'
+        'http_headers': {'User-Agent': random.choice([
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+        ])},
+        'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range',
+        'retries': Constants.MAX_RETRIES,
+        'fragment_retries': 10,
+        'proxy': PROXY_URL,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -247,7 +255,6 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config.last_toggle = current_time
     config.is_on = True
     genre = " ".join(context.args) if context.args else config.genre
-    # Validate genre
     if genre.lower() not in GENRE_KEYWORDS and genre.lower() != "lo-fi hip hop":
         await update.effective_message.reply_text(f"Недопустимый жанр: {genre}. Доступные жанры: {', '.join(GENRE_KEYWORDS.keys())}")
         return
@@ -376,7 +383,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
         genre = config.genre
         text = f"Панель управления\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
-        if is_on and now_playing and 'title' in now_playing:
+        if is_on and now_playing and isinstance(now_playing, dict) and 'title' in now_playing:
             title = now_playing.get('title', 'Unknown')
             duration = format_duration(now_playing.get('duration', 0))
             text += f"\nСейчас играет: {title} ({duration})"
@@ -470,26 +477,31 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
     except Exception as e:
         logger.error(f"Failed to check URL {url}: {e}")
         return None
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': temp_file,
+        'noplaylist': True,
+        'quiet': False,
+        'socket_timeout': 30,
+        'fragment_retries': 10,
+        'retries': max_retries,
+        'no_check_certificate': True,
+        'http_headers': {'User-Agent': random.choice([
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+        ])},
+        'geo_bypass': True,
+        'noprogress': True,
+        'proxy': PROXY_URL,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '128',
+        }],
+    }
     for attempt in range(max_retries):
         try:
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': temp_file,
-                'noplaylist': True,
-                'quiet': False,
-                'socket_timeout': 30,
-                'fragment_retries': 10,
-                'retries': 10,
-                'no_check_certificate': True,
-                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                'geo_bypass': True,
-                'noprogress': True,
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '128',
-                }],
-            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
                 filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
@@ -512,7 +524,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
             if attempt == max_retries - 1:
                 await notify_admins(application, f"Не удалось загрузить трек {url}: {str(e)}")
                 return None
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)  # Increased delay between retries
         finally:
             for ext in ['.webm', '.m4a', '.part']:
                 temp_path = temp_file.replace('.%(ext)s', ext)
@@ -524,27 +536,33 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
     return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
-    filepath = track_info['filepath']
+    if not isinstance(track_info, dict):
+        logger.error(f"Invalid track_info: {track_info}")
+        return None
+    filepath = track_info.get('filepath')
+    if not filepath or not os.path.exists(filepath):
+        logger.error(f"Track file missing: {filepath}")
+        return None
     try:
         file_size = os.path.getsize(filepath)
         if file_size > Constants.MAX_FILE_SIZE:
-            logger.error(f"Track {track_info['title']} exceeds size limit: {file_size} bytes")
+            logger.error(f"Track {track_info.get('title', 'Unknown')} exceeds size limit: {file_size} bytes")
             return None
         with open(filepath, 'rb') as audio_file:
             sent_message = await bot.send_audio(
                 chat_id=chat_id,
                 audio=audio_file,
-                title=track_info['title'],
-                duration=track_info['duration']
+                title=track_info.get('title', 'Unknown'),
+                duration=track_info.get('duration', 0)
             )
             return sent_message
     except TelegramError as e:
-        logger.error(f"Failed to send track {track_info['title']}: {e}")
-        await notify_admins(bot.application, f"Не удалось отправить трек {track_info['title']}: {str(e)}")
+        logger.error(f"Failed to send track {track_info.get('title', 'Unknown')}: {e}")
+        await notify_admins(bot.application, f"Не удалось отправить трек {track_info.get('title', 'Unknown')}: {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error sending track {track_info['title']}: {e}")
-        await notify_admins(bot.application, f"Неожиданная ошибка при отправке трека {track_info['title']}: {e}")
+        logger.error(f"Unexpected error sending track {track_info.get('title', 'Unknown')}: {e}")
+        await notify_admins(bot.application, f"Неожиданная ошибка при отправке трека {track_info.get('title', 'Unknown')}: {e}")
         return None
     finally:
         if os.path.exists(filepath):
@@ -584,8 +602,15 @@ async def refill_playlist(application: Application):
                 'quiet': True,
                 'default_search': 'ytsearch50',
                 'extract_flat': 'in_playlist',
-                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range'
+                'http_headers': {'User-Agent': random.choice([
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
+                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+                ])},
+                'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range',
+                'retries': Constants.MAX_RETRIES,
+                'fragment_retries': 10,
+                'proxy': PROXY_URL,
             }
             for attempt in range(Constants.MAX_RETRIES):
                 try:
@@ -600,7 +625,7 @@ async def refill_playlist(application: Application):
                     logger.error(f"Search attempt {attempt + 1} failed for query '{query}': {e}")
                     if attempt == Constants.MAX_RETRIES - 1:
                         info = None
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
             if not info or not info.get('entries'):
                 continue
         for t in info:
@@ -655,35 +680,39 @@ async def radio_loop(application: Application):
                 await asyncio.sleep(5)
                 continue
             track_url = bot_data['radio_playlist'].popleft()
+            if not isinstance(track_url, str):
+                logger.error(f"Invalid track_url type: {type(track_url)}, value: {track_url}")
+                continue
             logger.info(f"Playing track: {track_url}")
             track_info = await download_track(track_url)
-            if track_info:
-                sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
-                if sent_msg:
-                    bot_data.setdefault('radio_message_ids', deque()).append(sent_msg.message_id)
-                    bot_data.setdefault('played_radio_urls', []).append(track_url)
-                    if len(bot_data['played_radio_urls']) > 100:
-                        bot_data['played_radio_urls'].pop(0)
-                    if len(bot_data['radio_message_ids']) >= config.message_cleanup_limit:
-                        await clear_old_tracks(application)
-                    config.radio_playlist = list(bot_data['radio_playlist'])
-                    config.played_radio_urls = bot_data['played_radio_urls']
-                    config.radio_message_ids = list(bot_data['radio_message_ids'])
-                    config.now_playing = {
-                        'title': track_info.get('title', 'Unknown'),
-                        'duration': track_info.get('duration', 0),
-                        'url': track_url
-                    }
-                    save_config(config)
-                    async with status_lock:
-                        await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
-                else:
-                    continue
+            if not track_info or not isinstance(track_info, dict):
+                logger.error(f"Failed to download track or invalid track_info: {track_info}")
+                continue
+            sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
+            if sent_msg:
+                bot_data.setdefault('radio_message_ids', deque()).append(sent_msg.message_id)
+                bot_data.setdefault('played_radio_urls', []).append(track_url)
+                if len(bot_data['played_radio_urls']) > 100:
+                    bot_data['played_radio_urls'].pop(0)
+                if len(bot_data['radio_message_ids']) >= config.message_cleanup_limit:
+                    await clear_old_tracks(application)
+                config.radio_playlist = list(bot_data['radio_playlist'])
+                config.played_radio_urls = bot_data['played_radio_urls']
+                config.radio_message_ids = list(bot_data['radio_message_ids'])
+                config.now_playing = {
+                    'title': track_info.get('title', 'Unknown'),
+                    'duration': track_info.get('duration', 0),
+                    'url': track_url
+                }
+                save_config(config)
+                async with status_lock:
+                    await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
             else:
+                logger.error(f"Failed to send track for URL: {track_url}")
                 continue
             await asyncio.sleep(2)
         except Exception as e:
-            logger.error(f"Error in radio_loop: {e}")
+            logger.error(f"Error in radio_loop: {e}", exc_info=True)
             await notify_admins(application, f"Ошибка в radio_loop: {e}")
             await asyncio.sleep(2)
         await asyncio.sleep(config.track_interval_seconds)
@@ -878,7 +907,7 @@ async def shutdown(application: Application):
     config = load_config()
     tasks = []
     if 'radio_task' in application.bot_data:
-        tasks.append(application.bot_data['radio_layer'])
+        tasks.append(application.bot_data['radio_task'])
     if 'voting_task' in application.bot_data:
         tasks.append(application.bot_data['voting_task'])
     if tasks:
