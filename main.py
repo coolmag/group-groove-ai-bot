@@ -1,4 +1,3 @@
-
 import logging
 import os
 import asyncio
@@ -363,7 +362,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {'url': t['url'], 'title': t['title'], 'duration': t['duration']} for t in info['entries']
         ]
         reply_markup = await get_paginated_keyboard(search_id, context)
-        await message.edit_text(f'Найдено: {len(info["entries"])}. Выбери трек:', reply_markup=reply_markup)
+        await message.edit_text(f'Найдено: {len(info["entries"]) }. Выбери трек:', reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Search error for query '{query}': {e}")
         await message.edit_text(f"Ошибка поиска: {e}")
