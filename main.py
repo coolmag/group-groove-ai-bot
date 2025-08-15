@@ -22,16 +22,15 @@ from functools import wraps
 
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
-    TRACK_INTERVAL_SECONDS = 120
+    TRACK_INTERVAL_SECONDS = 60
     POLL_DURATION_SECONDS = 60
     MESSAGE_CLEANUP_LIMIT = 30
     MAX_RETRIES = 3
     MIN_DISK_SPACE = 1_000_000_000
+    MAX_FILE_SIZE = 50_000_000  # 50 MB
 
 load_dotenv()
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -228,6 +227,7 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         await update.effective_message.reply_text(msg, parse_mode=None)
     await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
+    logger.info(f"Radio started with genre: {genre}")
 
 @admin_only
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,6 +241,7 @@ async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data['voting_task'].cancel()
     await update.effective_message.reply_text("Радио выключено.")
     await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
+    logger.info("Radio stopped")
 
 @admin_only
 async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,12 +254,15 @@ async def start_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if await _create_and_send_poll(context.application):
         await update.effective_message.reply_text("Голосование запущено.")
+        logger.info("Voting started")
     else:
         await update.effective_message.reply_text("Ошибка голосования.")
+        logger.error("Failed to start voting")
 
 @admin_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_status_panel(context.application, update.effective_chat.id)
+    logger.info("Status panel requested")
 
 @admin_only
 async def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,11 +270,13 @@ async def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data['radio_task'].cancel()
         context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
     await update.effective_message.reply_text("Пропускаем трек...")
+    logger.info("Track skipped")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     command, data = query.data.split(":", 1)
+    logger.info(f"Button callback: {command}, data: {data}")
     if command == "play_track":
         track_url = context.bot_data.get('track_urls', {}).get(data)
         if not track_url:
@@ -282,8 +288,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if track_info:
                 await send_track(track_info, query.message.chat_id, context.bot)
                 await query.edit_message_text("Трек отправлен!")
+            else:
+                await query.edit_message_text("Не удалось загрузить трек.")
         except Exception as e:
-            logger.error(f"Error in button_callback: {e}")
+            logger.error(f"Error in button_callback play_track: {e}")
             await query.edit_message_text(f"Ошибка: {e}")
         finally:
             if track_info and os.path.exists(track_info['filepath']):
@@ -306,7 +314,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == "status_refresh":
         await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
-rate_limiter = AsyncLimiter(10, 1)
+rate_limiter = AsyncLimiter(5, 1)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
     async with rate_limiter:
@@ -366,16 +374,27 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 'outtmpl': out_template,
                 'noplaylist': True,
                 'quiet': False,
-                'socket_timeout': 180,
+                'socket_timeout': 300,
                 'fragment_retries': 10,
-                'continuedl': True,
-                'no_part': True,
+                'retries': 10,
                 'no_check_certificate': True,
-                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
                 filename = ydl.prepare_filename(info)
+                if filename.endswith('.webm') or filename.endswith('.m4a'):
+                    filename = filename.rsplit('.', 1)[0] + '.mp3'
+                file_size = os.path.getsize(filename) if os.path.exists(filename) else 0
+                if file_size > Constants.MAX_FILE_SIZE:
+                    logger.error(f"Track too large: {file_size} bytes for {url}")
+                    os.remove(filename)
+                    return None
                 logger.info(f"Downloaded track {info.get('title', 'Unknown')} from {url}")
                 return {
                     'filepath': filename,
@@ -387,24 +406,31 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
             logger.error(f"Download attempt {attempt + 1} failed for {url}: {e}")
             if attempt == max_retries - 1:
                 logger.error(f"Failed to download {url} after {max_retries} attempts")
+                await notify_admins(application, f"Не удалось загрузить трек {url}: {e}")
                 return None
             await asyncio.sleep(2 ** attempt)
     return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
     filepath = track_info['filepath']
-    logger.info(f"Sending track {track_info['title']} from {filepath} to {chat_id}")
+    logger.info(f"Sending track {track_info['title']} from {filepath} to chat {chat_id}")
     try:
         file_size = os.path.getsize(filepath)
-        if file_size > 50 * 1024 * 1024:
+        if file_size > Constants.MAX_FILE_SIZE:
             logger.error(f"Track too large: {file_size} bytes for {track_info['title']}")
             return None
         with open(filepath, 'rb') as audio_file:
-            sent_message = await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
-            logger.info(f"Sent track {track_info['title']} to {chat_id}")
+            sent_message = await bot.send_audio(
+                chat_id=chat_id,
+                audio=audio_file,
+                title=track_info['title'],
+                duration=track_info['duration']
+            )
+            logger.info(f"Sent track {track_info['title']} to chat {chat_id}")
             return sent_message
     except Exception as e:
         logger.error(f"Failed to send track {filepath}: {e}")
+        await notify_admins(bot.application, f"Не удалось отправить трек {track_info['title']}: {e}")
         return None
 
 async def clear_old_tracks(app: Application):
@@ -439,7 +465,8 @@ async def refill_playlist(application: Application):
                     'noplaylist': True,
                     'quiet': True,
                     'default_search': provider,
-                    'extract_flat': 'in_playlist'
+                    'extract_flat': 'in_playlist',
+                    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 }
                 for attempt in range(Constants.MAX_RETRIES):
                     try:
@@ -485,6 +512,7 @@ async def radio_loop(application: Application):
     while True:
         config = load_config()
         if not config.is_on:
+            logger.info("Radio is off, sleeping for 30s")
             await asyncio.sleep(30)
             continue
         await asyncio.sleep(5)
@@ -531,9 +559,11 @@ async def radio_loop(application: Application):
                 logger.warning(f"Failed to download track {track_url}")
         except Exception as e:
             logger.error(f"Radio loop error for {track_url}: {e}")
+            await notify_admins(application, f"Ошибка в radio_loop для {track_url}: {e}")
         finally:
             if track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
+        logger.info(f"Sleeping for {config.track_interval_seconds}s before next track")
         await asyncio.sleep(config.track_interval_seconds)
 
 async def hourly_voting_loop(application: Application):
@@ -553,13 +583,14 @@ async def _create_and_send_poll(application: Application) -> bool:
     config = load_config()
     try:
         votable_genres = config.votable_genres
-        if len(votable_genres) < 10:
+        if len(votable_genres) < 2:
+            logger.error("Not enough genres for voting")
             return False
         decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
         special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
         regular_pool = [g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop']
         num_to_sample = min(4, len(regular_pool))
-        regular = set(random.sample(regular_pool, k=num_to_sample))
+        regular = set(random.sample(regular_pool, k=num_to_sample)) if regular_pool else set()
         options = list(special | regular)
         while len(options) < 9:
             chosen = random.choice(votable_genres)
@@ -574,9 +605,11 @@ async def _create_and_send_poll(application: Application) -> bool:
         config.active_poll = poll_data
         save_config(config)
         asyncio.create_task(schedule_poll_processing(application, message.poll.id, poll_duration))
+        logger.info("Poll created successfully")
         return True
     except Exception as e:
         logger.error(f"Create poll error: {e}")
+        await notify_admins(application, f"Ошибка создания голосования: {e}")
         return False
 
 async def schedule_poll_processing(application: Application, poll_id: str, delay: int):
@@ -600,6 +633,7 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
         if active_poll_dict.get('close_timestamp', 0) > datetime.now().timestamp():
             config.active_poll = update.poll.to_dict()
             save_config(config)
+            logger.info(f"Poll updated: {update.poll.id}")
 
 async def process_poll_results(poll, application: Application):
     config = load_config()
@@ -629,6 +663,7 @@ async def process_poll_results(poll, application: Application):
     await refill_playlist(application)
     if 'radio_task' not in application.bot_data or application.bot_data['radio_task'].done():
         application.bot_data['radio_task'] = asyncio.create_task(radio_loop(application))
+    logger.info(f"Poll processed, new genre: {final_winner}")
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if update.effective_user.id in ADMIN_IDS:
@@ -677,6 +712,7 @@ async def post_init(application: Application) -> None:
                 asyncio.create_task(schedule_poll_processing(application, active_poll['id'], remaining_time))
     asyncio.create_task(cleanup_download_dir())
     asyncio.create_task(cleanup_cache())
+    logger.info("Bot initialized")
 
 async def shutdown(application: Application):
     config = load_config()
@@ -690,13 +726,14 @@ async def shutdown(application: Application):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     save_config(config)
+    logger.info("Bot shutdown")
 
 def main() -> None:
     if not BOT_TOKEN:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
     try:
-        application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+        application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(shutdown).build()
         handlers = [
             CommandHandler("start", start_command),
             CommandHandler(["help", "h"], help_command),
