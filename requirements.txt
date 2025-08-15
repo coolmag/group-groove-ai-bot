@@ -3,6 +3,5 @@ yt-dlp
 pydantic
 python-dotenv
 cachetools
-aiolimiter
 httpx
 ffmpeg-python
