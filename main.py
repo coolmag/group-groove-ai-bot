@@ -4,8 +4,9 @@ import asyncio
 import json
 import random
 import shutil
+import uuid
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from collections import deque
 from datetime import datetime
 import yt_dlp
@@ -108,7 +109,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist for genre: {state.genre}")
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/best', # Prefer m4a
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'noplaylist': True, 'quiet': True,
         'default_search': 'ytsearch50', 'extract_flat': 'in_playlist',
         'match_filter': lambda i: Constants.MIN_DURATION < i.get('duration', 0) <= Constants.MAX_DURATION,
@@ -146,9 +147,12 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         download_task = asyncio.to_thread(yt_dlp.YoutubeDL(ydl_opts).extract_info, url, download=True)
         info = await asyncio.wait_for(download_task, timeout=Constants.DOWNLOAD_TIMEOUT)
         
-        filepath = Path(info['filepath'])
+        if not info.get('requested_downloads'):
+            raise ValueError("yt-dlp did not report a downloaded file.")
+        filepath = Path(info['requested_downloads'][0]['filepath'])
+
         if not filepath.exists() or filepath.stat().st_size > Constants.MAX_FILE_SIZE:
-            raise ValueError(f"File error for {url}")
+            raise ValueError(f"File error for {url}: {filepath} not found or too large")
 
         try:
             state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=info.get('duration', 0), url=url)
@@ -280,8 +284,6 @@ async def force_process_poll(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     if state.active_poll_id == poll_id:
         logger.warning(f"Poll {poll_id} was not closed by handler, forcing processing.")
-        # This is a simplified version, a real implementation would need to fetch poll results
-        # For now, we just clear it to allow new polls
         state.active_poll_id = None
         await context.bot.send_message(RADIO_CHAT_ID, "Голосование принудительно завершено из-за таймаута.")
         await update_status_panel(context)
@@ -293,7 +295,7 @@ async def poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.poll.is_closed:
         logger.info(f"Processing closed poll: {update.poll.id}")
-        state.active_poll_id = None # Mark as processed immediately
+        state.active_poll_id = None
         winning_option = max(update.poll.options, key=lambda o: o.voter_count, default=None)
         
         if winning_option and winning_option.voter_count > 0:
@@ -304,6 +306,56 @@ async def poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_message(RADIO_CHAT_ID, "В голосовании никто не участвовал.")
         await update_status_panel(context)
+
+# --- Search Command Handlers ---
+async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    page_size = 5
+    results = context.bot_data.get('paginated_searches', {}).get(search_id, [])
+    if not results:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("Поиск не найден.", callback_data="noop:0")]])
+    start_index = page * page_size
+    keyboard = []
+    for entry in results[start_index : start_index + page_size]:
+        title = entry.get('title', 'Unknown')
+        duration = format_duration(entry.get('duration'))
+        cache_key = uuid.uuid4().hex[:10]
+        context.bot_data.setdefault('track_urls', {})[cache_key] = entry.get('url')
+        keyboard.append([InlineKeyboardButton(f"▶️ {title} ({duration})", callback_data=f"play_track:{cache_key}")])
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page:{search_id}:{page-1}"))
+    if (page + 1) * page_size < len(results):
+        nav_buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"page:{search_id}:{page+1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    return InlineKeyboardMarkup(keyboard)
+
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Укажи название: `/play <название>`", parse_mode='Markdown')
+        return
+    query = " ".join(context.args)
+    message = await update.message.reply_text(f'Ищу "{query}"...')
+    ydl_opts = {
+        'format': 'bestaudio', 'noplaylist': True, 'quiet': True,
+        'default_search': 'ytsearch30', 'extract_flat': 'in_playlist',
+        'match_filter': lambda info: Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, query, download=False)
+        if not info.get('entries'):
+            return await message.edit_text("Треки не найдены.")
+        
+        search_id = uuid.uuid4().hex[:10]
+        context.bot_data.setdefault('paginated_searches', {})[search_id] = [
+            {'url': t['url'], 'title': t['title'], 'duration': t['duration']} for t in info['entries']
+        ]
+        reply_markup = await get_paginated_keyboard(search_id, context)
+        await message.edit_text(f'Найдено: {len(info["entries"]) }. Выбери трек:', reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Search error for query '{query}': {e}")
+        await message.edit_text("Ошибка поиска. Попробуйте другую фразу.")
 
 # --- Entry Point Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -316,9 +368,28 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    command, *data = update.callback_query.data.split(":")
+    query = update.callback_query
+    command, *data = query.data.split(":")
     action_key = data[0] if data else ''
 
+    # Search result pagination
+    if command == "page":
+        search_id, page_num_str = data
+        page = int(page_num_str)
+        reply_markup = await get_paginated_keyboard(search_id, context, page)
+        return await query.edit_message_text('Выбери трек:', reply_markup=reply_markup)
+    
+    # Individual track playback
+    if command == "play_track":
+        track_url = context.bot_data.get('track_urls', {}).get(action_key)
+        if not track_url:
+            return await query.edit_message_text("Трек устарел.")
+        await query.edit_message_text("Обрабатываю...")
+        # This downloads in the main thread, which is fine for single user actions
+        await download_and_send_track(context, track_url)
+        return await query.edit_message_text("Трек отправлен!")
+
+    # Admin panel actions
     actions = {
         "radio": {"on": lambda: radio_on_off_command(update, context, True), "off": lambda: radio_on_off_command(update, context, False), "skip": lambda: skip_command(update, context)},
         "vote": {"start": lambda: create_poll_command(update, context)},
@@ -340,6 +411,9 @@ async def on_shutdown(context: ContextTypes.DEFAULT_TYPE):
         task.cancel()
     await save_state(context)
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
 def main():
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     if not BOT_TOKEN: return logger.critical("FATAL: BOT_TOKEN not set.")
@@ -350,16 +424,20 @@ def main():
         .post_init(post_init).post_shutdown(on_shutdown).build()
     )
     
-    application.add_handlers([
+    application.add_error_handler(error_handler)
+
+    handlers = [
         CommandHandler("start", start_command),
         CommandHandler("status", status_command),
         CommandHandler("skip", skip_command),
         CommandHandler("votestart", create_poll_command),
+        CommandHandler(["play", "p"], play_command),
         CommandHandler("ron", lambda u, c: radio_on_off_command(u, c, True)),
         CommandHandler("rof", lambda u, c: radio_on_off_command(u, c, False)),
         CallbackQueryHandler(button_callback),
         PollHandler(poll_handler)
-    ])
+    ]
+    application.add_handlers(handlers)
     
     logger.info("Starting bot polling...")
     application.run_polling()

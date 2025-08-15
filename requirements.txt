@@ -2,6 +2,5 @@ python-telegram-bot[job-queue]
 yt-dlp
 pydantic
 python-dotenv
-cachetools
 httpx
 ffmpeg-python
