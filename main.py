@@ -108,10 +108,13 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist for genre: {state.genre}")
     ydl_opts = {
-        'format': 'bestaudio', 'noplaylist': True, 'quiet': True,
+        'format': 'bestaudio[ext=m4a]/bestaudio/best', # Prefer m4a
+        'noplaylist': True, 'quiet': True,
         'default_search': 'ytsearch50', 'extract_flat': 'in_playlist',
         'match_filter': lambda i: Constants.MIN_DURATION < i.get('duration', 0) <= Constants.MAX_DURATION,
-        'force-ipv4': True, 'no-cache-dir': True
+        'force-ipv4': True, 'no-cache-dir': True,
+        'sleep_interval': 1,
+        'max_sleep_interval': 3
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -131,10 +134,13 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     await update_status_panel(context)
 
     ydl_opts = {
-        'format': 'bestaudio/best', 'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
+        'format': 'bestaudio[ext=m4a]/bestaudio/best', # Prefer m4a
+        'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
         'noplaylist': True, 'quiet': True, 'noprogress': True,
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
-        'force-ipv4': True, 'no-cache-dir': True
+        'force-ipv4': True, 'no-cache-dir': True,
+        'sleep_interval': 1,
+        'max_sleep_interval': 3
     }
     try:
         logger.info(f"Downloading {url}")
