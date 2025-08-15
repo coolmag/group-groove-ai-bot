@@ -878,7 +878,7 @@ async def shutdown(application: Application):
     config = load_config()
     tasks = []
     if 'radio_task' in application.bot_data:
-        tasks.append(application.bot_data['radio_task'])
+        tasks.append(application.bot_data['radio_layer'])
     if 'voting_task' in application.bot_data:
         tasks.append(application.bot_data['voting_task'])
     if tasks:
@@ -890,15 +890,15 @@ async def shutdown(application: Application):
 def main() -> None:
     # Check system dependencies
     if not shutil.which("ffmpeg"):
-        logger.error("FATAL: ffmpeg binary not installed")
+        logger.error("FATAL: ffmpeg binary not installed. Please install ffmpeg (e.g., 'apt-get install ffmpeg' on Ubuntu).")
         return
     try:
         import ffmpeg
     except ImportError:
-        logger.error("FATAL: ffmpeg-python not installed")
+        logger.error("FATAL: ffmpeg-python not installed. Please install it with 'pip install ffmpeg-python'.")
         return
     if not BOT_TOKEN:
-        logger.error("FATAL: BOT_TOKEN not set")
+        logger.error("FATAL: BOT_TOKEN not set in environment variables.")
         return
     try:
         application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(shutdown).read_timeout(60).write_timeout(60).build()
