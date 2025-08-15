@@ -114,7 +114,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'noplaylist': True, 'quiet': True,
-        'default_search': 'scsearch50', 'extract_flat': 'in_playlist',
+        'default_search': 'ytsearch50', 'extract_flat': 'in_playlist',
         'match_filter': lambda i: Constants.MIN_DURATION < i.get('duration', 0) <= Constants.MAX_DURATION,
         'force-ipv4': True, 'no-cache-dir': True,
         'sleep_interval': 1,
@@ -139,33 +139,38 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
 
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'noplaylist': True,
-        'quiet': True,
+        'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
+        'noplaylist': True, 'quiet': True, 'noprogress': True,
+        'force-ipv4': True, 'no-cache-dir': True,
+        'sleep_interval': 1,
+        'max_sleep_interval': 3
     }
     try:
-        logger.info(f"Getting direct stream URL for {url}")
-        # Step 1: Get info without downloading
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
+        logger.info(f"Downloading {url}")
+        download_task = asyncio.to_thread(yt_dlp.YoutubeDL(ydl_opts).extract_info, url, download=True)
+        info = await asyncio.wait_for(download_task, timeout=Constants.DOWNLOAD_TIMEOUT)
         
-        # Step 2: Get the direct URL to the audio stream
-        stream_url = info.get('url')
-        if not stream_url:
-            raise ValueError("Could not extract direct stream URL.")
+        if not info.get('requested_downloads'):
+            raise ValueError("yt-dlp did not report a downloaded file.")
+        filepath = Path(info['requested_downloads'][0]['filepath'])
 
-        # Step 3: Send the URL to Telegram
-        logger.info(f"Sending stream URL to Telegram: {stream_url[:70]}...")
-        state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=int(info.get('duration', 0)), url=url)
-        await context.bot.send_audio(
-            RADIO_CHAT_ID,
-            audio=stream_url, # Send the URL directly
-            title=state.now_playing.title,
-            duration=state.now_playing.duration
-        )
+        if not filepath.exists() or filepath.stat().st_size > Constants.MAX_FILE_SIZE:
+            raise ValueError(f"File error for {url}: {filepath} not found or too large")
 
+        try:
+            state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=int(info.get('duration', 0)), url=url)
+            with open(filepath, 'rb') as audio_file:
+                await context.bot.send_audio(RADIO_CHAT_ID, audio_file, title=state.now_playing.title, duration=state.now_playing.duration)
+        finally:
+            if filepath.exists():
+                filepath.unlink()
+
+    except asyncio.TimeoutError:
+        logger.error(f"Download timed out for {url}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Загрузка трека заняла слишком много времени и была прервана.")
     except Exception as e:
-        logger.error(f"Failed to process track {url}: {e}")
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось обработать трек.")
+        logger.error(f"Failed to download/send track {url}: {e}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось скачать или отправить трек.")
     finally:
         state.now_playing = None
         await update_status_panel(context)
@@ -350,7 +355,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = await update.message.reply_text(f'Ищу "{query}"...')
     ydl_opts = {
         'format': 'bestaudio', 'noplaylist': True, 'quiet': True,
-        'default_search': 'scsearch30', 'extract_flat': 'in_playlist',
+        'default_search': 'ytsearch30', 'extract_flat': 'in_playlist',
         'match_filter': lambda info: Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION,
     }
     try:
