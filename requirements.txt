@@ -1,6 +1,8 @@
-yt-dlp>=2023.12.30
-pydantic>=2.0.0
-python-telegram-bot>=21.0
-python-dotenv>=1.0.0
-cachetools>=5.0.0
-aiolimiter>=1.1.0
+python-telegram-bot==20.7
+yt-dlp==2023.12.30
+ffmpeg-python==0.2.0
+pydantic==2.5.2
+cachetools==5.3.2
+aiolimiter==1.1.0
+httpx==0.25.2
+python-dotenv==1.0.0
