@@ -498,7 +498,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 logger.error(f"Failed to download {url} after {max_retries} attempts")
                 await notify_admins(application, f"Не удалось загрузить трек {url}: {e}")
                 return None
-            await asyncio.sleep(2)  # Reduced wait time
+            await asyncio.sleep(2)
     return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
@@ -614,7 +614,7 @@ async def radio_loop(application: Application):
                 await asyncio.sleep(30)
                 continue
             logger.info("Checking playlist")
-            await asyncio.sleep(2)  # Reduced wait time
+            await asyncio.sleep(2)
             if not bot_data.get('radio_playlist'):
                 logger.info("Playlist empty, refilling")
                 await refill_playlist(application)
@@ -663,7 +663,7 @@ async def radio_loop(application: Application):
                     logger.warning(f"Failed to send track {track_url}")
             else:
                 logger.warning(f"Failed to download track {track_url}")
-            await asyncio.sleep(2)  # Short wait before next track attempt
+            await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Radio loop error: {e}")
             await notify_admins(application, f"Ошибка в radio_loop: {e}")
@@ -756,7 +756,7 @@ async def schedule_poll_processing(application: Application, poll_id: str, delay
         config.active_poll = None
         save_config(config)
 
-async def receive_poll_update(update: Update, context: ContextCAFETERIA: ContextTypes.DEFAULT_TYPE):
+async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     active_poll_dict = config.active_poll
     if active_poll_dict and active_poll_dict['id'] == update.poll.id:
