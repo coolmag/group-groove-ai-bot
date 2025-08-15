@@ -114,11 +114,15 @@ def escape_markdown(text: str) -> str:
     return re.sub(special_chars, r'\\\1', text)
 
 async def notify_admins(application: Application, message: str):
+    """Send a message to all admins, falling back to plain text if Markdown fails."""
     for admin_id in ADMIN_IDS:
         try:
             await application.bot.send_message(admin_id, escape_markdown(message), parse_mode='MarkdownV2')
         except TelegramError:
-            await application.bot.send_message(admin_id, message, parse_mode=None)
+            try:
+                await application.bot.send_message(admin_id, message, parse_mode=None)
+            except Exception as e:
+                logger.error(f"Failed to send fallback notification to admin {admin_id}: {e}")
         except Exception as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
 
@@ -231,15 +235,43 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Search error for query '{query}': {e}")
         await message.edit_text("Ошибка поиска. Попробуйте другую фразу.")
 
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if the user is a bot admin or a chat admin."""
+    user_id = update.effective_user.id
+    logger.info(f"Checking admin status for user_id: {user_id}")
+
+    if user_id in ADMIN_IDS:
+        logger.info(f"User {user_id} found in ADMIN_IDS. Granting admin access.")
+        return True
+
+    logger.info(f"User {user_id} not in ADMIN_IDS. Checking chat admin status in chat_id: {RADIO_CHAT_ID}.")
+    if RADIO_CHAT_ID == 0:
+        logger.warning("RADIO_CHAT_ID is not set. Cannot check for chat admin status.")
+        return False
+
+    try:
+        member = await context.bot.get_chat_member(RADIO_CHAT_ID, user_id)
+        status = member.status
+        logger.info(f"User {user_id} has status '{status}' in chat {RADIO_CHAT_ID}.")
+        if status in ('administrator', 'creator'):
+            logger.info(f"Granting admin access based on chat status.")
+            return True
+        else:
+            logger.info(f"User is not a chat admin.")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to check chat admin status for user {user_id}: {e}")
+        return False
+
 def admin_only(func):
+    """Decorator to restrict command access to admins."""
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user_id = update.effective_user.id
-        if user_id not in ADMIN_IDS:
-            if isinstance(update, Update) and update.callback_query:
-                await update.callback_query.answer("Только для админов.", show_alert=True)
+        if not await is_admin(update, context):
+            if update.callback_query:
+                await update.callback_query.answer("Эта команда только для администраторов.", show_alert=True)
             elif update.message:
-                await update.message.reply_text("Только админы могут использовать эту команду.")
+                await update.message.reply_text("Эта команда только для администраторов.")
             return
         return await func(update, context, *args, **kwargs)
     return wrapper
@@ -382,6 +414,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
+    """Sends or updates the status panel, with robust fallback for formatting errors."""
     async with rate_limiter:
         config = load_config()
         now_playing = config.now_playing
@@ -389,13 +422,15 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         status_icon = "🟢" if is_on else "🔴"
         status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
         genre = config.genre
-        text = f"Панель управления\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
+
+        original_text = f"Панель управления\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
         if is_on and now_playing and isinstance(now_playing, dict) and 'title' in now_playing:
             title = now_playing.get('title', 'Unknown')
             duration = format_duration(now_playing.get('duration', 0))
-            text += f"\nСейчас играет: {title} ({duration})"
+            original_text += f"\nСейчас играет: {title} ({duration})"
         else:
-            text += "\nСейчас играет: — Подготовка следующего трека..."
+            original_text += "\nСейчас играет: — Подготовка следующего трека..."
+
         keyboard = []
         if is_on:
             keyboard.append([
@@ -407,69 +442,43 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
             keyboard.append([InlineKeyboardButton("▶️ Запустить", callback_data="toggle_radio:0")])
         keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="status_refresh:0")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        text = escape_markdown(text)
-        try:
-            if message_id:
-                try:
-                    await application.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=text,
-                        reply_markup=reply_markup,
-                        parse_mode='MarkdownV2'
-                    )
-                except TelegramError as e:
-                    if "message is not modified" not in str(e).lower():
-                        sent_message = await application.bot.send_message(
-                            chat_id=chat_id,
-                            text=text,
-                            reply_markup=reply_markup,
-                            parse_mode='MarkdownV2'
-                        )
-                        config.status_message_id = sent_message.message_id
-                        save_config(config)
-            else:
-                sent_message = await application.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode='MarkdownV2'
-                )
-                config.status_message_id = sent_message.message_id
-                save_config(config)
-        except TelegramError as e:
-            if "message is not modified" not in str(e).lower():
-                text = text.replace('\\', '').replace('*', '').replace('`', '')
+
+        async def send_or_edit(text_content, parse_mode=None):
+            try:
                 if message_id:
-                    try:
-                        await application.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=text,
-                            reply_markup=reply_markup,
-                            parse_mode=None
-                        )
-                    except TelegramError:
-                        sent_message = await application.bot.send_message(
-                            chat_id=chat_id,
-                            text=text,
-                            reply_markup=reply_markup,
-                            parse_mode=None
-                        )
-                        config.status_message_id = sent_message.message_id
-                        save_config(config)
-                else:
-                    sent_message = await application.bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        reply_markup=reply_markup,
-                        parse_mode=None
+                    await application.bot.edit_message_text(
+                        chat_id=chat_id, message_id=message_id, text=text_content,
+                        reply_markup=reply_markup, parse_mode=parse_mode
                     )
-                    config.status_message_id = sent_message.message_id
+                else:
+                    new_msg = await application.bot.send_message(
+                        chat_id=chat_id, text=text_content, reply_markup=reply_markup, parse_mode=parse_mode
+                    )
+                    config.status_message_id = new_msg.message_id
                     save_config(config)
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after)
-            await send_status_panel(application, chat_id, message_id)
+            except TelegramError as e:
+                if "message is not modified" in str(e).lower():
+                    return
+                logger.warning(f"Editing message {message_id} failed, sending new one. Error: {e}")
+                new_msg = await application.bot.send_message(
+                    chat_id=chat_id, text=text_content, reply_markup=reply_markup, parse_mode=parse_mode
+                )
+                config.status_message_id = new_msg.message_id
+                save_config(config)
+
+        try:
+            await send_or_edit(escape_markdown(original_text), parse_mode='MarkdownV2')
+        except (TelegramError, RetryAfter) as e:
+            if isinstance(e, RetryAfter):
+                await asyncio.sleep(e.retry_after)
+                await send_or_edit(original_text, parse_mode=None)
+            elif "message is not modified" not in str(e).lower():
+                logger.warning(f"MarkdownV2 failed for status panel, falling back to plain text. Error: {e}")
+                try:
+                    await send_or_edit(original_text, parse_mode=None)
+                except Exception as final_e:
+                    logger.error(f"Failed to send even plain text status panel: {final_e}")
+
 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
