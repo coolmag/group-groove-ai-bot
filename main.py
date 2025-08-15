@@ -333,6 +333,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     command, data = query.data.split(":", 1)
+
     if command == "play_track":
         track_url = context.bot_data.get('track_urls', {}).get(data)
         if not track_url:
@@ -356,33 +357,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             if 'track_info' in locals() and track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
+
     elif command == "page":
         search_id, page_num_str = data.split(":")
         page = int(page_num_str)
         reply_markup = await get_paginated_keyboard(search_id, context, page)
         await query.edit_message_text('Выбери трек:', reply_markup=reply_markup)
+
     elif command == "toggle_radio":
-        await admin_only(radio_toggle_action)(update, context)
+        config = load_config()
+        if config.is_on:
+            await radio_off_command(update, context)
+        else:
+            await radio_on_command(update, context)
+
     elif command == "skip_track":
-        await admin_only(skip_track_action)(update, context)
+        await skip_track(update, context)
+
     elif command == "start_vote":
-        await admin_only(start_vote_action)(update, context)
+        await start_vote_command(update, context)
+
     elif command == "status_refresh":
         async with status_lock:
             await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
-
-async def radio_toggle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    config = load_config()
-    if config.is_on:
-        await radio_off_command(update, context)
-    else:
-        await radio_on_command(update, context)
-
-async def skip_track_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await skip_track(update, context)
-
-async def start_vote_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_vote_command(update, context)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
     async with rate_limiter:
