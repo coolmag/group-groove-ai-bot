@@ -219,8 +219,9 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_config(config)
     if 'radio_task' not in context.bot_data or context.bot_data['radio_task'].done():
         context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
-    if 'voting_task' not in context.bot_data or context.bot_data['voting_task'].done():
-        context.bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(context.application))
+    if 'voting_task' in context.bot_data and not context.bot_data['voting_task'].done():
+        context.bot_data['voting_task'].cancel()
+    context.bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(context.application))
     msg = f"Радио включено. Жанр: {genre}"
     try:
         await update.effective_message.reply_text(escape_markdown(msg), parse_mode='MarkdownV2')
@@ -326,8 +327,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         status_icon = "🟢" if is_on else "🔴"
         status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
         genre = config.genre
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        text = f"Панель управления\n────────────────────────\nСтатус: {status_icon} {status_text}\nЖанр: {genre}\nОбновлено в: {timestamp}"
+        text = f"Панель управления\n────────────────────────\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
         if is_on and now_playing:
             title = now_playing.get('title', 'Неизвестный трек')
             duration = format_duration(now_playing.get('duration', 0))
@@ -395,6 +395,17 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
+    logger.info(f"Checking availability of {url}")
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.head(url, follow_redirects=True)
+            if response.status_code != 200:
+                logger.error(f"Track not available: {url}, status: {response.status_code}")
+                return None
+    except Exception as e:
+        logger.error(f"Failed to check availability of {url}: {e}")
+        await notify_admins(application, f"Не удалось проверить доступность {url}: {e}")
+        return None
     for attempt in range(max_retries):
         logger.info(f"Downloading track {url}, attempt {attempt + 1}/{max_retries}")
         try:
@@ -510,7 +521,8 @@ async def refill_playlist(application: Application):
             for t in info['entries']:
                 if not t or not t.get('url') or t.get('url') in played:
                     continue
-                if not (15 < t.get('duration', 0) < 600):
+                duration = t.get('duration')
+                if duration is None or not (15 < duration < 600):
                     continue
                 suitable_tracks.append(t)
     unique_tracks = {t['url']: t for t in suitable_tracks if t.get('url')}
@@ -609,8 +621,8 @@ async def hourly_voting_loop(application: Application):
                 await asyncio.sleep(60)
                 continue
             logger.info("Starting hourly voting")
-            await _create_and_send_poll(application)
             await asyncio.sleep(config.voting_interval_seconds)
+            await _create_and_send_poll(application)
         except asyncio.CancelledError:
             logger.info("Voting loop cancelled")
             break
