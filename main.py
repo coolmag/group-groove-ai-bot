@@ -70,7 +70,7 @@ class RadioConfig(BaseModel):
     message_cleanup_limit: int = Constants.MESSAGE_CLEANUP_LIMIT
     poll_duration_seconds: int = Constants.POLL_DURATION_SECONDS
     active_poll: Optional[dict] = None
-    votable_genres: List[str] = ["pop", "rock", "hip", "jazz", "blues", "classical", "reggae", "country", "metal", "electronic"]
+    votable_genres: List[str] = ["pop", "rock", "hip hop", "electronic", "classical", "jazz", "blues", "country", "metal", "reggae", "folk", "indie", "rap", "r&b", "soul", "funk", "disco", "punk rock", "alternative rock", "post-punk", "ambient", "drum and bass", "techno", "trance", "house", "dubstep", "grime", "trip-hop", "acid jazz", "swing", "bluegrass", "blues rock", "folk rock", "post-rock", "shoegaze", "garage rock", "britpop", "k-pop", "j-pop", "latin", "bossa nova", "samba", "reggaeton", "rockabilly"]
     status_message_id: Optional[int] = None
     now_playing: Optional[dict] = None
     last_toggle: float = 0.0
