@@ -17,6 +17,7 @@ from telegram.error import TelegramError
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from functools import wraps
+from asyncio import Lock
 
 # --- Constants ---
 class Constants:
