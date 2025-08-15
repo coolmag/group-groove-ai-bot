@@ -25,12 +25,13 @@ class Constants:
     TRACK_INTERVAL_SECONDS = 120
     POLL_DURATION_SECONDS = 60
     MESSAGE_CLEANUP_LIMIT = 30
-    MAX_RETRIES = 5
+    MAX_RETRIES = 3
     MIN_DISK_SPACE = 1_000_000_000
-    MAX_FILE_SIZE = 50_000_000  # 50 MB
 
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -300,6 +301,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await radio_on_command(update, context)
     elif command == "skip_track":
         await skip_track(update, context)
+    elif command == "start_vote":
+        await start_vote_command(update, context)
     elif command == "status_refresh":
         await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
@@ -365,6 +368,8 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 'quiet': False,
                 'socket_timeout': 180,
                 'fragment_retries': 10,
+                'continuedl': True,
+                'no_part': True,
                 'no_check_certificate': True,
                 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             }
@@ -388,20 +393,15 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
 
 async def send_track(track_info: dict, chat_id: int, bot):
     filepath = track_info['filepath']
+    logger.info(f"Sending track {track_info['title']} from {filepath} to {chat_id}")
     try:
         file_size = os.path.getsize(filepath)
-        if file_size > Constants.MAX_FILE_SIZE:
-            logger.error(f"Track {track_info['title']} too large: {file_size} bytes")
+        if file_size > 50 * 1024 * 1024:
+            logger.error(f"Track too large: {file_size} bytes for {track_info['title']}")
             return None
-        logger.info(f"Sending track {track_info['title']} to chat {chat_id}")
         with open(filepath, 'rb') as audio_file:
-            sent_message = await bot.send_audio(
-                chat_id=chat_id,
-                audio=audio_file,
-                title=track_info['title'],
-                duration=track_info['duration']
-            )
-            logger.info(f"Sent track {track_info['title']} to chat {chat_id}")
+            sent_message = await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
+            logger.info(f"Sent track {track_info['title']} to {chat_id}")
             return sent_message
     except Exception as e:
         logger.error(f"Failed to send track {filepath}: {e}")
@@ -439,8 +439,7 @@ async def refill_playlist(application: Application):
                     'noplaylist': True,
                     'quiet': True,
                     'default_search': provider,
-                    'extract_flat': 'in_playlist',
-                    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    'extract_flat': 'in_playlist'
                 }
                 for attempt in range(Constants.MAX_RETRIES):
                     try:
