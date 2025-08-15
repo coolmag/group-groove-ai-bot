@@ -1,3 +1,4 @@
+
 import logging
 import os
 import asyncio
@@ -88,8 +89,11 @@ async def save_state(context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Failed to save state: {e}")
 
 # --- Helper Functions ---
-def format_duration(seconds: int) -> str:
-    return f"{seconds // 60:02d}:{seconds % 60:02d}" if seconds and seconds > 0 else "--:--"
+def format_duration(seconds: Optional[float]) -> str:
+    if not seconds or seconds <= 0:
+        return "--:--"
+    s_int = int(seconds)
+    return f"{s_int // 60:02d}:{s_int % 60:02d}"
 
 # --- Admin Check ---
 async def is_admin(update: Update) -> bool:
@@ -164,8 +168,10 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
 
     except asyncio.TimeoutError:
         logger.error(f"Download timed out for {url}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Загрузка трека заняла слишком много времени и была прервана.")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось скачать или отправить трек.")
     finally:
         state.now_playing = None
         await update_status_panel(context)
@@ -207,7 +213,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
     text = f"Статус: {status_icon} {('В ЭФИРЕ' if state.is_on else 'ВЫКЛЮЧЕНО')}\n"
     text += f"Жанр: {state.genre}\n"
     if state.is_on and state.now_playing:
-        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})"
+        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
     elif state.is_on:
         text += "Сейчас играет: ...загрузка..."
 
@@ -221,17 +227,22 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if state.status_message_id:
+            logger.debug(f"Editing status message {state.status_message_id}")
             await context.bot.edit_message_text(chat_id=RADIO_CHAT_ID, message_id=state.status_message_id, text=text, reply_markup=reply_markup)
         else:
+            logger.debug("Sending new status message")
             msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=reply_markup)
             state.status_message_id = msg.message_id
     except TelegramError as e:
-        if "not modified" in str(e):
-            pass # Ignore this specific error
+        if "not modified" in str(e).lower():
+            pass # Ignore this specific error, it's not a real problem
         else:
             logger.warning(f"Could not update status panel (message {state.status_message_id} may be deleted). Sending new one. Error: {e}")
-            msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=reply_markup)
-            state.status_message_id = msg.message_id
+            try:
+                msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=reply_markup)
+                state.status_message_id = msg.message_id
+            except Exception as e2:
+                logger.error(f"Failed to send new status panel after edit failed: {e2}")
 
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
@@ -352,10 +363,10 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {'url': t['url'], 'title': t['title'], 'duration': t['duration']} for t in info['entries']
         ]
         reply_markup = await get_paginated_keyboard(search_id, context)
-        await message.edit_text(f'Найдено: {len(info["entries"]) }. Выбери трек:', reply_markup=reply_markup)
+        await message.edit_text(f'Найдено: {len(info["entries"])}. Выбери трек:', reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Search error for query '{query}': {e}")
-        await message.edit_text("Ошибка поиска. Попробуйте другую фразу.")
+        await message.edit_text(f"Ошибка поиска: {e}")
 
 # --- Entry Point Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -385,7 +396,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not track_url:
             return await query.edit_message_text("Трек устарел.")
         await query.edit_message_text("Обрабатываю...")
-        # This downloads in the main thread, which is fine for single user actions
         await download_and_send_track(context, track_url)
         return await query.edit_message_text("Трек отправлен!")
 
@@ -428,12 +438,12 @@ def main():
 
     handlers = [
         CommandHandler("start", start_command),
-        CommandHandler("status", status_command),
-        CommandHandler("skip", skip_command),
-        CommandHandler("votestart", create_poll_command),
+        CommandHandler(["status", "st"], status_command),
+        CommandHandler(["skip", "s"], skip_command),
+        CommandHandler(["votestart", "v"], create_poll_command),
         CommandHandler(["play", "p"], play_command),
-        CommandHandler("ron", lambda u, c: radio_on_off_command(u, c, True)),
-        CommandHandler("rof", lambda u, c: radio_on_off_command(u, c, False)),
+        CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)),
+        CommandHandler(["rof", "r_off"], lambda u, c: radio_on_off_command(u, c, False)),
         CallbackQueryHandler(button_callback),
         PollHandler(poll_handler)
     ]
