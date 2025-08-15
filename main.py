@@ -3,31 +3,25 @@ import os
 import asyncio
 import json
 import random
-import re
-import uuid
+import shutil
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from collections import deque
 from datetime import datetime
 import yt_dlp
-import shutil
-import httpx
 import ffmpeg
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
-from telegram.helpers import escape_markdown
-from telegram.error import TelegramError, RetryAfter
+from telegram.error import TelegramError
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from cachetools import TTLCache
-from asyncio import Lock
 from functools import wraps
 
 # --- Constants ---
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
-    TRACK_INTERVAL_SECONDS = 10 # Reduced for faster testing
+    TRACK_INTERVAL_SECONDS = 10
     POLL_DURATION_SECONDS = 60
     MAX_RETRIES = 3
     MIN_DISK_SPACE = 1_000_000_000  # 1GB
@@ -35,6 +29,7 @@ class Constants:
     MAX_DURATION = 900              # 15 minutes
     MIN_DURATION = 30               # 30 seconds
     PLAYED_URLS_MEMORY = 200
+    DOWNLOAD_TIMEOUT = 120          # 2 minutes
 
 # --- Setup ---
 load_dotenv()
@@ -73,32 +68,26 @@ state_lock = Lock()
 def load_state() -> State:
     if CONFIG_FILE.exists():
         try:
-            with CONFIG_FILE.open('r', encoding='utf-8') as f:
-                data = json.load(f)
-                # Pydantic will automatically convert lists to deques where specified
-                return State(**data)
+            data = json.loads(CONFIG_FILE.read_text(encoding='utf-8'))
+            return State(**data)
         except (json.JSONDecodeError, TypeError) as e:
-            logger.error(f"Error decoding config file, creating a new one. Error: {e}")
-            backup_path = CONFIG_FILE.with_suffix(f'.bak.{int(datetime.now().timestamp())}')
-            CONFIG_FILE.rename(backup_path)
+            logger.error(f"Config file error, creating new one. Error: {e}")
+            CONFIG_FILE.with_suffix(f'.bak.{int(datetime.now().timestamp())}').write_text(CONFIG_FILE.read_text())
     return State()
 
 async def save_state(context: ContextTypes.DEFAULT_TYPE):
     async with state_lock:
-        state = context.bot_data.get('state')
-        if state:
-            temp_path = CONFIG_FILE.with_suffix('.tmp')
+        if state := context.bot_data.get('state'):
             try:
-                with temp_path.open('w', encoding='utf-8') as f:
-                    # Pydantic's model_dump handles deque serialization
-                    json.dump(state.model_dump(), f, indent=4)
+                temp_path = CONFIG_FILE.with_suffix('.tmp')
+                temp_path.write_text(state.model_dump_json(indent=4), encoding='utf-8')
                 temp_path.replace(CONFIG_FILE)
             except Exception as e:
                 logger.error(f"Failed to save state: {e}")
 
 # --- Helper Functions ---
 def format_duration(seconds: int) -> str:
-    return f"{seconds // 60:02d}:{seconds % 60:02d}" if seconds > 0 else "--:--"
+    return f"{seconds // 60:02d}:{seconds % 60:02d}" if seconds and seconds > 0 else "--:--"
 
 # --- Admin Check ---
 async def is_admin(update: Update) -> bool:
@@ -117,27 +106,23 @@ def admin_only(func):
 async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist for genre: {state.genre}")
-    
     ydl_opts = {
         'format': 'bestaudio', 'noplaylist': True, 'quiet': True,
         'default_search': 'ytsearch50', 'extract_flat': 'in_playlist',
         'match_filter': lambda i: Constants.MIN_DURATION < i.get('duration', 0) <= Constants.MAX_DURATION,
+        'force-ipv4': True, 'no-cache-dir': True
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, f"{state.genre} music", download=False)
-        
         entries = info.get('entries', [])
         unplayed = [e['url'] for e in entries if e and e.get('url') not in state.played_radio_urls]
-        
         if unplayed:
             random.shuffle(unplayed)
             state.radio_playlist.extend(unplayed)
-            logger.info(f"Added {len(unplayed)} new tracks to the playlist.")
-        else:
-            logger.warning(f"No new tracks found for genre '{state.genre}'. Playlist may be empty.")
+            logger.info(f"Added {len(unplayed)} new tracks.")
     except Exception as e:
-        logger.error(f"Failed to refill playlist: {e}")
+        logger.error(f"Playlist refill failed: {e}")
 
 async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     state: State = context.bot_data['state']
@@ -148,29 +133,30 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         'format': 'bestaudio/best', 'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
         'noplaylist': True, 'quiet': True, 'noprogress': True,
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
+        'force-ipv4': True, 'no-cache-dir': True
     }
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+        logger.info(f"Downloading {url}")
+        download_task = asyncio.to_thread(yt_dlp.YoutubeDL(ydl_opts).extract_info, url, download=True)
+        info = await asyncio.wait_for(download_task, timeout=Constants.DOWNLOAD_TIMEOUT)
         
         filepath = DOWNLOAD_DIR / f"{info['id']}.mp3"
         if not filepath.exists() or filepath.stat().st_size > Constants.MAX_FILE_SIZE:
-            logger.error(f"File error for {url}")
-            if filepath.exists(): filepath.unlink()
-            return
+            raise ValueError(f"File error for {url}")
 
         state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=info.get('duration', 0), url=url)
         
         with open(filepath, 'rb') as audio_file:
-            msg = await context.bot.send_audio(
-                RADIO_CHAT_ID, audio_file, title=state.now_playing.title, duration=state.now_playing.duration
-            )
+            await context.bot.send_audio(RADIO_CHAT_ID, audio_file, title=state.now_playing.title, duration=state.now_playing.duration)
         filepath.unlink()
-        await update_status_panel(context)
 
+    except asyncio.TimeoutError:
+        logger.error(f"Download timed out for {url}")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}")
+    finally:
         state.now_playing = None
+        await update_status_panel(context)
 
 async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Radio loop started.")
@@ -178,7 +164,6 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
         try:
             state: State = context.bot_data['state']
             if not state.is_on:
-                logger.info("Radio is off. Pausing loop.")
                 await asyncio.sleep(15)
                 continue
 
@@ -207,10 +192,10 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
 async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     status_icon = "🟢" if state.is_on else "🔴"
-    text = f"Статус: {status_icon} ({'В ЭФИРЕ' if state.is_on else 'ВЫКЛЮЧЕНО'})\n"
+    text = f"Статус: {status_icon} {('В ЭФИРЕ' if state.is_on else 'ВЫКЛЮЧЕНО')}\n"
     text += f"Жанр: {state.genre}\n"
     if state.is_on and state.now_playing:
-        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})"
+        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
     elif state.is_on:
         text += "Сейчас играет: ...загрузка..."
 
@@ -228,24 +213,29 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
         else:
             msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=reply_markup)
             state.status_message_id = msg.message_id
-    except Exception as e:
-        logger.warning(f"Could not update status panel (message {state.status_message_id} may be deleted). Sending new one. Error: {e}")
-        msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=reply_markup)
-        state.status_message_id = msg.message_id
+    except TelegramError as e:
+        if "not modified" in str(e):
+            pass # Ignore this specific error
+        else:
+            logger.warning(f"Could not update status panel (message {state.status_message_id} may be deleted). Sending new one. Error: {e}")
+            msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=reply_markup)
+            state.status_message_id = msg.message_id
 
 @admin_only
-async def radio_on_off(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     if state.is_on == turn_on: return
 
     state.is_on = turn_on
+    task = context.bot_data.get('radio_loop_task')
+
     if turn_on:
-        if not context.bot_data.get('radio_loop_task') or context.bot_data['radio_loop_task'].done():
+        if not task or task.done():
             context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
         await update.effective_message.reply_text(f"Радио включено. Жанр: {state.genre}")
     else:
-        if context.bot_data.get('radio_loop_task') and not context.bot_data['radio_loop_task'].done():
-            context.bot_data['radio_loop_task'].cancel()
+        if task and not task.done():
+            task.cancel()
         state.now_playing = None
         await update.effective_message.reply_text("Радио выключено.")
     await update_status_panel(context)
@@ -255,9 +245,9 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     if not state.is_on: return
     
-    # Cancel the current loop, a new one will be started by the main logic if needed
-    if context.bot_data.get('radio_loop_task') and not context.bot_data['radio_loop_task'].done():
-        context.bot_data['radio_loop_task'].cancel()
+    task = context.bot_data.get('radio_loop_task')
+    if task and not task.done():
+        task.cancel()
     context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
     await update.effective_message.reply_text("Пропускаем трек...")
 
@@ -265,8 +255,7 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     if state.active_poll_id:
-        await update.effective_message.reply_text("Голосование уже идет.")
-        return
+        return await update.effective_message.reply_text("Голосование уже идет.")
 
     options = random.sample(state.votable_genres, k=min(10, len(state.votable_genres)))
     msg = await context.bot.send_poll(
@@ -274,25 +263,39 @@ async def create_poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         is_anonymous=False, open_period=Constants.POLL_DURATION_SECONDS
     )
     state.active_poll_id = msg.poll.id
+    context.job_queue.run_once(force_process_poll, Constants.POLL_DURATION_SECONDS + 5, data={'poll_id': msg.poll.id}, name=f"poll_{msg.poll.id}")
     await update.effective_message.reply_text("Голосование запущено!")
 
-async def process_poll_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def force_process_poll(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    poll_id = job_data['poll_id']
     state: State = context.bot_data['state']
-    if not update.poll.is_closed or state.active_poll_id != update.poll.id:
+    if state.active_poll_id == poll_id:
+        logger.warning(f"Poll {poll_id} was not closed by handler, forcing processing.")
+        # This is a simplified version, a real implementation would need to fetch poll results
+        # For now, we just clear it to allow new polls
+        state.active_poll_id = None
+        await context.bot.send_message(RADIO_CHAT_ID, "Голосование принудительно завершено из-за таймаута.")
+        await update_status_panel(context)
+
+async def poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state: State = context.bot_data['state']
+    if not state.active_poll_id or state.active_poll_id != update.poll.id:
         return
 
-    state.active_poll_id = None
-    winning_option = max(update.poll.options, key=lambda o: o.voter_count, default=None)
-    
-    if winning_option and winning_option.voter_count > 0:
-        state.genre = winning_option.text
-        state.radio_playlist.clear()
-        state.now_playing = None
-        await context.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Новый жанр: {state.genre}")
-        # The radio loop will automatically pick up the new genre on the next iteration
-    else:
-        await context.bot.send_message(RADIO_CHAT_ID, "В голосовании никто не участвовал.")
-    await update_status_panel(context)
+    if update.poll.is_closed:
+        logger.info(f"Processing closed poll: {update.poll.id}")
+        state.active_poll_id = None # Mark as processed immediately
+        winning_option = max(update.poll.options, key=lambda o: o.voter_count, default=None)
+        
+        if winning_option and winning_option.voter_count > 0:
+            state.genre = winning_option.text
+            state.radio_playlist.clear()
+            state.now_playing = None
+            await context.bot.send_message(RADIO_CHAT_ID, f"Голосование завершено! Новый жанр: {state.genre}")
+        else:
+            await context.bot.send_message(RADIO_CHAT_ID, "В голосовании никто не участвовал.")
+        await update_status_panel(context)
 
 # --- Entry Point Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -306,14 +309,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     command, *data = update.callback_query.data.split(":")
+    action_key = data[0] if data else ''
 
     actions = {
-        "radio": {"on": lambda: radio_on_off(update, context, True), "off": lambda: radio_on_off(update, context, False), "skip": lambda: skip_command(update, context)},
+        "radio": {"on": lambda: radio_on_off_command(update, context, True), "off": lambda: radio_on_off_command(update, context, False), "skip": lambda: skip_command(update, context)},
         "vote": {"start": lambda: create_poll_command(update, context)},
         "status": {"refresh": lambda: update_status_panel(context)}
     }
-    if command in actions and data[0] in actions[command]:
-        await actions[command][data[0]]()
+    if command in actions and action_key in actions[command]:
+        await actions[command][action_key]()
 
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
@@ -322,11 +326,11 @@ async def post_init(application: Application):
         application.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(application))
     logger.info("Bot started successfully.")
 
-async def on_shutdown(application: Application):
+async def on_shutdown(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Shutting down... saving state.")
-    if application.bot_data.get('radio_loop_task'):
-        application.bot_data['radio_loop_task'].cancel()
-    await save_state(application)
+    if task := context.application.bot_data.get('radio_loop_task'):
+        task.cancel()
+    await save_state(context)
 
 def main():
     DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -343,10 +347,10 @@ def main():
         CommandHandler("status", status_command),
         CommandHandler("skip", skip_command),
         CommandHandler("votestart", create_poll_command),
-        CommandHandler("ron", lambda u, c: radio_on_off(u, c, True)),
-        CommandHandler("rof", lambda u, c: radio_on_off(u, c, False)),
+        CommandHandler("ron", lambda u, c: radio_on_off_command(u, c, True)),
+        CommandHandler("rof", lambda u, c: radio_on_off_command(u, c, False)),
         CallbackQueryHandler(button_callback),
-        PollHandler(process_poll_results)
+        PollHandler(poll_handler)
     ])
     
     logger.info("Starting bot polling...")
