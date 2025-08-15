@@ -155,7 +155,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
 
         # Step 3: Send the URL to Telegram
         logger.info(f"Sending stream URL to Telegram: {stream_url[:70]}...")
-        state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=info.get('duration', 0), url=url)
+        state.now_playing = NowPlaying(title=info.get('title', 'Unknown'), duration=int(info.get('duration', 0)), url=url)
         await context.bot.send_audio(
             RADIO_CHAT_ID,
             audio=stream_url, # Send the URL directly
