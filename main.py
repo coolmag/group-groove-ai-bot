@@ -12,7 +12,7 @@ from collections import deque
 from datetime import datetime
 import yt_dlp
 import shutil
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
 from pydantic import BaseModel, model_validator
@@ -111,7 +111,7 @@ def is_safe_track(track: dict) -> bool:
     return not any(kw in title or kw in description for kw in unsafe_keywords)
 
 def build_search_queries(genre: str):
-    return [f"{genre} music", f"{genre} best tracks", f"{genre} playlist"]
+    return [f"{genre} music", f"{genre} best tracks", f"{genre} playlist", genre]  # Added genre as a fallback query
 
 def escape_markdown(text: str) -> str:
     """Escape all Telegram MarkdownV2 special characters, including periods."""
@@ -444,7 +444,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
                 if not os.path.exists(filename):
                     raise FileNotFoundError(f"Downloaded file not found: {filename}")
-                logger.info(f"Downloaded track: {info.get('title', 'Unknown')}")
+                logger.info(f"Downloaded track: {info.get('title', 'Unknown')} ({url})")
                 return {
                     'filepath': filename,
                     'title': info.get('title', 'Unknown'),
@@ -496,6 +496,7 @@ async def refill_playlist(application: Application):
             cache_key = f"{query}:{raw_genre}:{provider}"
             if cache_key in search_cache:
                 info = search_cache[cache_key]
+                logger.info(f"Using cached results for {query} with {provider}: {len(info.get('entries', []))} entries")
             else:
                 ydl_opts = {
                     'format': 'bestaudio',
@@ -510,7 +511,7 @@ async def refill_playlist(application: Application):
                             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                                 info = ydl.extract_info(query, download=False)
                         search_cache[cache_key] = info
-                        logger.info(f"Search successful: {len(info.get('entries', []))} entries for {query}")
+                        logger.info(f"Search successful: {len(info.get('entries', []))} entries for {query} with {provider}")
                         break
                     except Exception as e:
                         logger.error(f"Search attempt {attempt + 1} failed for '{query}' with {provider}: {e}")
@@ -526,14 +527,19 @@ async def refill_playlist(application: Application):
                 if not t:
                     continue
                 if not (60 < t.get('duration', 0) < 900):
+                    logger.debug(f"Skipping track {t.get('title', 'Unknown')} due to duration {t.get('duration', 0)}")
                     continue
                 if t.get('url') in played:
+                    logger.debug(f"Skipping track {t.get('title', 'Unknown')} as already played")
                     continue
                 if not is_genre_match(t, raw_genre):
+                    logger.debug(f"Skipping track {t.get('title', 'Unknown')} due to genre mismatch")
                     continue
                 if not is_safe_track(t):
+                    logger.debug(f"Skipping track {t.get('title', 'Unknown')} due to unsafe content")
                     continue
                 suitable_tracks.append(t)
+                logger.debug(f"Added track: {t.get('title', 'Unknown')}")
 
     unique_tracks = {t['url']: t for t in suitable_tracks}
     suitable_tracks = list(unique_tracks.values())
@@ -613,6 +619,7 @@ async def radio_loop(application: Application):
                     save_config(config)
                     await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
                 else:
+                    logger.warning(f"Failed to send track: {track_url}")
                     await application.bot.send_message(
                         RADIO_CHAT_ID,
                         "Ошибка отправки трека, пробуем следующий...",
@@ -621,7 +628,7 @@ async def radio_loop(application: Application):
             else:
                 logger.warning(f"Failed to download track: {track_url}")
         except Exception as e:
-            logger.error(f"Radio loop track error: {e}")
+            logger.error(f"Radio loop track error for {track_url}: {e}")
             await application.bot.send_message(
                 RADIO_CHAT_ID,
                 "Ошибка воспроизведения трека, пробуем следующий...",
@@ -852,3 +859,86 @@ def main() -> None:
 if __name__ == "__main__":
     ensure_download_dir()
     main()
+```
+
+---
+
+### **Key Changes**
+
+1. **Removed Markdown and Artifact Tags**:
+   - The code is now a clean Python file without ```````python` or `<xaiArtifact>` tags, resolving the `SyntaxError`.
+
+2. **Enhanced Debugging for Track Loading**:
+   - Added detailed logging in `refill_playlist`:
+     - Logs the number of entries returned by each search query.
+     - Logs why tracks are skipped (e.g., duration, already played, genre mismatch, or unsafe content).
+     - Logs cache hits to track if cached results are used.
+   - Added logging in `radio_loop` and `download_track` to track each track’s URL and success/failure status.
+
+3. **Improved Search Queries**:
+   - Added the raw genre as a fallback query in `build_search_queries` (e.g., searching "lo-fi" directly if "lo-fi music" fails).
+   - Maintained the hybrid SoundCloud (`scsearch50`) and YouTube (`ytsearch50`) approach for better track availability.
+
+4. **Robust Markdown Handling**:
+   - Kept the fixed `escape_markdown` function from the previous version to handle periods and other special characters.
+   - Ensured all message-sending functions (`radio_on_command`, `send_status_panel`, `process_poll_results`) have fallbacks for MarkdownV2 failures.
+
+5. **Track Loading Reliability**:
+   - Added `logger.debug` statements to track why tracks are filtered out in `refill_playlist`.
+   - Ensured the fallback to "lo-fi hip hop" triggers if no tracks are found, with admin notifications.
+
+---
+
+### **How to Apply the Fix**
+
+1. **Save the Code**:
+   - Copy the code above (excluding the `<xaiArtifact>` tags) into `/app/main.py` in your container.
+   - Ensure the file does not include any Markdown markers (```) or XML-like tags (`<xaiArtifact>`).
+
+2. **Verify Environment**:
+   - Ensure `.env` file contains `BOT_TOKEN`, `ADMIN_IDS`, and `RADIO_CHAT_ID`.
+   - Verify dependencies: `pip install python-telegram-bot yt-dlp python-dotenv pydantic cachetools aiolimiter`.
+   - Check that `ffmpeg` is installed for `yt-dlp` audio extraction: `apt-get install ffmpeg` (if not already installed).
+
+3. **Run the Bot**:
+   - Start the container: `python /app/main.py`.
+   - Test with `/ron lo-fi hip hop` to start the radio.
+   - Use `/votestart` to create a poll, select a genre, and verify if tracks load afterward.
+
+4. **Debug Track Loading**:
+   - Monitor logs for:
+     - `Search successful: X entries for Y with Z`: Indicates successful searches.
+     - `Suitable tracks found: X`: Shows how many tracks pass filtering.
+     - `Final URLs: X`: Confirms the playlist size.
+     - `Downloaded track: TITLE (URL)`: Verifies track downloads.
+     - `Sent track: TITLE to chat ID`: Confirms tracks are sent to Telegram.
+   - If no tracks load, check for:
+     - `No entries found for QUERY with PROVIDER`: Indicates search failure. Test queries manually with `yt-dlp "scsearch50:lo-fi hip hop" --flat-playlist --dump-json` or `yt-dlp "ytsearch50:lo-fi hip hop" --flat-playlist --dump-json`.
+     - `Skipping track ...`: Indicates why tracks are filtered (e.g., duration or genre mismatch). If too many tracks are skipped, consider relaxing `is_genre_match` or `is_safe_track` further.
+   - Ensure `RADIO_CHAT_ID` is correct and the bot has permissions to send audio messages.
+
+5. **Test Network and APIs**:
+   - Verify the container has internet access for `yt-dlp` API calls to SoundCloud and YouTube.
+   - If searches fail, check for rate-limiting or API restrictions by testing queries outside the bot.
+
+---
+
+### **Addressing Track Loading**
+
+The original issue of tracks not loading after genre selection was likely exacerbated by the previous Markdown error, which prevented `radio_on_command` from completing and starting `radio_loop`. With the syntax error fixed, the bot should now proceed to `radio_loop`. If tracks still don’t load:
+- **Check Logs**: Look for `No entries found`, `Failed to download track`, or `Failed to send track` messages.
+- **Relax Filters**: Temporarily comment out `is_safe_track` or `is_genre_match` checks in `refill_playlist` to see if filtering is too strict:
+  ```python
+  # if not is_genre_match(t, raw_genre):
+  #     logger.debug(f"Skipping track {t.get('title', 'Unknown')} due to genre mismatch")
+  #     continue
+  # if not is_safe_track(t):
+  #     logger.debug(f"Skipping track {t.get('title', 'Unknown')} due to unsafe content")
+  #     continue
+  ```
+- **Test SoundCloud vs. YouTube**: If SoundCloud (`scsearch50`) returns no results, try switching to YouTube only (`ytsearch50`) in `refill_playlist`:
+  ```python
+  for provider in ['ytsearch50']:  # Temporarily use only YouTube
+  ```
+
+If you prefer a SoundCloud-only approach (as mentioned in your initial question), I can modify `refill_playlist` to use only `scsearch50`, but the hybrid approach should be more reliable due to YouTube’s larger catalog. Please let me know if you want this change or if you encounter specific errors in the logs after running the corrected code!
