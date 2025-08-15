@@ -215,7 +215,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
     lines.append(f"Жанр: {state.genre}")
 
     if state.is_on and state.now_playing:
-        now_playing_text = f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
+        now_playing_text = f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})"
+        lines.append(now_playing_text))
         lines.append(now_playing_text)
     elif state.is_on:
         lines.append("Сейчас играет: ...загрузка...")
