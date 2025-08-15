@@ -11,7 +11,7 @@ from collections import deque
 from datetime import datetime
 import yt_dlp
 import shutil
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, Poll
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
 from pydantic import BaseModel, model_validator
@@ -25,13 +25,12 @@ class Constants:
     TRACK_INTERVAL_SECONDS = 120
     POLL_DURATION_SECONDS = 60
     MESSAGE_CLEANUP_LIMIT = 30
-    MAX_RETRIES = 3
+    MAX_RETRIES = 5
     MIN_DISK_SPACE = 1_000_000_000
+    MAX_FILE_SIZE = 50_000_000  # 50 MB
 
 load_dotenv()
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -181,7 +180,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'quiet': True,
         'default_search': 'scsearch30',
         'extract_flat': 'in_playlist',
-        'http_headers': {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'}
+        'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -283,6 +282,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_track(track_info, query.message.chat_id, context.bot)
                 await query.edit_message_text("Трек отправлен!")
         except Exception as e:
+            logger.error(f"Error in button_callback: {e}")
             await query.edit_message_text(f"Ошибка: {e}")
         finally:
             if track_info and os.path.exists(track_info['filepath']):
@@ -303,7 +303,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == "status_refresh":
         await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
-rate_limiter = AsyncLimiter(20, 1)
+rate_limiter = AsyncLimiter(10, 1)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
     async with rate_limiter:
@@ -313,7 +313,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         status_icon = "🟢" if is_on else "🔴"
         status_text = "В ЭФИРЕ" if is_on else "ВЫКЛЮЧЕНО"
         genre = config.genre
-        text = f"Интерактивная Панель Управления\n────────────────────────\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
+        text = f"Панель управления\n────────────────────────\nСтатус: {status_icon} {status_text}\nЖанр: {genre}"
         if is_on and now_playing:
             title = now_playing.get('title', 'Неизвестный трек')
             duration = format_duration(now_playing.get('duration', 0))
@@ -328,7 +328,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
             ])
             keyboard.append([InlineKeyboardButton("🗳️ Голосование", callback_data="start_vote:0")])
         else:
-            keyboard.append([InlineKeyboardButton("▶️ Запустить Радио", callback_data="toggle_radio:0")])
+            keyboard.append([InlineKeyboardButton("▶️ Запустить", callback_data="toggle_radio:0")])
         keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="status_refresh:0")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = escape_markdown(text)
@@ -356,21 +356,22 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
     ensure_download_dir()
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
     for attempt in range(max_retries):
+        logger.info(f"Downloading track {url}, attempt {attempt + 1}/{max_retries}")
         try:
             ydl_opts = {
                 'format': 'bestaudio/best',
-                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
                 'outtmpl': out_template,
                 'noplaylist': True,
-                'quiet': True,
-                'socket_timeout': 60,
-                'retries': 5
+                'quiet': False,
+                'socket_timeout': 180,
+                'fragment_retries': 10,
+                'no_check_certificate': True,
+                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-                filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
-                if not os.path.exists(filename):
-                    raise FileNotFoundError(f"Downloaded file not found: {filename}")
+                filename = ydl.prepare_filename(info)
+                logger.info(f"Downloaded track {info.get('title', 'Unknown')} from {url}")
                 return {
                     'filepath': filename,
                     'title': info.get('title', 'Unknown'),
@@ -380,16 +381,30 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
         except Exception as e:
             logger.error(f"Download attempt {attempt + 1} failed for {url}: {e}")
             if attempt == max_retries - 1:
+                logger.error(f"Failed to download {url} after {max_retries} attempts")
                 return None
             await asyncio.sleep(2 ** attempt)
     return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
+    filepath = track_info['filepath']
     try:
-        with open(track_info['filepath'], 'rb') as audio_file:
-            return await bot.send_audio(chat_id=chat_id, audio=audio_file, title=track_info['title'], duration=track_info['duration'])
+        file_size = os.path.getsize(filepath)
+        if file_size > Constants.MAX_FILE_SIZE:
+            logger.error(f"Track {track_info['title']} too large: {file_size} bytes")
+            return None
+        logger.info(f"Sending track {track_info['title']} to chat {chat_id}")
+        with open(filepath, 'rb') as audio_file:
+            sent_message = await bot.send_audio(
+                chat_id=chat_id,
+                audio=audio_file,
+                title=track_info['title'],
+                duration=track_info['duration']
+            )
+            logger.info(f"Sent track {track_info['title']} to chat {chat_id}")
+            return sent_message
     except Exception as e:
-        logger.error(f"Failed to send track {track_info.get('filepath')}: {e}")
+        logger.error(f"Failed to send track {filepath}: {e}")
         return None
 
 async def clear_old_tracks(app: Application):
@@ -412,7 +427,6 @@ async def refill_playlist(application: Application):
     search_queries = build_search_queries(raw_genre)
     played = set(bot_data.get('played_radio_urls', []))
     suitable_tracks = []
-
     for provider in ['scsearch50', 'ytsearch50']:
         for query in search_queries:
             logger.info(f"Searching: {query} with {provider}")
@@ -425,54 +439,73 @@ async def refill_playlist(application: Application):
                     'noplaylist': True,
                     'quiet': True,
                     'default_search': provider,
-                    'extract_flat': 'in_playlist'
+                    'extract_flat': 'in_playlist',
+                    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 }
-                try:
-                    async with rate_limiter:
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            info = ydl.extract_info(query, download=False)
-                    search_cache[cache_key] = info
-                except Exception as e:
-                    logger.error(f"Search failed for {query}: {e}")
-                    info = None
+                for attempt in range(Constants.MAX_RETRIES):
+                    try:
+                        async with rate_limiter:
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(query, download=False)
+                        search_cache[cache_key] = info
+                        logger.info(f"Found {len(info.get('entries', []))} entries for {query} with {provider}")
+                        break
+                    except Exception as e:
+                        logger.error(f"Search attempt {attempt + 1}/{Constants.MAX_RETRIES} failed for {query}: {e}")
+                        if attempt == Constants.MAX_RETRIES - 1:
+                            info = None
+                        await asyncio.sleep(2 ** attempt)
             if not info or not info.get('entries'):
                 continue
-
             for t in info['entries']:
                 if not t or t.get('url') in played:
                     continue
+                if not (15 < t.get('duration', 0) < 1800):
+                    continue
                 suitable_tracks.append(t)
-
     unique_tracks = {t['url']: t for t in suitable_tracks}
     suitable_tracks = list(unique_tracks.values())
     final_urls = [t['url'] for t in suitable_tracks[:50]]
     random.shuffle(final_urls)
+    logger.info(f"Refilled playlist with {len(final_urls)} tracks")
     bot_data['radio_playlist'] = deque(final_urls)
     config.radio_playlist = list(bot_data['radio_playlist'])
     save_config(config)
     if not final_urls:
+        logger.warning(f"No tracks found for '{raw_genre}', switching to 'lo-fi hip hop'")
         config.genre = "lo-fi hip hop"
         config.radio_playlist = []
         bot_data['radio_playlist'] = deque()
         save_config(config)
+        await notify_admins(application, f"Не удалось найти треки для '{raw_genre}'. Переключено на 'lo-fi hip hop'.")
         await refill_playlist(application)
 
 async def radio_loop(application: Application):
     bot_data = application.bot_data
+    retry_count = 0
     while True:
         config = load_config()
         if not config.is_on:
             await asyncio.sleep(30)
             continue
         await asyncio.sleep(5)
-        
         if not bot_data.get('radio_playlist'):
+            logger.info("Playlist empty, refilling")
             await refill_playlist(application)
             if not bot_data.get('radio_playlist'):
+                retry_count += 1
+                logger.warning(f"Retry {retry_count}/{Constants.MAX_RETRIES}: Failed to refill playlist")
+                if retry_count >= Constants.MAX_RETRIES:
+                    logger.error("Failed to refill playlist after max retries")
+                    await notify_admins(application, "Не удалось заполнить плейлист. Радио остановлено.")
+                    config.is_on = False
+                    save_config(config)
+                    break
                 await asyncio.sleep(60)
                 continue
-        
+            retry_count = 0
         track_url = bot_data['radio_playlist'].popleft()
+        logger.info(f"Processing track: {track_url}")
         try:
             track_info = await download_track(track_url)
             if track_info:
@@ -493,12 +526,15 @@ async def radio_loop(application: Application):
                     }
                     save_config(config)
                     await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
+                else:
+                    logger.warning(f"Failed to send track {track_url}")
+            else:
+                logger.warning(f"Failed to download track {track_url}")
         except Exception as e:
-            logger.error(f"Radio loop error: {e}")
+            logger.error(f"Radio loop error for {track_url}: {e}")
         finally:
             if track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
-        
         await asyncio.sleep(config.track_interval_seconds)
 
 async def hourly_voting_loop(application: Application):
@@ -610,9 +646,9 @@ async def cleanup_download_dir():
             total, used, free = shutil.disk_usage(DOWNLOAD_DIR)
             logger.info(f"Disk space - Total: {total / 1e9:.2f}GB, Used: {used / 1e9:.2f}GB, Free: {free / 1e9:.2f}GB")
             if free < Constants.MIN_DISK_SPACE:
-                for file in Path(DOWNLOAD_DIR).glob('*.mp3'):
+                for file in Path(DOWNLOAD_DIR).glob('*'):
                     file.unlink()
-            for file in Path(DOWNLOAD_DIR).glob('*.mp3'):
+            for file in Path(DOWNLOAD_DIR).glob('*'):
                 if file.stat().st_mtime < datetime.now().timestamp() - 3600:
                     file.unlink()
         except Exception as e:
