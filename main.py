@@ -234,10 +234,11 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def admin_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        if not await is_admin(update, context):
+        user_id = update.effective_user.id
+        if user_id not in ADMIN_IDS:
             if isinstance(update, Update) and update.callback_query:
                 await update.callback_query.answer("Только для админов.", show_alert=True)
-            else:
+            elif update.message:
                 await update.message.reply_text("Только админы могут использовать эту команду.")
             return
         return await func(update, context, *args, **kwargs)
@@ -361,18 +362,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = await get_paginated_keyboard(search_id, context, page)
         await query.edit_message_text('Выбери трек:', reply_markup=reply_markup)
     elif command == "toggle_radio":
-        config = load_config()
-        if config.is_on:
-            await radio_off_command(update, context)
-        else:
-            await radio_on_command(update, context)
+        await admin_only(radio_toggle_action)(update, context)
     elif command == "skip_track":
-        await skip_track(update, context)
+        await admin_only(skip_track_action)(update, context)
     elif command == "start_vote":
-        await start_vote_command(update, context)
+        await admin_only(start_vote_action)(update, context)
     elif command == "status_refresh":
         async with status_lock:
             await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
+
+async def radio_toggle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config = load_config()
+    if config.is_on:
+        await radio_off_command(update, context)
+    else:
+        await radio_on_command(update, context)
+
+async def skip_track_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await skip_track(update, context)
+
+async def start_vote_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_vote_command(update, context)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
     async with rate_limiter:
@@ -616,17 +626,18 @@ async def refill_playlist(application: Application):
                 try:
                     async with rate_limiter:
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            info = ydl.extract_info(query, download=False)
+                            info_result = ydl.extract_info(query, download=False)
                     search_cache[cache_key] = [
-                        {'url': t['url'], 'title': t['title'], 'duration': t['duration']} for t in info.get('entries', [])
+                        {'url': t['url'], 'title': t['title'], 'duration': t['duration']} for t in info_result.get('entries', [])
                     ]
+                    info = search_cache[cache_key]
                     break
                 except Exception as e:
                     logger.error(f"Search attempt {attempt + 1} failed for query '{query}': {e}")
                     if attempt == Constants.MAX_RETRIES - 1:
                         info = None
                     await asyncio.sleep(2)
-            if not info or not info.get('entries'):
+            if not info:
                 continue
         for t in info:
             if not t or not t.get('url') or t.get('url') in played:
@@ -786,6 +797,7 @@ async def schedule_poll_processing(application: Application, poll_id: str, delay
     if not active_poll_dict or active_poll_dict['id'] != poll_id:
         return
     try:
+        # Reconstruct Poll object from dict
         poll = Poll.from_dict(active_poll_dict, application.bot)
         await process_poll_results(poll, application)
     except Exception as e:
@@ -799,10 +811,12 @@ async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE
     active_poll_dict = config.active_poll
     if active_poll_dict and active_poll_dict['id'] == update.poll.id:
         try:
-            if update.poll.is_closed or active_poll_dict.get('close_timestamp', 0) <= datetime.now().timestamp():
+            if update.poll.is_closed or (active_poll_dict.get('close_timestamp', 0) <= datetime.now().timestamp()):
                 await process_poll_results(update.poll, context.application)
             else:
+                # Update the poll data in the config with the latest vote counts
                 config.active_poll = update.poll.to_dict()
+                config.active_poll['close_timestamp'] = active_poll_dict.get('close_timestamp') # Preserve original close time
                 save_config(config)
         except Exception as e:
             logger.error(f"Error in receive_poll_update: {e}")
@@ -826,7 +840,8 @@ async def process_poll_results(poll, application: Application):
         final_winner = config.genre if not winning_options else random.choice(winning_options)
         config.genre = final_winner
         config.radio_playlist = []
-        application.bot_data['radio_playlist'].clear()
+        if 'radio_playlist' in application.bot_data:
+            application.bot_data['radio_playlist'].clear()
         config.now_playing = None
         save_config(config)
         msg = f"Голосование завершено! Играет: {final_winner}"
@@ -854,6 +869,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def cleanup_download_dir():
     while True:
         try:
+            # Check disk space and clean if necessary
             total, used, free = shutil.disk_usage(DOWNLOAD_DIR)
             if free < Constants.MIN_DISK_SPACE:
                 for file in Path(DOWNLOAD_DIR).glob('*'):
@@ -861,9 +877,10 @@ async def cleanup_download_dir():
                         file.unlink()
                     except OSError:
                         pass
+            # Clean up old files
             for file in Path(DOWNLOAD_DIR).glob('*'):
                 try:
-                    if file.stat().st_mtime < datetime.now().timestamp() - 3600:
+                    if file.stat().st_mtime < datetime.now().timestamp() - 3600: # 1 hour old
                         file.unlink()
                 except OSError:
                     pass
@@ -877,7 +894,7 @@ async def cleanup_cache():
             search_cache.clear()
         except Exception as e:
             logger.error(f"Error in cleanup_cache: {e}")
-        await asyncio.sleep(24 * 3600)
+        await asyncio.sleep(24 * 3600) # 24 hours
 
 async def post_init(application: Application) -> None:
     try:
@@ -885,14 +902,17 @@ async def post_init(application: Application) -> None:
     except Exception as e:
         logger.error(f"Error deleting webhook: {e}")
         await notify_admins(application, f"Ошибка удаления вебхука: {e}")
+
     config = load_config()
     bot_data = application.bot_data
     bot_data['radio_playlist'] = deque(config.radio_playlist)
     bot_data['played_radio_urls'] = config.played_radio_urls
     bot_data['radio_message_ids'] = deque(config.radio_message_ids)
+
     if config.is_on:
         bot_data['radio_task'] = asyncio.create_task(radio_loop(application))
         bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(application))
+
     active_poll = config.active_poll
     if active_poll:
         close_timestamp = active_poll.get('close_timestamp')
@@ -900,55 +920,65 @@ async def post_init(application: Application) -> None:
             remaining_time = close_timestamp - datetime.now().timestamp()
             if remaining_time > 0:
                 asyncio.create_task(schedule_poll_processing(application, active_poll['id'], remaining_time))
+
     asyncio.create_task(cleanup_download_dir())
     asyncio.create_task(cleanup_cache())
 
 async def shutdown(application: Application):
     config = load_config()
-    tasks = []
+    tasks_to_cancel = []
     if 'radio_task' in application.bot_data:
-        tasks.append(application.bot_data['radio_task'])
+        tasks_to_cancel.append(application.bot_data['radio_task'])
     if 'voting_task' in application.bot_data:
-        tasks.append(application.bot_data['voting_task'])
-    if tasks:
-        for task in tasks:
+        tasks_to_cancel.append(application.bot_data['voting_task'])
+    
+    if tasks_to_cancel:
+        for task in tasks_to_cancel:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
     save_config(config)
 
 def main() -> None:
-    # Check system dependencies
+    # Check for essential system dependencies before starting
     if not shutil.which("ffmpeg"):
-        logger.error("FATAL: ffmpeg binary not installed. Please install ffmpeg (e.g., 'apt-get install ffmpeg' on Ubuntu).")
+        logger.error("FATAL: ffmpeg binary not found. Please install ffmpeg and ensure it's in your system's PATH.")
         return
+    
     try:
         import ffmpeg
     except ImportError:
-        logger.error("FATAL: ffmpeg-python not installed. Please install it with 'pip install ffmpeg-python'.")
+        logger.error("FATAL: ffmpeg-python library not installed. Please install it via 'pip install ffmpeg-python'.")
         return
+
     if not BOT_TOKEN:
-        logger.error("FATAL: BOT_TOKEN not set in environment variables.")
+        logger.error("FATAL: BOT_TOKEN is not set in the environment variables or .env file.")
         return
+
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(shutdown).read_timeout(60).write_timeout(60).build()
+
+    handlers = [
+        CommandHandler("start", start_command),
+        CommandHandler(["help", "h"], help_command),
+        CommandHandler("id", id_command),
+        CommandHandler(["play", "p"], play_command),
+        CommandHandler("ron", radio_on_command),
+        CommandHandler("rof", radio_off_command),
+        CommandHandler("votestart", start_vote_command),
+        CommandHandler("status", status_command),
+        CommandHandler("skip", skip_track),
+        CallbackQueryHandler(button_callback),
+        PollHandler(receive_poll_update)
+    ]
+    application.add_handlers(handlers)
+    
     try:
-        application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(shutdown).read_timeout(60).write_timeout(60).build()
-        handlers = [
-            CommandHandler("start", start_command),
-            CommandHandler(["help", "h"], help_command),
-            CommandHandler("id", id_command),
-            CommandHandler(["play", "p"], play_command),
-            CommandHandler(["ron"], radio_on_command),
-            CommandHandler(["rof"], radio_off_command),
-            CommandHandler("votestart", start_vote_command),
-            CommandHandler("status", status_command),
-            CommandHandler("skip", skip_track),
-            CallbackQueryHandler(button_callback),
-            PollHandler(receive_poll_update)
-        ]
-        application.add_handlers(handlers)
         application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     except Exception as e:
-        logger.error(f"Bot startup error: {e}")
-        asyncio.run(notify_admins(application, f"Ошибка запуска бота: {e}"))
+        logger.critical(f"A critical error occurred while running the bot: {e}", exc_info=True)
+        # The shutdown handler should be called automatically, but we save config just in case.
+        save_config(load_config())
+
 
 if __name__ == "__main__":
     ensure_download_dir()
