@@ -11,6 +11,7 @@ from collections import deque
 from datetime import datetime
 import yt_dlp
 import shutil
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
@@ -22,7 +23,7 @@ from functools import wraps
 
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
-    TRACK_INTERVAL_SECONDS = 60
+    TRACK_INTERVAL_SECONDS = 30
     POLL_DURATION_SECONDS = 60
     MESSAGE_CLEANUP_LIMIT = 30
     MAX_RETRIES = 3
@@ -314,7 +315,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == "status_refresh":
         await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
-rate_limiter = AsyncLimiter(3, 1)
+rate_limiter = AsyncLimiter(2, 1)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
     async with rate_limiter:
@@ -368,19 +369,11 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
     out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
     logger.info(f"Checking availability of {url}")
     try:
-        ydl_opts = {
-            'format': 'bestaudio',
-            'noplaylist': True,
-            'quiet': True,
-            'extract_flat': 'in_playlist',
-            'force_generic_extractor': True,
-            'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        if not info:
-            logger.error(f"Track not available: {url}")
-            return None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.head(url, follow_redirects=True)
+            if response.status_code != 200:
+                logger.error(f"Track not available: {url}, status: {response.status_code}")
+                return None
     except Exception as e:
         logger.error(f"Failed to check availability of {url}: {e}")
         return None
@@ -392,11 +385,13 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 'outtmpl': out_template,
                 'noplaylist': True,
                 'quiet': False,
-                'socket_timeout': 600,
+                'socket_timeout': 900,
                 'fragment_retries': 10,
                 'retries': 15,
                 'no_check_certificate': True,
                 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                'geo_bypass': True,
+                'noprogress': True,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
@@ -497,12 +492,12 @@ async def refill_playlist(application: Application):
             for t in info['entries']:
                 if not t or not t.get('url') or t.get('url') in played:
                     continue
-                if not (15 < t.get('duration', 0) < 1800):
+                if not (15 < t.get('duration', 0) < 600):
                     continue
                 suitable_tracks.append(t)
     unique_tracks = {t['url']: t for t in suitable_tracks if t.get('url')}
     suitable_tracks = list(unique_tracks.values())
-    final_urls = [t['url'] for t in suitable_tracks[:30]]
+    final_urls = [t['url'] for t in suitable_tracks[:20]]
     random.shuffle(final_urls)
     logger.info(f"Refilled playlist with {len(final_urls)} tracks")
     bot_data['radio_playlist'] = deque(final_urls)
@@ -521,35 +516,35 @@ async def radio_loop(application: Application):
     bot_data = application.bot_data
     retry_count = 0
     while True:
-        config = load_config()
-        if not config.is_on:
-            logger.info("Radio is off, sleeping for 30s")
-            await asyncio.sleep(30)
-            continue
-        logger.info("Checking playlist")
-        await asyncio.sleep(5)
-        if not bot_data.get('radio_playlist'):
-            logger.info("Playlist empty, refilling")
-            await refill_playlist(application)
-            if not bot_data.get('radio_playlist'):
-                retry_count += 1
-                logger.warning(f"Retry {retry_count}/{Constants.MAX_RETRIES}: Failed to refill playlist")
-                if retry_count >= Constants.MAX_RETRIES:
-                    logger.error("Failed to refill playlist after max retries")
-                    await notify_admins(application, "Не удалось заполнить плейлист. Радио остановлено.")
-                    config.is_on = False
-                    save_config(config)
-                    break
-                await asyncio.sleep(60)
-                continue
-            retry_count = 0
-        if not bot_data['radio_playlist']:
-            logger.error("Playlist is empty after refill")
-            await asyncio.sleep(5)
-            continue
-        track_url = bot_data['radio_playlist'].popleft()
-        logger.info(f"Processing track: {track_url}")
         try:
+            config = load_config()
+            if not config.is_on:
+                logger.info("Radio is off, sleeping for 30s")
+                await asyncio.sleep(30)
+                continue
+            logger.info("Checking playlist")
+            await asyncio.sleep(5)
+            if not bot_data.get('radio_playlist'):
+                logger.info("Playlist empty, refilling")
+                await refill_playlist(application)
+                if not bot_data.get('radio_playlist'):
+                    retry_count += 1
+                    logger.warning(f"Retry {retry_count}/{Constants.MAX_RETRIES}: Failed to refill playlist")
+                    if retry_count >= Constants.MAX_RETRIES:
+                        logger.error("Failed to refill playlist after max retries")
+                        await notify_admins(application, "Не удалось заполнить плейлист. Радио остановлено.")
+                        config.is_on = False
+                        save_config(config)
+                        break
+                    await asyncio.sleep(60)
+                    continue
+                retry_count = 0
+            if not bot_data['radio_playlist']:
+                logger.error("Playlist is empty after refill")
+                await asyncio.sleep(5)
+                continue
+            track_url = bot_data['radio_playlist'].popleft()
+            logger.info(f"Processing track: {track_url}")
             track_info = await download_track(track_url)
             if track_info:
                 sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
@@ -575,10 +570,10 @@ async def radio_loop(application: Application):
             else:
                 logger.warning(f"Failed to download track {track_url}")
         except Exception as e:
-            logger.error(f"Radio loop error for {track_url}: {e}")
-            await notify_admins(application, f"Ошибка в radio_loop для {track_url}: {e}")
+            logger.error(f"Radio loop error: {e}")
+            await notify_admins(application, f"Ошибка в radio_loop: {e}")
         finally:
-            if track_info and os.path.exists(track_info['filepath']):
+            if 'track_info' in locals() and track_info and os.path.exists(track_info['filepath']):
                 os.remove(track_info['filepath'])
         logger.info(f"Sleeping for {config.track_interval_seconds}s before next track")
         await asyncio.sleep(config.track_interval_seconds)
@@ -712,6 +707,11 @@ async def cleanup_cache():
         await asyncio.sleep(24 * 3600)
 
 async def post_init(application: Application) -> None:
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook deleted, ensuring single instance")
+    except Exception as e:
+        logger.error(f"Failed to delete webhook: {e}")
     config = load_config()
     bot_data = application.bot_data
     bot_data['radio_playlist'] = deque(config.radio_playlist)
@@ -750,7 +750,7 @@ def main() -> None:
         logger.error("FATAL: BOT_TOKEN not found.")
         return
     try:
-        application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(shutdown).build()
+        application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(shutdown).read_timeout(30).write_timeout(30).build()
         handlers = [
             CommandHandler("start", start_command),
             CommandHandler(["help", "h"], help_command),
@@ -765,7 +765,7 @@ def main() -> None:
             PollHandler(receive_poll_update)
         ]
         application.add_handlers(handlers)
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
 
