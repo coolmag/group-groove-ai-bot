@@ -13,28 +13,32 @@ import yt_dlp
 import shutil
 import httpx
 import ffmpeg
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
+from telegram.helpers import escape_markdown
+from telegram.error import TelegramError, RetryAfter
 from dotenv import load_dotenv
 from pydantic import BaseModel, model_validator
 from cachetools import TTLCache
 from aiolimiter import AsyncLimiter
-from telegram.error import TelegramError, RetryAfter
 from functools import wraps
 from asyncio import Lock
 
+# --- Constants ---
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
     TRACK_INTERVAL_SECONDS = 30
     POLL_DURATION_SECONDS = 60
     MESSAGE_CLEANUP_LIMIT = 30
-    MAX_RETRIES = 5  # Increased retries for yt-dlp
+    MAX_RETRIES = 5
     MIN_DISK_SPACE = 1_000_000_000  # 1GB
     MAX_FILE_SIZE = 50_000_000      # 50MB
     DEBOUNCE_SECONDS = 5
     MAX_DURATION = 900              # 15 minutes
     MIN_DURATION = 30               # 30 seconds
 
+# --- Setup ---
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,7 +48,7 @@ ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",")
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
 CONFIG_FILE = "radio_config.json"
 DOWNLOAD_DIR = "downloads"
-PROXY_URL = os.getenv("PROXY_URL", None)  # Optional proxy for yt-dlp
+PROXY_URL = os.getenv("PROXY_URL", None)
 
 GENRE_KEYWORDS = {
     "electronic": ["electronic", "synth", "synthwave", "edm", "house", "techno", "trance"],
@@ -59,6 +63,7 @@ GENRE_KEYWORDS = {
     "metal": ["metal", "heavy metal", "death metal"],
 }
 
+# --- Pydantic Models ---
 class RadioConfig(BaseModel):
     is_on: bool = False
     genre: str = "lo-fi hip hop"
@@ -84,10 +89,14 @@ class RadioConfig(BaseModel):
             values['now_playing'] = None
         return values
 
+# --- Globals ---
 status_lock = Lock()
 poll_lock = Lock()
-rate_limiter = AsyncLimiter(5, 1)  # Allow bursts of 5 requests per second
+rate_limiter = AsyncLimiter(5, 1)
+search_cache = TTLCache(maxsize=100, ttl=3600)
+application_instance = None
 
+# --- Helper Functions ---
 def format_duration(seconds):
     if not seconds or seconds <= 0:
         return "--:--"
@@ -109,22 +118,15 @@ def build_search_queries(genre: str):
         ])
     return queries
 
-def escape_markdown(text: str) -> str:
-    special_chars = r'([_*[]()~`>#+=|{}.-])'
-    return re.sub(special_chars, r'\\\1', text)
-
 async def notify_admins(application: Application, message: str):
-    """Send a message to all admins, falling back to plain text if Markdown fails."""
     for admin_id in ADMIN_IDS:
         try:
-            await application.bot.send_message(admin_id, escape_markdown(message), parse_mode='MarkdownV2')
+            await application.bot.send_message(admin_id, escape_markdown(message, version=2), parse_mode='MarkdownV2')
         except TelegramError:
             try:
                 await application.bot.send_message(admin_id, message, parse_mode=None)
             except Exception as e:
                 logger.error(f"Failed to send fallback notification to admin {admin_id}: {e}")
-        except Exception as e:
-            logger.error(f"Failed to notify admin {admin_id}: {e}")
 
 def load_config() -> RadioConfig:
     config_path = Path(CONFIG_FILE)
@@ -136,7 +138,8 @@ def load_config() -> RadioConfig:
                 backup_path = config_path.with_suffix(f'.bak.{int(datetime.now().timestamp())}')
                 config_path.rename(backup_path)
                 logger.error(f"Configuration error, backed up to {backup_path}: {e}")
-                asyncio.create_task(notify_admins(application, f"Ошибка конфигурации: {backup_path}"))
+                if application_instance:
+                    asyncio.create_task(notify_admins(application_instance, f"Ошибка конфигурации: {backup_path}"))
     return RadioConfig()
 
 def save_config(config: RadioConfig):
@@ -153,9 +156,49 @@ def save_config(config: RadioConfig):
         raise
 
 def ensure_download_dir():
-    if not os.path.exists(DOWNLOAD_DIR):
-        os.makedirs(DOWNLOAD_DIR)
+    Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
 
+# --- Admin Check ---
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.effective_user.id
+    logger.info(f"Checking admin status for user_id: {user_id}")
+
+    if user_id in ADMIN_IDS:
+        logger.info(f"User {user_id} found in ADMIN_IDS. Granting admin access.")
+        return True
+
+    logger.info(f"User {user_id} not in ADMIN_IDS. Checking chat admin status in chat_id: {RADIO_CHAT_ID}.")
+    if RADIO_CHAT_ID == 0:
+        logger.warning("RADIO_CHAT_ID is not set. Cannot check for chat admin status.")
+        return False
+
+    try:
+        member = await context.bot.get_chat_member(RADIO_CHAT_ID, user_id)
+        status = member.status
+        logger.info(f"User {user_id} has status '{status}' in chat {RADIO_CHAT_ID}.")
+        if status in ('administrator', 'creator'):
+            logger.info("Granting admin access based on chat status.")
+            return True
+        else:
+            logger.info("User is not a chat admin.")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to check chat admin status for user {user_id}: {e}")
+        return False
+
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not await is_admin(update, context):
+            if update.callback_query:
+                await update.callback_query.answer("Эта команда только для администраторов.", show_alert=True)
+            elif update.message:
+                await update.message.reply_text("Эта команда только для администраторов.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+# --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я музыкальный бот. 🎵\nИспользуй /play или /ron.")
 
@@ -173,13 +216,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"ID чата: {update.message.chat_id}", parse_mode='Markdown')
+    await update.message.reply_text(f"ID чата: `{update.message.chat_id}`", parse_mode='Markdown')
 
 async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     page_size = 5
     results = context.bot_data.get('paginated_searches', {}).get(search_id, [])
     if not results:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("Поиск не найден.", callback_data="noop")]])
+        return InlineKeyboardMarkup([[InlineKeyboardButton("Поиск не найден.", callback_data="noop:0")]])
     start_index = page * page_size
     keyboard = []
     for entry in results[start_index : start_index + page_size]:
@@ -199,29 +242,19 @@ async def get_paginated_keyboard(search_id: str, context: ContextTypes.DEFAULT_T
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Укажи название: /play <название>", parse_mode='Markdown')
+        await update.message.reply_text("Укажи название: `/play <название>`", parse_mode='Markdown')
         return
     query = " ".join(context.args)
     message = await update.message.reply_text(f'Ищу "{query}"...')
     ydl_opts = {
-        'format': 'bestaudio',
-        'noplaylist': True,
-        'quiet': True,
-        'default_search': 'ytsearch30',
-        'extract_flat': 'in_playlist',
-        'http_headers': {'User-Agent': random.choice([
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
-        ])},
+        'format': 'bestaudio', 'noplaylist': True, 'quiet': True,
+        'default_search': 'ytsearch30', 'extract_flat': 'in_playlist',
         'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range',
-        'retries': Constants.MAX_RETRIES,
-        'fragment_retries': 10,
-        'proxy': PROXY_URL,
+        'retries': Constants.MAX_RETRIES, 'proxy': PROXY_URL,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
+            info = await asyncio.to_thread(ydl.extract_info, query, download=False)
         if not info.get('entries'):
             await message.edit_text("Треки не найдены.")
             return
@@ -235,61 +268,18 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Search error for query '{query}': {e}")
         await message.edit_text("Ошибка поиска. Попробуйте другую фразу.")
 
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if the user is a bot admin or a chat admin."""
-    user_id = update.effective_user.id
-    logger.info(f"Checking admin status for user_id: {user_id}")
-
-    if user_id in ADMIN_IDS:
-        logger.info(f"User {user_id} found in ADMIN_IDS. Granting admin access.")
-        return True
-
-    logger.info(f"User {user_id} not in ADMIN_IDS. Checking chat admin status in chat_id: {RADIO_CHAT_ID}.")
-    if RADIO_CHAT_ID == 0:
-        logger.warning("RADIO_CHAT_ID is not set. Cannot check for chat admin status.")
-        return False
-
-    try:
-        member = await context.bot.get_chat_member(RADIO_CHAT_ID, user_id)
-        status = member.status
-        logger.info(f"User {user_id} has status '{status}' in chat {RADIO_CHAT_ID}.")
-        if status in ('administrator', 'creator'):
-            logger.info(f"Granting admin access based on chat status.")
-            return True
-        else:
-            logger.info(f"User is not a chat admin.")
-            return False
-    except Exception as e:
-        logger.error(f"Failed to check chat admin status for user {user_id}: {e}")
-        return False
-
-def admin_only(func):
-    """Decorator to restrict command access to admins."""
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        if not await is_admin(update, context):
-            if update.callback_query:
-                await update.callback_query.answer("Эта команда только для администраторов.", show_alert=True)
-            elif update.message:
-                await update.message.reply_text("Эта команда только для администраторов.")
-            return
-        return await func(update, context, *args, **kwargs)
-    return wrapper
-
 @admin_only
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     current_time = datetime.now().timestamp()
     if current_time - config.last_toggle < Constants.DEBOUNCE_SECONDS:
-        await update.effective_message.reply_text(
-            f"Пожалуйста, подождите {int(Constants.DEBOUNCE_SECONDS - (current_time - config.last_toggle))} секунд перед повторным переключением радио."
-        )
+        await update.effective_message.reply_text(f"Пожалуйста, подождите...")
         return
     config.last_toggle = current_time
     config.is_on = True
     genre = " ".join(context.args) if context.args else config.genre
     if genre.lower() not in GENRE_KEYWORDS and genre.lower() != "lo-fi hip hop":
-        await update.effective_message.reply_text(f"Недопустимый жанр: {genre}. Доступные жанры: {', '.join(GENRE_KEYWORDS.keys())}")
+        await update.effective_message.reply_text(f"Недопустимый жанр: {genre}.")
         return
     config.genre = genre
     config.radio_playlist = []
@@ -300,22 +290,16 @@ async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data['radio_task'] = asyncio.create_task(radio_loop(context.application))
     if 'voting_task' not in context.bot_data or context.bot_data['voting_task'].done():
         context.bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(context.application))
-    msg = f"Радио включено. Жанр: {genre}"
-    try:
-        await update.effective_message.reply_text(escape_markdown(msg), parse_mode='MarkdownV2')
-    except TelegramError:
-        await update.effective_message.reply_text(msg, parse_mode=None)
+    await update.effective_message.reply_text(f"Радио включено. Жанр: {genre}")
     async with status_lock:
-        await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
+        await send_status_panel(context.application, update.effective_chat.id)
 
 @admin_only
 async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     current_time = datetime.now().timestamp()
     if current_time - config.last_toggle < Constants.DEBOUNCE_SECONDS:
-        await update.effective_message.reply_text(
-            f"Пожалуйста, подождите {int(Constants.DEBOUNCE_SECONDS - (current_time - config.last_toggle))} секунд перед повторным переключением радио."
-        )
+        await update.effective_message.reply_text("Пожалуйста, подождите...")
         return
     config.last_toggle = current_time
     config.is_on = False
@@ -361,10 +345,16 @@ async def skip_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with status_lock:
         await send_status_panel(context.application, update.effective_chat.id, config.status_message_id)
 
+# --- Callback & Poll Handlers ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    command, data = query.data.split(":", 1)
+    await query.answer() 
+    
+    try:
+        command, data = query.data.split(":", 1)
+    except ValueError:
+        logger.warning(f"Received invalid callback_data: {query.data}")
+        return
 
     if command == "play_track":
         track_url = context.bot_data.get('track_urls', {}).get(data)
@@ -375,21 +365,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             track_info = await download_track(track_url)
             if track_info:
-                sent_msg = await send_track(track_info, query.message.chat_id, context.bot)
-                if sent_msg:
-                    await query.edit_message_text("Трек отправлен!")
-                else:
-                    await query.edit_message_text("Не удалось отправить трек.")
+                await send_track(track_info, query.message.chat_id, context.bot)
+                await query.edit_message_text("Трек отправлен!")
             else:
                 await query.edit_message_text("Не удалось загрузить трек.")
         except Exception as e:
             logger.error(f"Error in play_track for URL {track_url}: {e}")
             await query.edit_message_text(f"Ошибка: {e}")
-            await notify_admins(context.application, f"Ошибка в play_track: {e}")
-        finally:
-            if 'track_info' in locals() and track_info and os.path.exists(track_info['filepath']):
-                os.remove(track_info['filepath'])
-
+    
     elif command == "page":
         search_id, page_num_str = data.split(":")
         page = int(page_num_str)
@@ -414,7 +397,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_status_panel(context.application, query.message.chat_id, query.message.message_id)
 
 async def send_status_panel(application: Application, chat_id: int, message_id: int = None):
-    """Sends or updates the status panel, with robust fallback for formatting errors."""
     async with rate_limiter:
         config = load_config()
         now_playing = config.now_playing
@@ -457,8 +439,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
                     config.status_message_id = new_msg.message_id
                     save_config(config)
             except TelegramError as e:
-                if "message is not modified" in str(e).lower():
-                    return
+                if "message is not modified" in str(e).lower(): return
                 logger.warning(f"Editing message {message_id} failed, sending new one. Error: {e}")
                 new_msg = await application.bot.send_message(
                     chat_id=chat_id, text=text_content, reply_markup=reply_markup, parse_mode=parse_mode
@@ -467,272 +448,149 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
                 save_config(config)
 
         try:
-            await send_or_edit(escape_markdown(original_text), parse_mode='MarkdownV2')
+            await send_or_edit(escape_markdown(original_text, version=2), parse_mode='MarkdownV2')
         except (TelegramError, RetryAfter) as e:
             if isinstance(e, RetryAfter):
                 await asyncio.sleep(e.retry_after)
                 await send_or_edit(original_text, parse_mode=None)
             elif "message is not modified" not in str(e).lower():
                 logger.warning(f"MarkdownV2 failed for status panel, falling back to plain text. Error: {e}")
-                try:
-                    await send_or_edit(original_text, parse_mode=None)
-                except Exception as final_e:
-                    logger.error(f"Failed to send even plain text status panel: {final_e}")
-
+                await send_or_edit(original_text, parse_mode=None)
 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
-    temp_file = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
-    out_file = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.mp3')
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.head(url, follow_redirects=True)
-            if response.status_code != 200:
-                logger.error(f"Invalid URL {url}: Status {response.status_code}")
-                return None
-    except Exception as e:
-        logger.error(f"Failed to check URL {url}: {e}")
-        return None
+    temp_file_tmpl = Path(DOWNLOAD_DIR) / f'{uuid.uuid4()}.%(ext)s'
+    
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': temp_file,
-        'noplaylist': True,
-        'quiet': False,
-        'socket_timeout': 30,
-        'fragment_retries': 10,
-        'retries': max_retries,
-        'no_check_certificate': True,
-        'http_headers': {'User-Agent': random.choice([
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
-        ])},
-        'geo_bypass': True,
-        'noprogress': True,
-        'proxy': PROXY_URL,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '128',
-        }],
+        'format': 'bestaudio/best', 'outtmpl': str(temp_file_tmpl),
+        'noplaylist': True, 'quiet': True, 'noprogress': True,
+        'socket_timeout': 30, 'fragment_retries': 10, 'retries': max_retries,
+        'no_check_certificate': True, 'geo_bypass': True, 'proxy': PROXY_URL,
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '128'}],
     }
-    for attempt in range(max_retries):
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-                filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
-                if not os.path.exists(filename):
-                    logger.error(f"Download failed: File {filename} not found")
-                    return None
-                file_size = os.path.getsize(filename)
-                if file_size > Constants.MAX_FILE_SIZE:
-                    os.remove(filename)
-                    logger.error(f"File {filename} exceeds size limit: {file_size} bytes")
-                    return None
-                return {
-                    'filepath': filename,
-                    'title': info.get('title', 'Unknown'),
-                    'duration': info.get('duration', 0),
-                    'url': url
-                }
-        except Exception as e:
-            logger.error(f"Download attempt {attempt + 1} failed for {url}: {e}")
-            if attempt == max_retries - 1:
-                await notify_admins(application, f"Не удалось загрузить трек {url}: {str(e)}")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+            filename_str = str(temp_file_tmpl).replace('.%(ext)s', '.mp3')
+            filename = Path(filename_str)
+            if not filename.exists():
+                logger.error(f"Download failed: File {filename} not found")
                 return None
-            await asyncio.sleep(2)  # Increased delay between retries
-        finally:
-            for ext in ['.webm', '.m4a', '.part']:
-                temp_path = temp_file.replace('.%(ext)s', ext)
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-    return None
+            if filename.stat().st_size > Constants.MAX_FILE_SIZE:
+                filename.unlink()
+                logger.error(f"File {filename} exceeds size limit")
+                return None
+            return {'filepath': str(filename), 'title': info.get('title', 'Unknown'), 'duration': info.get('duration', 0), 'url': url}
+    except Exception as e:
+        logger.error(f"Download failed for {url}: {e}")
+        if "Private video" in str(e):
+            await notify_admins(application_instance, f"Не удалось скачать приватное видео: {url}")
+        return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
-    if not isinstance(track_info, dict):
-        logger.error(f"Invalid track_info: {track_info}")
-        return None
-    filepath = track_info.get('filepath')
-    if not filepath or not os.path.exists(filepath):
+    filepath = Path(track_info.get('filepath'))
+    if not filepath.exists():
         logger.error(f"Track file missing: {filepath}")
         return None
     try:
-        file_size = os.path.getsize(filepath)
-        if file_size > Constants.MAX_FILE_SIZE:
-            logger.error(f"Track {track_info.get('title', 'Unknown')} exceeds size limit: {file_size} bytes")
-            return None
         with open(filepath, 'rb') as audio_file:
-            sent_message = await bot.send_audio(
-                chat_id=chat_id,
-                audio=audio_file,
+            return await bot.send_audio(
+                chat_id=chat_id, audio=audio_file,
                 title=track_info.get('title', 'Unknown'),
-                duration=track_info.get('duration', 0)
+                duration=int(track_info.get('duration', 0))
             )
-            return sent_message
-    except TelegramError as e:
-        logger.error(f"Failed to send track {track_info.get('title', 'Unknown')}: {e}")
-        await notify_admins(bot.application, f"Не удалось отправить трек {track_info.get('title', 'Unknown')}: {str(e)}")
-        return None
     except Exception as e:
-        logger.error(f"Unexpected error sending track {track_info.get('title', 'Unknown')}: {e}")
-        await notify_admins(bot.application, f"Неожиданная ошибка при отправке трека {track_info.get('title', 'Unknown')}: {e}")
+        logger.error(f"Failed to send track {filepath.name}: {e}")
         return None
     finally:
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-            except OSError:
-                pass
+        if filepath.exists():
+            filepath.unlink()
 
 async def clear_old_tracks(app: Application):
-    radio_msgs = app.bot_data.get('radio_message_ids', deque())
-    for _ in range(10):
-        if not radio_msgs:
-            break
-        msg_id = radio_msgs.popleft()
-        try:
-            await app.bot.delete_message(RADIO_CHAT_ID, msg_id)
-        except Exception:
-            pass
-
-search_cache = TTLCache(maxsize=100, ttl=3600)
+    config = load_config()
+    while len(config.radio_message_ids) > Constants.MESSAGE_CLEANUP_LIMIT:
+        msg_id = config.radio_message_ids.pop(0)
+        try: await app.bot.delete_message(RADIO_CHAT_ID, msg_id)
+        except Exception: pass
+    save_config(config)
 
 async def refill_playlist(application: Application):
-    bot_data = application.bot_data
     config = load_config()
-    raw_genre = config.genre
-    search_queries = build_search_queries(raw_genre)
-    played = set(bot_data.get('played_radio_urls', []))
-    suitable_tracks = []
-    for query_index, query in enumerate(search_queries):
-        cache_key = f"{query}:{raw_genre}:ytsearch50"
-        if cache_key in search_cache:
-            info = search_cache[cache_key]
-        else:
-            ydl_opts = {
-                'format': 'bestaudio',
-                'noplaylist': True,
-                'quiet': True,
-                'default_search': 'ytsearch50',
-                'extract_flat': 'in_playlist',
-                'http_headers': {'User-Agent': random.choice([
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
-                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
-                ])},
-                'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range',
-                'retries': Constants.MAX_RETRIES,
-                'fragment_retries': 10,
-                'proxy': PROXY_URL,
-            }
-            for attempt in range(Constants.MAX_RETRIES):
-                try:
-                    async with rate_limiter:
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            info_result = ydl.extract_info(query, download=False)
-                    search_cache[cache_key] = [
-                        {'url': t['url'], 'title': t['title'], 'duration': t['duration']} for t in info_result.get('entries', [])
-                    ]
-                    info = search_cache[cache_key]
-                    break
-                except Exception as e:
-                    logger.error(f"Search attempt {attempt + 1} failed for query '{query}': {e}")
-                    if attempt == Constants.MAX_RETRIES - 1:
-                        info = None
-                    await asyncio.sleep(2)
-            if not info:
-                continue
-        for t in info:
-            if not t or not t.get('url') or t.get('url') in played:
-                continue
-            duration = t.get('duration')
-            if duration is None or not isinstance(duration, (int, float)):
-                continue
-            if not (Constants.MIN_DURATION < duration <= Constants.MAX_DURATION):
-                continue
-            suitable_tracks.append(t)
-        if suitable_tracks:
-            break
-    unique_tracks = {t['url']: t for t in suitable_tracks if t.get('url')}
-    suitable_tracks = list(unique_tracks.values())
-    final_urls = [t['url'] for t in suitable_tracks[:20]]
-    random.shuffle(final_urls)
-    bot_data['radio_playlist'] = deque(final_urls)
-    config.radio_playlist = list(bot_data['radio_playlist'])
-    save_config(config)
-    if not final_urls:
-        config.genre = "pop"
-        config.radio_playlist = []
-        bot_data['radio_playlist'] = deque()
-        save_config(config)
-        await notify_admins(application, f"Не удалось найти подходящие треки для '{raw_genre}'. Переключено на 'pop'.")
-        await refill_playlist(application)
+    search_queries = build_search_queries(config.genre)
+    played = set(config.played_radio_urls)
+    
+    for query in search_queries:
+        ydl_opts = {
+            'format': 'bestaudio', 'noplaylist': True, 'quiet': True,
+            'default_search': 'ytsearch50', 'extract_flat': 'in_playlist',
+            'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range',
+            'retries': Constants.MAX_RETRIES, 'proxy': PROXY_URL,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.to_thread(ydl.extract_info, query, download=False)
+            
+            entries = info.get('entries', [])
+            unplayed_tracks = [t for t in entries if t and t.get('url') and t.get('url') not in played]
+            
+            if unplayed_tracks:
+                random.shuffle(unplayed_tracks)
+                config.radio_playlist.extend([t['url'] for t in unplayed_tracks])
+                logger.info(f"Refilled playlist with {len(unplayed_tracks)} tracks for genre '{config.genre}'.")
+                save_config(config)
+                return
+        except Exception as e:
+            logger.error(f"Search failed for query '{query}': {e}")
+    
+    logger.warning(f"Could not find any tracks for genre '{config.genre}'.")
+    await notify_admins(application, f"Не удалось найти треки для жанра '{config.genre}'.")
+
 
 async def radio_loop(application: Application):
-    bot_data = application.bot_data
-    retry_count = 0
     while True:
         try:
             config = load_config()
             if not config.is_on:
-                await asyncio.sleep(30)
+                await asyncio.sleep(10)
                 continue
-            if not bot_data.get('radio_playlist'):
+
+            if not config.radio_playlist:
                 await refill_playlist(application)
-                if not bot_data.get('radio_playlist'):
-                    retry_count += 1
-                    if retry_count >= Constants.MAX_RETRIES:
-                        config.is_on = False
-                        save_config(config)
-                        async with status_lock:
-                            await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
-                        break
-                    await asyncio.sleep(5)
+                config = load_config() # Re-load config after refill
+                if not config.radio_playlist:
+                    logger.warning("Playlist is still empty after refill attempt. Waiting.")
+                    await asyncio.sleep(30)
                     continue
-                retry_count = 0
-            if not bot_data['radio_playlist']:
-                await asyncio.sleep(5)
-                continue
-            track_url = bot_data['radio_playlist'].popleft()
-            if not isinstance(track_url, str):
-                logger.error(f"Invalid track_url type: {type(track_url)}, value: {track_url}")
-                continue
+
+            track_url = config.radio_playlist.pop(0)
             logger.info(f"Playing track: {track_url}")
             track_info = await download_track(track_url)
-            if not track_info or not isinstance(track_info, dict):
-                logger.error(f"Failed to download track or invalid track_info: {track_info}")
-                continue
-            sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
-            if sent_msg:
-                bot_data.setdefault('radio_message_ids', deque()).append(sent_msg.message_id)
-                bot_data.setdefault('played_radio_urls', []).append(track_url)
-                if len(bot_data['played_radio_urls']) > 100:
-                    bot_data['played_radio_urls'].pop(0)
-                if len(bot_data['radio_message_ids']) >= config.message_cleanup_limit:
+            
+            if track_info:
+                sent_msg = await send_track(track_info, RADIO_CHAT_ID, application.bot)
+                if sent_msg:
+                    config.radio_message_ids.append(sent_msg.message_id)
+                    config.played_radio_urls.append(track_url)
+                    if len(config.played_radio_urls) > 200: # Keep last 200 played
+                        config.played_radio_urls = config.played_radio_urls[-200:]
+                    
+                    config.now_playing = {'title': track_info.get('title'), 'duration': track_info.get('duration'), 'url': track_url}
+                    save_config(config)
                     await clear_old_tracks(application)
-                config.radio_playlist = list(bot_data['radio_playlist'])
-                config.played_radio_urls = bot_data['played_radio_urls']
-                config.radio_message_ids = list(bot_data['radio_message_ids'])
-                config.now_playing = {
-                    'title': track_info.get('title', 'Unknown'),
-                    'duration': track_info.get('duration', 0),
-                    'url': track_url
-                }
-                save_config(config)
-                async with status_lock:
-                    await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
+                    async with status_lock:
+                        await send_status_panel(application, RADIO_CHAT_ID, config.status_message_id)
+                    await asyncio.sleep(config.track_interval_seconds)
+                else:
+                    save_config(config) # Save popped playlist
             else:
-                logger.error(f"Failed to send track for URL: {track_url}")
-                continue
-            await asyncio.sleep(2)
+                save_config(config) # Save popped playlist
+        except asyncio.CancelledError:
+            logger.info("Radio loop cancelled.")
+            break
         except Exception as e:
             logger.error(f"Error in radio_loop: {e}", exc_info=True)
-            await notify_admins(application, f"Ошибка в radio_loop: {e}")
-            await asyncio.sleep(2)
-        await asyncio.sleep(config.track_interval_seconds)
+            await notify_admins(application, f"Критическая ошибка в radio_loop: {e}")
+            await asyncio.sleep(10)
 
 async def hourly_voting_loop(application: Application):
     while True:
@@ -741,100 +599,80 @@ async def hourly_voting_loop(application: Application):
             if not config.is_on:
                 await asyncio.sleep(60)
                 continue
+            
             async with poll_lock:
-                if config.active_poll:
-                    await asyncio.sleep(60)
-                    continue
-                await _create_and_send_poll(application)
+                if not config.active_poll:
+                    await _create_and_send_poll(application)
+            
             await asyncio.sleep(config.voting_interval_seconds)
         except asyncio.CancelledError:
+            logger.info("Voting loop cancelled.")
             break
         except Exception as e:
-            logger.error(f"Error in hourly_voting_loop: {e}")
-            await notify_admins(application, f"Ошибка в hourly_voting_loop: {e}")
+            logger.error(f"Error in hourly_voting_loop: {e}", exc_info=True)
+            await notify_admins(application, f"Критическая ошибка в hourly_voting_loop: {e}")
             await asyncio.sleep(60)
 
-async def _create_and_send_poll(application: Application) -> bool:
+async def _create_and_send_poll(application: Application):
     config = load_config()
     try:
-        async with poll_lock:
-            if config.active_poll:
-                return False
-            votable_genres = config.votable_genres
-            if len(votable_genres) < 2:
-                await notify_admins(application, "Недостаточно жанров для голосования")
-                return False
-            decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
-            special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
-            regular_pool = [g for g in votable_genres if g not in {s.split(' ')[0] for s in special} and g.lower() != 'pop']
-            num_to_sample = min(4, len(regular_pool))
-            regular = set(random.sample(regular_pool, k=num_to_sample)) if regular_pool else set()
-            options = list(special | regular)
-            while len(options) < 9:
-                chosen = random.choice(votable_genres)
-                if chosen not in options:
-                    options.append(chosen)
-            options.append("Pop")
-            random.shuffle(options)
-            poll_duration = config.poll_duration_seconds
-            async with rate_limiter:
-                message = await application.bot.send_poll(
-                    RADIO_CHAT_ID,
-                    "Выбери жанр на следующий час!",
-                    options[:10],
-                    is_anonymous=False,
-                    open_period=poll_duration
-                )
-            poll_data = message.poll.to_dict()
-            poll_data['close_timestamp'] = datetime.now().timestamp() + poll_duration
-            config.active_poll = poll_data
-            save_config(config)
-            asyncio.create_task(schedule_poll_processing(application, message.poll.id, poll_duration))
-            return True
+        votable_genres = config.votable_genres
+        if len(votable_genres) < 2: return
+
+        decades = ["70-х", "80-х", "90-х", "2000-х", "2010-х"]
+        special = {f"{random.choice(votable_genres)} {random.choice(decades)}" for _ in range(5)}
+        options = list(special | set(random.sample(votable_genres, k=min(5, len(votable_genres)))))
+        random.shuffle(options)
+        
+        message = await application.bot.send_poll(
+            RADIO_CHAT_ID, "Выбери жанр на следующий час!", options[:10],
+            is_anonymous=False, open_period=config.poll_duration_seconds
+        )
+        poll_data = message.poll.to_dict()
+        poll_data['close_timestamp'] = datetime.now().timestamp() + config.poll_duration_seconds
+        config.active_poll = poll_data
+        save_config(config)
+        asyncio.create_task(schedule_poll_processing(application, message.poll.id, config.poll_duration_seconds))
+        return True
     except Exception as e:
         logger.error(f"Error creating poll: {e}")
-        await notify_admins(application, f"Ошибка создания голосования: {e}")
         return False
 
 async def schedule_poll_processing(application: Application, poll_id: str, delay: int):
-    await asyncio.sleep(delay + 2)
+    await asyncio.sleep(delay + 5) # 5s grace period
     config = load_config()
-    active_poll_dict = config.active_poll
-    if not active_poll_dict or active_poll_dict['id'] != poll_id:
-        return
-    try:
-        # Reconstruct Poll object from dict
-        poll = Poll.from_dict(active_poll_dict, application.bot)
-        await process_poll_results(poll, application)
-    except Exception as e:
-        logger.error(f"Error processing poll {poll_id}: {e}")
-        await notify_admins(application, f"Ошибка обработки опроса {poll_id}: {e}")
-        config.active_poll = None
-        save_config(config)
+    if config.active_poll and config.active_poll.get('id') == poll_id:
+        logger.info(f"Processing poll {poll_id} after scheduled delay.")
+        # The poll object is fetched via receive_poll_update, we just need to trigger processing
+        # by setting active_poll to None and saving. The receive_poll_update will handle the final result.
+        # This is a fallback in case the final poll update is missed.
+        await process_poll_results(Poll.from_dict(config.active_poll, application.bot), application)
+
 
 async def receive_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
-    active_poll_dict = config.active_poll
-    if active_poll_dict and active_poll_dict['id'] == update.poll.id:
-        try:
-            if update.poll.is_closed or (active_poll_dict.get('close_timestamp', 0) <= datetime.now().timestamp()):
-                await process_poll_results(update.poll, context.application)
-            else:
-                # Update the poll data in the config with the latest vote counts
-                config.active_poll = update.poll.to_dict()
-                config.active_poll['close_timestamp'] = active_poll_dict.get('close_timestamp') # Preserve original close time
-                save_config(config)
-        except Exception as e:
-            logger.error(f"Error in receive_poll_update: {e}")
-            await notify_admins(context.application, f"Ошибка в receive_poll_update: {e}")
+    if not config.active_poll or config.active_poll.get('id') != update.poll.id:
+        return
+    
+    config.active_poll = update.poll.to_dict()
+    save_config(config)
 
-async def process_poll_results(poll, application: Application):
-    config = load_config()
-    try:
-        config.active_poll = None
+    if update.poll.is_closed:
+        logger.info(f"Processing closed poll: {update.poll.id}")
+        await process_poll_results(update.poll, context.application)
+
+async def process_poll_results(poll: Poll, application: Application):
+    async with poll_lock:
+        config = load_config()
+        if not config.active_poll or config.active_poll.get('id') != poll.id:
+            return # Already processed
+        
+        config.active_poll = None # Mark as processed
+        
         if not config.is_on:
             save_config(config)
             return
+
         winning_options = []
         max_votes = 0
         for option in poll.options:
@@ -843,126 +681,95 @@ async def process_poll_results(poll, application: Application):
                 winning_options = [option.text]
             elif option.voter_count == max_votes and max_votes > 0:
                 winning_options.append(option.text)
-        final_winner = config.genre if not winning_options else random.choice(winning_options)
+        
+        final_winner = config.genre
+        if winning_options:
+            final_winner = random.choice(winning_options)
+        
         config.genre = final_winner
         config.radio_playlist = []
-        if 'radio_playlist' in application.bot_data:
-            application.bot_data['radio_playlist'].clear()
         config.now_playing = None
         save_config(config)
+
         msg = f"Голосование завершено! Играет: {final_winner}"
-        try:
-            async with rate_limiter:
-                await application.bot.send_message(RADIO_CHAT_ID, escape_markdown(msg), parse_mode='MarkdownV2')
-        except TelegramError:
-            await application.bot.send_message(RADIO_CHAT_ID, msg, parse_mode=None)
-        await refill_playlist(application)
-        if 'radio_task' in application.bot_data and application.bot_data['radio_task'].done():
-            application.bot_data['radio_task'] = asyncio.create_task(radio_loop(application))
-    except Exception as e:
-        logger.error(f"Error in process_poll_results: {e}")
-        await notify_admins(application, f"Ошибка в process_poll_results: {e}")
+        await application.bot.send_message(RADIO_CHAT_ID, msg)
+        
+        if 'radio_task' in application.bot_data and not application.bot_data['radio_task'].done():
+            application.bot_data['radio_task'].cancel()
+        application.bot_data['radio_task'] = asyncio.create_task(radio_loop(application))
 
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if update.effective_user.id in ADMIN_IDS:
-        return True
-    try:
-        member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-        return member.status in ('administrator', 'creator')
-    except Exception:
-        return False
 
-async def cleanup_download_dir():
+async def cleanup_routines():
     while True:
+        # Cleanup download directory
         try:
-            # Check disk space and clean if necessary
             total, used, free = shutil.disk_usage(DOWNLOAD_DIR)
             if free < Constants.MIN_DISK_SPACE:
                 for file in Path(DOWNLOAD_DIR).glob('*'):
-                    try:
-                        file.unlink()
-                    except OSError:
-                        pass
-            # Clean up old files
+                    try: file.unlink()
+                    except OSError: pass
+            
             for file in Path(DOWNLOAD_DIR).glob('*'):
-                try:
-                    if file.stat().st_mtime < datetime.now().timestamp() - 3600: # 1 hour old
-                        file.unlink()
-                except OSError:
-                    pass
+                if file.stat().st_mtime < datetime.now().timestamp() - 3600:
+                    try: file.unlink()
+                    except OSError: pass
         except Exception as e:
             logger.error(f"Error in cleanup_download_dir: {e}")
-        await asyncio.sleep(3600)
 
-async def cleanup_cache():
-    while True:
+        # Cleanup cache
         try:
             search_cache.clear()
         except Exception as e:
             logger.error(f"Error in cleanup_cache: {e}")
-        await asyncio.sleep(24 * 3600) # 24 hours
+            
+        await asyncio.sleep(3600)
 
-async def post_init(application: Application) -> None:
-    try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-    except Exception as e:
-        logger.error(f"Error deleting webhook: {e}")
-        await notify_admins(application, f"Ошибка удаления вебхука: {e}")
-
+# --- Bot Lifecycle ---
+async def post_init(application: Application):
+    global application_instance
+    application_instance = application
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    
     config = load_config()
-    bot_data = application.bot_data
-    bot_data['radio_playlist'] = deque(config.radio_playlist)
-    bot_data['played_radio_urls'] = config.played_radio_urls
-    bot_data['radio_message_ids'] = deque(config.radio_message_ids)
-
     if config.is_on:
-        bot_data['radio_task'] = asyncio.create_task(radio_loop(application))
-        bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(application))
+        application.bot_data['radio_task'] = asyncio.create_task(radio_loop(application))
+        application.bot_data['voting_task'] = asyncio.create_task(hourly_voting_loop(application))
+    
+    if config.active_poll:
+        remaining_time = config.active_poll.get('close_timestamp', 0) - datetime.now().timestamp()
+        if remaining_time > 0:
+            asyncio.create_task(schedule_poll_processing(application, config.active_poll['id'], remaining_time))
 
-    active_poll = config.active_poll
-    if active_poll:
-        close_timestamp = active_poll.get('close_timestamp')
-        if close_timestamp:
-            remaining_time = close_timestamp - datetime.now().timestamp()
-            if remaining_time > 0:
-                asyncio.create_task(schedule_poll_processing(application, active_poll['id'], remaining_time))
-
-    asyncio.create_task(cleanup_download_dir())
-    asyncio.create_task(cleanup_cache())
+    asyncio.create_task(cleanup_routines())
 
 async def shutdown(application: Application):
-    config = load_config()
-    tasks_to_cancel = []
-    if 'radio_task' in application.bot_data:
-        tasks_to_cancel.append(application.bot_data['radio_task'])
-    if 'voting_task' in application.bot_data:
-        tasks_to_cancel.append(application.bot_data['voting_task'])
-    
-    if tasks_to_cancel:
-        for task in tasks_to_cancel:
-            task.cancel()
-        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+    logger.info("Shutting down...")
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    save_config(load_config())
 
-    save_config(config)
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Exception while handling an update:", exc_info=context.error)
 
 def main() -> None:
-    # Check for essential system dependencies before starting
-    if not shutil.which("ffmpeg"):
-        logger.error("FATAL: ffmpeg binary not found. Please install ffmpeg and ensure it's in your system's PATH.")
-        return
-    
-    try:
-        import ffmpeg
-    except ImportError:
-        logger.error("FATAL: ffmpeg-python library not installed. Please install it via 'pip install ffmpeg-python'.")
-        return
-
+    ensure_download_dir()
     if not BOT_TOKEN:
-        logger.error("FATAL: BOT_TOKEN is not set in the environment variables or .env file.")
+        logger.critical("FATAL: BOT_TOKEN not set.")
+        return
+    if not shutil.which("ffmpeg"):
+        logger.critical("FATAL: ffmpeg binary not found.")
         return
 
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(shutdown).read_timeout(60).write_timeout(60).build()
+    application = (
+        Application.builder().token(BOT_TOKEN)
+        .post_init(post_init).post_shutdown(shutdown)
+        .read_timeout(60).write_timeout(60).build()
+    )
 
+    application.add_error_handler(error_handler)
+    
     handlers = [
         CommandHandler("start", start_command),
         CommandHandler(["help", "h"], help_command),
@@ -979,13 +786,15 @@ def main() -> None:
     application.add_handlers(handlers)
     
     try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except telegram.error.Conflict:
+        logger.critical("="*50)
+        logger.critical("ОШИБКА: ОБНАРУЖЕНА ДРУГАЯ КОПИЯ БОТА!")
+        logger.critical("Убедитесь, что бот с этим токеном запущен ТОЛЬКО В ОДНОМ МЕСТЕ.")
+        logger.critical("Остановите все другие копии и перезапустите эту.")
+        logger.critical("="*50)
     except Exception as e:
         logger.critical(f"A critical error occurred while running the bot: {e}", exc_info=True)
-        # The shutdown handler should be called automatically, but we save config just in case.
-        save_config(load_config())
-
 
 if __name__ == "__main__":
-    ensure_download_dir()
     main()
