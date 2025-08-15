@@ -12,6 +12,7 @@ from datetime import datetime
 import yt_dlp
 import shutil
 import httpx
+import ffmpeg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from dotenv import load_dotenv
@@ -29,9 +30,10 @@ class Constants:
     MESSAGE_CLEANUP_LIMIT = 30
     MAX_RETRIES = 5
     MIN_DISK_SPACE = 1_000_000_000
-    MAX_FILE_SIZE = 100_000_000  # 100 MB
+    MAX_FILE_SIZE = 50_000_000  # 50 MB (Telegram's audio limit)
     DEBOUNCE_SECONDS = 5
-    MAX_DURATION = 600  # 10 minutes for lo-fi hip hop
+    MAX_DURATION = 900  # 15 minutes for lo-fi hip hop
+    MIN_DURATION = 30   # Minimum 30 seconds to exclude clips
 
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -93,13 +95,18 @@ def format_duration(seconds):
     return f"{minutes:02d}:{seconds:02d}"
 
 def build_search_queries(genre: str):
-    queries = [f"{genre} music -live -stream -playlist -mix -album", 
-               f"{genre} best tracks -live -stream -playlist -mix -album", 
-               f"{genre} -live -stream -playlist -mix -album"]
+    queries = [
+        f"{genre} song -live -stream -playlist -mix -album",
+        f"{genre} track -live -stream -playlist -mix -album",
+        f"{genre} best tracks -live -stream -playlist -mix -album",
+        f"{genre} music -live -stream -playlist -mix -album"
+    ]
     if genre == "lo-fi hip hop":
-        queries.extend(["lofi music -live -stream -playlist -mix -album", 
-                        "chill music -live -stream -playlist -mix -album", 
-                        "chillhop -live -stream -playlist -mix -album"])
+        queries.extend([
+            "lofi song -live -stream -playlist -mix -album",
+            "chill song -live -stream -playlist -mix -album",
+            "chillhop track -live -stream -playlist -mix -album"
+        ])
     return queries
 
 def escape_markdown(text: str) -> str:
@@ -195,7 +202,8 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'quiet': True,
         'default_search': 'ytsearch30',
         'extract_flat': 'in_playlist',
-        'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+        'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range'
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -325,8 +333,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             track_info = await download_track(track_url)
             if track_info:
-                await send_track(track_info, query.message.chat_id, context.bot)
-                await query.edit_message_text("Трек отправлен!")
+                sent_msg = await send_track(track_info, query.message.chat_id, context.bot)
+                if sent_msg:
+                    await query.edit_message_text("Трек отправлен!")
+                else:
+                    await query.edit_message_text("Не удалось отправить трек.")
             else:
                 await query.edit_message_text("Не удалось загрузить трек.")
         except Exception as e:
@@ -372,7 +383,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
             duration = format_duration(now_playing.get('duration', 0))
             text += f"\nСейчас играет: {title} ({duration})"
         else:
-            text += "\nСейчас играет: — тишина..."
+            text += "\nСейчас играет: — Подготовка следующего трека..."
         keyboard = []
         if is_on:
             keyboard.append([
@@ -456,7 +467,8 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
-    out_template = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
+    temp_file = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.%(ext)s')
+    out_file = os.path.join(DOWNLOAD_DIR, f'{uuid.uuid4()}.mp3')
     logger.info(f"Checking availability of {url}")
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -472,7 +484,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
         try:
             ydl_opts = {
                 'format': 'bestaudio/best',
-                'outtmpl': out_template,
+                'outtmpl': temp_file,
                 'noplaylist': True,
                 'quiet': False,
                 'socket_timeout': 900,
@@ -482,16 +494,24 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
                 'geo_bypass': True,
                 'noprogress': True,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-                filename = ydl.prepare_filename(info)
-                file_size = os.path.getsize(filename) if os.path.exists(filename) else 0
+                filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+                if not os.path.exists(filename):
+                    logger.error(f"MP3 conversion failed for {url}, file not found: {filename}")
+                    return None
+                file_size = os.path.getsize(filename)
                 if file_size > Constants.MAX_FILE_SIZE:
                     logger.error(f"Track too large: {file_size} bytes for {url}")
                     os.remove(filename)
                     return None
-                logger.info(f"Downloaded track {info.get('title', 'Unknown')} from {url}")
+                logger.info(f"Downloaded and converted track {info.get('title', 'Unknown')} from {url} to {filename}")
                 return {
                     'filepath': filename,
                     'title': info.get('title', 'Unknown'),
@@ -505,6 +525,11 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
                 await notify_admins(application, f"Не удалось загрузить трек {url}: {str(e)}")
                 return None
             await asyncio.sleep(2)
+        finally:
+            for ext in ['.webm', '.m4a', '.part']:
+                temp_path = temp_file.replace('.%(ext)s', ext)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
     return None
 
 async def send_track(track_info: dict, chat_id: int, bot):
@@ -524,9 +549,13 @@ async def send_track(track_info: dict, chat_id: int, bot):
             )
             logger.info(f"Sent track {track_info['title']} to chat {chat_id}, message_id: {sent_message.message_id}")
             return sent_message
-    except Exception as e:
+    except TelegramError as e:
         logger.error(f"Failed to send track {track_info['title']} from {filepath}: {str(e)}")
         await notify_admins(bot.application, f"Не удалось отправить трек {track_info['title']}: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error sending track {track_info['title']} from {filepath}: {str(e)}")
+        await notify_admins(bot.application, f"Неожиданная ошибка при отправке трека {track_info['title']}: {str(e)}")
         return None
     finally:
         if os.path.exists(filepath):
@@ -552,10 +581,7 @@ async def refill_playlist(application: Application):
     search_queries = build_search_queries(raw_genre)
     played = set(bot_data.get('played_radio_urls', []))
     suitable_tracks = []
-    query_index = 0
-    max_query_retries = len(search_queries)
-    while not suitable_tracks and query_index < max_query_retries:
-        query = search_queries[query_index]
+    for query_index, query in enumerate(search_queries):
         logger.info(f"Searching: {query} with ytsearch50")
         cache_key = f"{query}:{raw_genre}:ytsearch50"
         if cache_key in search_cache:
@@ -568,7 +594,8 @@ async def refill_playlist(application: Application):
                 'quiet': True,
                 'default_search': 'ytsearch50',
                 'extract_flat': 'in_playlist',
-                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                'match_filter': lambda info: None if Constants.MIN_DURATION < info.get('duration', 0) <= Constants.MAX_DURATION else 'Duration out of range'
             }
             for attempt in range(Constants.MAX_RETRIES):
                 try:
@@ -585,7 +612,6 @@ async def refill_playlist(application: Application):
                     await asyncio.sleep(2)
             if not info or not info.get('entries'):
                 logger.warning(f"No results for {query}")
-                query_index += 1
                 continue
         for t in info['entries']:
             if not t or not t.get('url') or t.get('url') in played:
@@ -595,11 +621,12 @@ async def refill_playlist(application: Application):
             if duration is None or not isinstance(duration, (int, float)):
                 logger.warning(f"Skipping track with invalid duration: {t.get('title', 'Unknown')}")
                 continue
-            if not (10 < duration < Constants.MAX_DURATION):
+            if not (Constants.MIN_DURATION < duration <= Constants.MAX_DURATION):
                 logger.warning(f"Skipping track with duration {duration}s: {t.get('title', 'Unknown')}")
                 continue
             suitable_tracks.append(t)
-        query_index += 1
+        if suitable_tracks:
+            break
     unique_tracks = {t['url']: t for t in suitable_tracks if t.get('url')}
     suitable_tracks = list(unique_tracks.values())
     final_urls = [t['url'] for t in suitable_tracks[:20]]
@@ -609,12 +636,12 @@ async def refill_playlist(application: Application):
     config.radio_playlist = list(bot_data['radio_playlist'])
     save_config(config)
     if not final_urls:
-        logger.warning(f"No valid tracks found for '{raw_genre}' after trying all queries, switching to 'chill music'")
-        config.genre = "chill music"
+        logger.warning(f"No valid tracks found for '{raw_genre}' after trying all queries, switching to 'pop'")
+        config.genre = "pop"
         config.radio_playlist = []
         bot_data['radio_playlist'] = deque()
         save_config(config)
-        await notify_admins(application, f"Не удалось найти подходящие треки для '{raw_genre}'. Переключено на 'chill music'.")
+        await notify_admins(application, f"Не удалось найти подходящие треки для '{raw_genre}'. Переключено на 'pop'.")
         await refill_playlist(application)
 
 async def radio_loop(application: Application):
