@@ -213,7 +213,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
     text = f"Статус: {status_icon} ({'В ЭФИРЕ' if state.is_on else 'ВЫКЛЮЧЕНО'})\n"
     text += f"Жанр: {state.genre}\n"
     if state.is_on and state.now_playing:
-        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})
+        text += f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})"
 "
     elif state.is_on:
         text += "Сейчас играет: ...загрузка..."
