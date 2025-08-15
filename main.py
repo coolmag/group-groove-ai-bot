@@ -125,7 +125,6 @@ def load_config() -> RadioConfig:
             try:
                 return RadioConfig(**json.load(f))
             except Exception as e:
-                logger.error(f"Error loading config: {e}")
                 backup_path = config_path.with_suffix(f'.bak.{int(datetime.now().timestamp())}')
                 config_path.rename(backup_path)
                 asyncio.create_task(notify_admins(application, f"Ошибка конфигурации: {backup_path}"))
@@ -139,7 +138,6 @@ def save_config(config: RadioConfig):
             json.dump(config.model_dump(), f, indent=4, ensure_ascii=False)
         temp_path.replace(config_path)
     except Exception as e:
-        logger.error(f"Error saving config: {e}")
         if temp_path.exists():
             temp_path.unlink()
         raise
@@ -214,7 +212,6 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = await get_paginated_keyboard(search_id, context)
         await message.edit_text(f'Найдено: {len(info["entries"])}. Выбери трек:', reply_markup=reply_markup)
     except Exception as e:
-        logger.error(f"Error in /play: {e}")
         await message.edit_text("Ошибка поиска.")
 
 def admin_only(func):
@@ -332,7 +329,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text("Не удалось загрузить трек.")
         except Exception as e:
-            logger.error(f"Error in button_callback play_track: {e}")
             await query.edit_message_text(f"Ошибка: {e}")
             await notify_admins(context.application, f"Ошибка в play_track: {e}")
         finally:
@@ -427,7 +423,7 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
                             reply_markup=reply_markup,
                             parse_mode=None
                         )
-                    except TelegramError as e2:
+                    except TelegramError:
                         sent_message = await application.bot.send_message(
                             chat_id=chat_id,
                             text=text,
@@ -448,9 +444,6 @@ async def send_status_panel(application: Application, chat_id: int, message_id: 
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)
             await send_status_panel(application, chat_id, message_id)
-        except Exception as e:
-            logger.error(f"Error in send_status_panel: {e}")
-            await notify_admins(application, f"Ошибка в send_status_panel: {e}")
 
 async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> Optional[dict]:
     ensure_download_dir()
@@ -461,7 +454,7 @@ async def download_track(url: str, max_retries: int = Constants.MAX_RETRIES) -> 
             response = await client.head(url, follow_redirects=True)
             if response.status_code != 200:
                 return None
-    except Exception as e:
+    except Exception:
         return None
     for attempt in range(max_retries):
         try:
@@ -527,8 +520,8 @@ async def send_track(track_info: dict, chat_id: int, bot):
     except TelegramError as e:
         await notify_admins(bot.application, f"Не удалось отправить трек {track_info['title']}: {str(e)}")
         return None
-    except Exception as e:
-        await notify_admins(bot.application, f"Неожиданная ошибка при отправке трека {track_info['title']}: {str(e)}")
+    except Exception:
+        await notify_admins(bot.application, f"Неожиданная ошибка при отправке трека {track_info['title']}")
         return None
     finally:
         if os.path.exists(filepath):
@@ -542,7 +535,7 @@ async def clear_old_tracks(app: Application):
         msg_id = radio_msgs.popleft()
         try:
             await app.bot.delete_message(RADIO_CHAT_ID, msg_id)
-        except Exception as e:
+        except Exception:
             pass
 
 search_cache = TTLCache(maxsize=100, ttl=3600)
@@ -575,7 +568,7 @@ async def refill_playlist(application: Application):
                             info = ydl.extract_info(query, download=False)
                     search_cache[cache_key] = info
                     break
-                except Exception as e:
+                except Exception:
                     if attempt == Constants.MAX_RETRIES - 1:
                         info = None
                     await asyncio.sleep(1)
@@ -790,7 +783,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
         return member.status in ('administrator', 'creator')
-    except Exception as e:
+    except Exception:
         return False
 
 async def cleanup_download_dir():
@@ -803,7 +796,7 @@ async def cleanup_download_dir():
             for file in Path(DOWNLOAD_DIR).glob('*'):
                 if file.stat().st_mtime < datetime.now().timestamp() - 3600:
                     file.unlink()
-        except Exception as e:
+        except Exception:
             pass
         await asyncio.sleep(3600)
 
@@ -813,11 +806,6 @@ async def cleanup_cache():
         await asyncio.sleep(24 * 3600)
 
 async def post_init(application: Application) -> None:
-    try:
-        import ffmpeg
-    except ImportError:
-        await notify_admins(application, "Ошибка: модуль ffmpeg-python не установлен. Радио не сможет конвертировать треки в MP3.")
-        raise
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
@@ -854,6 +842,11 @@ async def shutdown(application: Application):
     save_config(config)
 
 def main() -> None:
+    try:
+        import ffmpeg
+    except ImportError:
+        logger.error("FATAL: ffmpeg-python not installed")
+        return
     if not BOT_TOKEN:
         return
     try:
