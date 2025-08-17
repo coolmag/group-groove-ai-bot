@@ -1,7 +1,5 @@
-python-telegram-bot[job-queue]
-yt-dlp
-pydantic
-python-dotenv
-httpx
-ffmpeg-python
+python-telegram-bot==20.7
+yt-dlp==2023.12.30
+pydantic==2.5.3
+python-dotenv==1.0.0
 aiohttp
