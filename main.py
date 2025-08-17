@@ -365,7 +365,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("⏭ Следующий" if state.is_on else "▶️ Включить", callback_data="radio:skip" if state.is_on else "radio:on")
             ],
             [InlineKeyboardButton("🗳 Голосовать", callback_data="vote:start")] if state.is_on and not state.active_poll_id else [],
-            [InlineKeyboardButton("⏹ Стоп", callback_data="radio:off")] if state.is_on else []
+            [InlineKeyboardButton("⏹ Стоп", callback_data="radio:off")] if state.is_on else [],
+            [InlineKeyboardButton("📋 Меню", callback_data="cmd:menu")]
         ]
         try:
             if state.status_message_id:
@@ -403,25 +404,33 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the interactive menu with all available commands."""
     user_id = update.effective_user.id
+    state: State = context.bot_data['state']
     is_admin_user = await is_admin(user_id)
-    text = (
-        "🎵 *Groove AI Bot - Меню* 🎵\n\n"
-        "📜 *Команды для всех:*\n"
-        "🎧 /play (/p) <название> - Поиск и воспроизведение трека\n\n"
-        "📜 *Команды для админов:*\n"
-        "▶️ /ron (/r_on) - Включить радио\n"
-        "⏹ /rof (/r_off) - Выключить радио\n"
-        "⏭ /skip (/s) - Пропустить трек\n"
-        "🗳 /vote (/v) - Запустить голосование\n"
-        "🔄 /refresh (/r) - Обновить статус\n"
-        "🔧 /source (/src) <soundcloud|youtube> - Сменить источник\n"
+    text = [
+        "🎵 *Groove AI Bot - Меню* 🎵",
+        f"**Статус радио**: {'🟢 Включено' if state.is_on else '🔴 Выключено'}",
+        f"**Текущий жанр**: {state.genre.title()}",
+        f"**Голосование**: {'🗳 Активно' if state.active_poll_id else '⏳ Не активно'}",
+        "",
+        "📜 *Команды для всех:*",
+        "🎧 /play (/p) <название> - Поиск и воспроизведение трека",
+        "",
+        "📜 *Команды для админов:*",
+        "▶️ /ron (/r_on) - Включить радио",
+        "⏹ /rof (/r_off, /stop, /t) - Выключить радио",
+        "⏭ /skip (/s) - Пропустить трек",
+        "🗳 /vote (/v) - Запустить голосование",
+        "🔄 /refresh (/r) - Обновить статус",
+        "🔧 /source (/src) <soundcloud|youtube> - Сменить источник",
         "📋 /menu (/m) - Показать это меню"
-    )
+    ]
+    text = "\n".join(text)
     keyboard = [
         [InlineKeyboardButton("🎧 Найти трек", callback_data="cmd:play")],
         [InlineKeyboardButton("▶️ Вкл радио", callback_data="radio:on"), InlineKeyboardButton("⏹ Выкл радио", callback_data="radio:off")] if is_admin_user else [],
-        [InlineKeyboardButton("⏭ Пропустить", callback_data="radio:skip"), InlineKeyboardButton("🗳 Голосовать", callback_data="vote:start")] if is_admin_user else [],
+        [InlineKeyboardButton("⏭ Пропустить", callback_data="radio:skip"), InlineKeyboardButton("🗳 Голосовать", callback_data="vote:start")] if is_admin_user and state.is_on and not state.active_poll_id else [],
         [InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh"), InlineKeyboardButton("🔧 Источник", callback_data="cmd:source")] if is_admin_user else [],
+        [InlineKeyboardButton("📋 Меню", callback_data="cmd:menu")] if is_admin_user else []
     ]
     logger.debug(f"Sending menu to user {user_id}")
     await update.message.reply_text(
@@ -552,7 +561,7 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    logger.debug(f"Received radio button callback from user {user_id}: {query.data}")
+    logger.debug(f"Received callback query from user {user_id}: {query.data}")
     
     try:
         await query.answer()
@@ -599,6 +608,9 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.message.reply_text("Введите /play <название песни> для поиска трека.")
         elif data == "source" and await is_admin(user_id):
             await query.message.reply_text("Введите /source soundcloud|youtube для смены источника.")
+        elif data == "menu" and await is_admin(user_id):
+            await show_menu(update, context)
+            await query.answer("Меню открыто. 📋")
         else:
             await query.answer("Команда недоступна.", show_alert=True)
     else:
@@ -635,21 +647,33 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
             open_period=Constants.POLL_DURATION_SECONDS
         )
         state.active_poll_id = poll.poll.id
-        logger.debug(f"Poll started with ID: {poll.poll.id}")
+        state.poll_message_id = poll.message_id  # Сохраняем message_id для проверки
+        logger.debug(f"Poll started with ID: {poll.poll.id}, message_id: {poll.message_id}")
         await context.bot.send_message(RADIO_CHAT_ID, "🗳 Голосование началось! Выберите жанр выше.")
         await save_state_from_botdata(context.bot_data)
 
         # Запускаем таймер для принудительного завершения голосования
         async def close_poll_after_timeout():
-            await asyncio.sleep(Constants.POLL_DURATION_SECONDS + 5)  # Дополнительные 5 секунд для учета задержек
-            if state.active_poll_id == poll.poll.id:
-                logger.debug(f"Checking poll {poll.poll.id} status after timeout")
-                try:
-                    poll_update = await context.bot.stop_poll(RADIO_CHAT_ID, poll.message_id)
-                    logger.debug(f"Forced poll {poll.poll.id} to close: {poll_update}")
-                    await handle_poll(Update(poll=poll_update), context)
-                except TelegramError as e:
-                    logger.error(f"Failed to force close poll {poll.poll.id}: {e}")
+            try:
+                await asyncio.sleep(Constants.POLL_DURATION_SECONDS + 5)
+                if state.active_poll_id == poll.poll.id:
+                    logger.debug(f"Checking poll {poll.poll.id} status after timeout")
+                    try:
+                        poll_update = await context.bot.get_updates(allowed_updates=["poll"])
+                        for update in poll_update:
+                            if update.poll and update.poll.id == state.active_poll_id:
+                                logger.debug(f"Poll update received: {update.poll}")
+                                if update.poll.is_closed:
+                                    await handle_poll(update, context)
+                                    return
+                        logger.debug(f"Forcing poll {poll.poll.id} to close")
+                        poll_update = await context.bot.stop_poll(RADIO_CHAT_ID, poll.message_id)
+                        logger.debug(f"Forced poll {poll.poll.id} to close: {poll_update}")
+                        await handle_poll(Update(poll=poll_update), context)
+                    except TelegramError as e:
+                        logger.error(f"Failed to force close poll {poll.poll.id}: {e}")
+            except Exception as e:
+                logger.error(f"Error in close_poll_after_timeout for poll {poll.poll.id}: {e}")
 
         asyncio.create_task(close_poll_after_timeout())
     except TelegramError as e:
@@ -687,6 +711,7 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
     
     state.active_poll_id = None
+    state.poll_message_id = None
     await save_state_from_botdata(context.bot_data)
 
 # --- Bot Lifecycle ---
