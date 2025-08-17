@@ -22,12 +22,12 @@ from asyncio import Lock
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
     TRACK_INTERVAL_SECONDS = 10
-    POLL_DURATION_SECONDS = 60  # 1 минута для голосования
+    POLL_DURATION_SECONDS = 60
     MAX_FILE_SIZE = 50_000_000
     MAX_DURATION = 1200
     MIN_DURATION = 60
     PLAYED_URLS_MEMORY = 200
-    DOWNLOAD_TIMEOUT = 15
+    DOWNLOAD_TIMEOUT = 10  # Уменьшено до 10 секунд
     DEFAULT_SOURCE = "soundcloud"
     PAUSE_BETWEEN_TRACKS = 1.5
     STATUS_UPDATE_INTERVAL = 10
@@ -363,11 +363,11 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = [
             [
-                InlineKeyboardButton("🔄", callback_data="radio:refresh"),
-                InlineKeyboardButton("⏭" if state.is_on else "▶️", callback_data="radio:skip" if state.is_on else "radio:on")
+                InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh"),
+                InlineKeyboardButton("⏭ Следующий" if state.is_on else "▶️ Включить", callback_data="radio:skip" if state.is_on else "radio:on")
             ],
             [InlineKeyboardButton("🗳 Голосовать", callback_data="vote:start")] if state.is_on and not state.active_poll_id else [],
-            [InlineKeyboardButton("⏹", callback_data="radio:off")] if state.is_on else []
+            [InlineKeyboardButton("⏹ Стоп", callback_data="radio:off")] if state.is_on else []
         ]
         try:
             if state.status_message_id:
@@ -389,6 +389,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
                 )
                 state.status_message_id = msg.message_id
             context.bot_data['last_status_text'] = text
+            await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
             logger.warning(f"Failed to update status panel: {e}")
             if "Message to edit not found" in str(e):
@@ -397,7 +398,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
             elif "Message is not modified" in str(e):
                 await asyncio.sleep(0.5)
             else:
-                raise
+                logger.error(f"Unexpected Telegram error: {e}")
+                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при обновлении статуса.")
 
 # --- Commands ---
 async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
@@ -414,7 +416,8 @@ async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
 
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
-    logger.debug(f"Received /{'ron' if turn_on else 'rof'} command from user {update.effective_user.id}")
+    user_id = update.effective_user.id
+    logger.debug(f"Received /{'ron' if turn_on else 'rof'} command from user {user_id}")
     await toggle_radio(context, turn_on)
     await update_status_panel(context)
     message = "Радио включено. 🎵" if turn_on else "Радио выключено. 🔇"
@@ -483,24 +486,24 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in /play search: {e}", exc_info=True)
         await message.edit_text("Произошла ошибка при поиске. 😔")
 
-async def fallback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.debug(f"Fallback callback query received: {update.callback_query.data}")
-    await update.callback_query.answer("Command not recognized.")
-
 async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     query = update.callback_query
     logger.debug(f"Received play button callback from user {user_id}: {query.data}")
-    await query.answer()
+    try:
+        await query.answer()
+    except TelegramError as e:
+        logger.error(f"Failed to answer play button callback: {e}")
+        return
 
     command, data = query.data.split(":", 1)
 
     if command == "play_track":
         video_id = data
-        await query.edit_message_text(text=f"Обработка трека...")
+        await query.edit_message_text(text="Обработка трека...")
         try:
             await download_and_send_to_chat(context, video_id, query.message.chat_id)
-            await query.edit_message_text(text=f"Трек отправлен! 🎵")
+            await query.edit_message_text(text="Трек отправлен! 🎵")
         except Exception as e:
             logger.error(f"Failed to process play button callback: {e}", exc_info=True)
             await query.edit_message_text(f"Не удалось обработать трек: {e}")
@@ -524,16 +527,20 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("Эта команда только для администраторов.", show_alert=True)
             return
         if data == "refresh":
+            logger.debug("Processing radio:refresh callback")
             await update_status_panel(context)
             await query.answer("Статус обновлен.")
         elif data == "skip":
+            logger.debug("Processing radio:skip callback")
             await skip_track(context)
             await query.answer("Пропускаю трек...")
         elif data == "on":
+            logger.debug("Processing radio:on callback")
             await toggle_radio(context, True)
             await update_status_panel(context)
             await query.answer("Радио включено. 🎵")
         elif data == "off":
+            logger.debug("Processing radio:off callback")
             await toggle_radio(context, False)
             await update_status_panel(context)
             await query.answer("Радио выключено. 🔇")
@@ -543,8 +550,12 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("Эта команда только для администраторов.", show_alert=True)
             return
         if data == "start":
+            logger.debug("Processing vote:start callback")
             await start_vote(context)
             await query.answer("Голосование запущено! 🗳")
+    else:
+        logger.warning(f"Unknown callback command: {command}")
+        await query.answer("Неизвестная команда.")
 
 async def skip_track(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
@@ -579,6 +590,18 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"Poll started with ID: {poll.poll.id}")
         await context.bot.send_message(RADIO_CHAT_ID, "🗳 Голосование началось! Выберите жанр выше.")
         await save_state_from_botdata(context.bot_data)
+
+        # Запускаем таймер для принудительного завершения голосования
+        async def close_poll_after_timeout():
+            await asyncio.sleep(Constants.POLL_DURATION_SECONDS)
+            if state.active_poll_id == poll.poll.id:
+                logger.debug(f"Forcing poll {poll.poll.id} to close after timeout")
+                try:
+                    await context.bot.stop_poll(RADIO_CHAT_ID, poll.message_id)
+                except TelegramError as e:
+                    logger.error(f"Failed to force close poll {poll.poll.id}: {e}")
+
+        asyncio.create_task(close_poll_after_timeout())
     except TelegramError as e:
         logger.error(f"Failed to start poll: {e}")
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось запустить голосование.")
@@ -625,8 +648,11 @@ async def post_init(application: Application):
     
     # Проверка и сброс webhook
     try:
-        await application.bot.set_webhook("")
-        logger.info("Webhook disabled, using polling mode")
+        webhook_info = await application.bot.get_webhook_info()
+        logger.debug(f"Webhook info: {webhook_info}")
+        if webhook_info.url:
+            await application.bot.set_webhook("")
+            logger.info("Webhook disabled, using polling mode")
     except TelegramError as e:
         logger.error(f"Failed to disable webhook: {e}")
 
@@ -650,7 +676,6 @@ def main():
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote):"))
-    app.add_handler(CallbackQueryHandler(fallback_callback))  # Fallback for all other callback queries
     app.add_handler(PollHandler(handle_poll))
     logger.info("Starting bot polling...")
     app.run_polling()
