@@ -286,27 +286,24 @@ async def update_status_panel(context):
         logger.warning(f"Failed to update status panel: {e}")
 
 # --- Commands ---
-async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool) -> str:
+async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+    """Toggles the radio on or off, starts/stops the loop."""
     state: State = context.bot_data['state']
     state.is_on = turn_on
-    message = ""
     if turn_on:
         context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
-        message = f"Радио включено. Источник: {state.source}"
     else:
         task = context.bot_data.get('radio_loop_task')
         if task:
             task.cancel()
         state.now_playing = None
-        message = "Радио выключено."
-    
-    await update_status_panel(context)
     await save_state_from_botdata(context.bot_data)
-    return message
 
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
-    message = await toggle_radio(context, turn_on)
+    await toggle_radio(context, turn_on)
+    await update_status_panel(context)
+    message = "Радио включено." if turn_on else "Радио выключено."
     await update.message.reply_text(message)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,11 +394,13 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await skip_track(context)
             await query.answer("Пропускаю трек...")
         elif data == "on":
-            message = await toggle_radio(context, True)
-            await query.answer(message)
+            await toggle_radio(context, True)
+            await update_status_panel(context)
+            await query.answer("Радио включено.")
         elif data == "off":
-            message = await toggle_radio(context, False)
-            await query.answer(message)
+            await toggle_radio(context, False)
+            await update_status_panel(context)
+            await query.answer("Радио выключено.")
     elif command == "vote":
         if data == "start":
             await start_vote(context)
