@@ -285,7 +285,7 @@ async def update_status_panel(context):
         logger.warning(f"Failed to update status panel: {e}")
 
 # --- Commands ---
-async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool) -> str:
     state: State = context.bot_data['state']
     state.is_on = turn_on
     message = ""
@@ -299,14 +299,14 @@ async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
         state.now_playing = None
         message = "Радио выключено."
     
-    await context.bot.send_message(RADIO_CHAT_ID, message)
-
     await update_status_panel(context)
     await save_state_from_botdata(context.bot_data)
+    return message
 
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
-    await toggle_radio(context, turn_on)
+    message = await toggle_radio(context, turn_on)
+    await update.message.reply_text(message)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcome message when the /start command is issued."""
@@ -385,19 +385,24 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     command, data = query.data.split(":", 1)
     user_id = query.from_user.id
 
+    if not await is_admin(user_id):
+        await context.bot.send_message(user_id, "Эта команда только для администраторов.")
+        return
+
     if command == "radio":
-        if not await is_admin(user_id):
-            await context.bot.send_message(user_id, "Эта команда только для администраторов.")
-            return
         if data == "skip":
             await skip_track(context)
+            await query.answer("Пропускаю трек...")
         elif data == "on":
-            await toggle_radio(context, True)
+            message = await toggle_radio(context, True)
+            await query.answer(message)
         elif data == "off":
-            await toggle_radio(context, False)
+            message = await toggle_radio(context, False)
+            await query.answer(message)
     elif command == "vote":
         if data == "start":
             await start_vote(context)
+            await query.answer("Голосование еще не реализовано.")
 
 async def skip_track(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
