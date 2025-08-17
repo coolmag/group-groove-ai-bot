@@ -9,7 +9,7 @@ from collections import deque
 from datetime import datetime
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler, MessageHandler, filters
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_serializer, field_validator
@@ -30,7 +30,7 @@ class Constants:
     PAUSE_BETWEEN_TRACKS = 1.5
     STATUS_UPDATE_INTERVAL = 10
     RETRY_INTERVAL = 3
-    POLL_CHECK_TIMEOUT = 10  # Увеличенный таймаут для проверки опроса
+    POLL_CHECK_TIMEOUT = 10
 
 # --- Setup ---
 load_dotenv()
@@ -60,6 +60,7 @@ class State(BaseModel):
     poll_message_id: Optional[int] = None
     status_message_id: Optional[int] = None
     now_playing: Optional[NowPlaying] = None
+    last_error: Optional[str] = None  # Добавлено для хранения последней ошибки
     votable_genres: List[str] = Field(default_factory=lambda: [
         "pop", "rock", "hip hop", "electronic", "classical", "jazz", "blues", "country",
         "metal", "reggae", "folk", "indie", "rap", "r&b", "soul", "funk", "disco"
@@ -168,6 +169,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             tracks = await get_tracks_youtube(state.genre)
             if not tracks:
                 logger.warning(f"No tracks found on YouTube for genre {state.genre}")
+                state.last_error = "Не удалось найти треки"
                 await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
                 await refill_playlist(context)
@@ -182,11 +184,14 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}).")
         else:
             logger.warning(f"No valid tracks found after filtering. Retrying in {Constants.RETRY_INTERVAL} seconds.")
+            state.last_error = "Нет подходящих треков"
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
             await asyncio.sleep(Constants.RETRY_INTERVAL)
             await refill_playlist(context)
     except Exception as e:
         logger.error(f"Playlist refill failed: {e}")
+        state.last_error = f"Ошибка при заполнении плейлиста: {e}"
+        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при заполнении плейлиста.")
 
 # --- Download & send ---
 async def check_track_validity(url: str) -> Optional[dict]:
@@ -220,6 +225,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
             logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
+            state.last_error = "Трек слишком большой"
             await context.bot.send_message(chat_id, "⚠️ Трек слишком большой для отправки.")
             filepath.unlink(missing_ok=True)
             return
@@ -233,9 +239,11 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         filepath.unlink(missing_ok=True)
     except asyncio.TimeoutError:
         logger.error(f"Download timeout for track {url}")
+        state.last_error = "Таймаут загрузки трека"
         await context.bot.send_message(chat_id, "⚠️ Время ожидания загрузки трека истекло.")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
+        state.last_error = f"Ошибка загрузки трека: {e}"
         await context.bot.send_message(chat_id, "⚠️ Не удалось обработать трек.")
 
 async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
@@ -243,6 +251,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     track_info = await check_track_validity(url)
     if not track_info or not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
         logger.warning(f"Track {url} is invalid or out of duration range")
+        state.last_error = "Недопустимый трек"
         return
 
     ydl_opts = {
@@ -259,6 +268,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
             logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
+            state.last_error = "Трек слишком большой"
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Трек слишком большой для отправки.")
             filepath.unlink(missing_ok=True)
             return
@@ -278,9 +288,11 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         filepath.unlink(missing_ok=True)
     except asyncio.TimeoutError:
         logger.error(f"Download timeout for track {url}")
+        state.last_error = "Таймаут загрузки трека"
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Время ожидания загрузки трека истекло.")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
+        state.last_error = f"Ошибка загрузки трека: {e}"
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось обработать трек.")
 
 # --- Radio loop ---
@@ -296,6 +308,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             if not state.radio_playlist:
                 await refill_playlist(context)
                 if not state.radio_playlist:
+                    state.last_error = "Не удалось найти треки"
                     await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
                     await asyncio.sleep(Constants.RETRY_INTERVAL)
                     continue
@@ -325,6 +338,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             break
         except Exception as e:
             logger.error(f"radio_loop error: {e}", exc_info=True)
+            state.last_error = f"Ошибка radio_loop: {e}"
             await asyncio.sleep(5)
 
 # --- UI ---
@@ -347,6 +361,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
             lines.append("**Сейчас играет**: Ожидание трека...")
         if state.active_poll_id:
             lines.append(f"🗳 *Голосование активно* (осталось ~{Constants.POLL_DURATION_SECONDS} сек)")
+        if state.last_error:
+            lines.append(f"⚠️ **Последняя ошибка**: {state.last_error}")
         lines.append("────────────────")
         text = "\n".join(lines)
 
@@ -354,6 +370,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
 
         if not text.strip():
             logger.error("Attempted to send empty status message!")
+            state.last_error = "Попытка отправки пустого сообщения статуса"
             return
 
         last_status_text = context.bot_data.get('last_status_text')
@@ -393,6 +410,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
             await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
             logger.warning(f"Failed to update status panel: {e}")
+            state.last_error = f"Ошибка обновления статуса: {e}"
             if "Message to edit not found" in str(e):
                 state.status_message_id = None
                 await update_status_panel(context)
@@ -400,9 +418,10 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(0.5)
             elif "Bad Request: message text is empty" in str(e):
                 logger.error("Empty message text detected in update_status_panel")
+                state.last_error = "Пустой текст сообщения в update_status_panel"
             else:
                 logger.error(f"Unexpected Telegram error: {e}")
-                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при обновлении статуса.")
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при обновлении статуса: {e}")
 
 # --- Commands ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -416,6 +435,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**Текущий жанр**: {state.genre.title()}",
         f"**Голосование**: {'🗳 Активно' if state.active_poll_id else '⏳ Не активно'}",
         f"**Сейчас играет**: {state.now_playing.title if state.now_playing else 'Ничего не играет'}",
+        f"**Последняя ошибка**: {state.last_error or 'Отсутствует'}",
         "",
         "📜 *Команды для всех:*",
         "🎧 /play (/p) <название> - Поиск и воспроизведение трека",
@@ -531,6 +551,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             info = ydl.extract_info(query, download=False)
             if not info.get('entries'):
                 logger.debug(f"No tracks found for query '{query}'")
+                state.last_error = "Треки не найдены"
                 await message.edit_text("Треки не найдены. 😔")
                 return
 
@@ -546,6 +567,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error in /play search: {e}", exc_info=True)
+        state.last_error = f"Ошибка поиска трека: {e}"
         await message.edit_text("Произошла ошибка при поиске. 😔")
 
 async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -556,6 +578,8 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer()
     except TelegramError as e:
         logger.error(f"Failed to answer play button callback: {e}")
+        state: State = context.bot_data['state']
+        state.last_error = f"Ошибка ответа на callback: {e}"
         return
 
     command, data = query.data.split(":", 1)
@@ -569,26 +593,37 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text(text="Трек отправлен! 🎵")
         except Exception as e:
             logger.error(f"Failed to process play button callback: {e}", exc_info=True)
+            state: State = context.bot_data['state']
+            state.last_error = f"Ошибка обработки трека: {e}"
             await query.edit_message_text(f"Не удалось обработать трек: {e}")
 
 async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
+    state: State = context.bot_data['state']
     logger.debug(f"Received callback query from user {user_id}: {query.data}")
     
     try:
         await query.answer()
     except TelegramError as e:
         logger.error(f"Failed to answer callback query: {e}")
+        state.last_error = f"Ошибка ответа на callback: {e}"
         if "Bad Request" in str(e):
             logger.error(f"Bad Request error in callback: {query.data}")
         return
 
-    command, data = query.data.split(":", 1)
+    try:
+        command, data = query.data.split(":", 1)
+    except ValueError:
+        logger.error(f"Invalid callback data format: {query.data}")
+        state.last_error = "Недопустимый формат callback"
+        await query.answer("Ошибка обработки команды.", show_alert=True)
+        return
 
     if command == "radio":
         if not await is_admin(user_id):
             logger.warning(f"User {user_id} attempted radio command but is not admin")
+            state.last_error = "Попытка неавторизованного доступа"
             await query.answer("Эта команда только для администраторов.", show_alert=True)
             return
         if data == "refresh":
@@ -612,6 +647,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif command == "vote":
         if not await is_admin(user_id):
             logger.warning(f"User {user_id} attempted vote command but is not admin")
+            state.last_error = "Попытка неавторизованного доступа"
             await query.answer("Эта команда только для администраторов.", show_alert=True)
             return
         if data == "start":
@@ -630,9 +666,11 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await show_menu(update, context)
             await query.answer("Меню открыто. 📋")
         else:
+            state.last_error = "Команда недоступна"
             await query.answer("Команда недоступна.", show_alert=True)
     else:
         logger.warning(f"Unknown callback command: {command}")
+        state.last_error = f"Неизвестная команда: {command}"
         await query.answer("Неизвестная команда.")
 
 async def skip_track(context: ContextTypes.DEFAULT_TYPE):
@@ -650,6 +688,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
 
     if len(state.votable_genres) < 2:
         logger.debug("Not enough genres for voting.")
+        state.last_error = "Недостаточно жанров для голосования"
         await context.bot.send_message(RADIO_CHAT_ID, "Недостаточно жанров для голосования. 😔")
         return
 
@@ -676,16 +715,24 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(Constants.POLL_DURATION_SECONDS + Constants.POLL_CHECK_TIMEOUT)
                 if state.active_poll_id == poll.poll.id and state.poll_message_id:
                     logger.debug(f"Checking poll {poll.poll.id} status after timeout")
-                    for _ in range(3):  # Попытки закрытия опроса
+                    for attempt in range(3):
                         try:
+                            updates = await context.bot.get_updates(allowed_updates=["poll"])
+                            for update in updates:
+                                if update.poll and update.poll.id == state.active_poll_id:
+                                    logger.debug(f"Poll update received: {update.poll}")
+                                    if update.poll.is_closed:
+                                        await handle_poll(update, context)
+                                        return
+                            logger.debug(f"Attempt {attempt + 1}: Forcing poll {poll.poll.id} to close")
                             poll_update = await context.bot.stop_poll(RADIO_CHAT_ID, state.poll_message_id)
                             logger.debug(f"Forced poll {poll.poll.id} to close: {poll_update}")
                             await handle_poll(Update(poll=poll_update), context)
                             break
                         except TelegramError as e:
-                            logger.error(f"Attempt to force close poll {poll.poll.id} failed: {e}")
+                            logger.error(f"Attempt {attempt + 1}: Failed to force close poll {poll.poll.id}: {e}")
+                            state.last_error = f"Ошибка закрытия опроса: {e}"
                             if "Poll has already been closed" in str(e):
-                                # Проверяем статус опроса
                                 updates = await context.bot.get_updates(allowed_updates=["poll"])
                                 for update in updates:
                                     if update.poll and update.poll.id == state.active_poll_id:
@@ -693,18 +740,24 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
                                         await handle_poll(update, context)
                                         break
                                 break
-                            await asyncio.sleep(1)  # Пауза между попытками
+                            await asyncio.sleep(2)
                     else:
-                        logger.error(f"Failed to close poll {poll.poll.id} after retries")
+                        logger.error(f"Failed to close poll {poll.poll.id} after 3 attempts")
+                        state.last_error = "Не удалось завершить голосование после попыток"
                         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось завершить голосование.")
+                state.active_poll_id = None
+                state.poll_message_id = None
+                await save_state_from_botdata(context.bot_data)
             except Exception as e:
-                logger.error(f"Error in close_poll_after_timeout for poll {poll.poll.id}: {e}")
-                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при завершении голосования.")
+                logger.error(f"Error in close_poll_after_timeout for poll {poll.poll.id}: {e}", exc_info=True)
+                state.last_error = f"Критическая ошибка голосования: {e}"
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Критическая ошибка при завершении голосования: {e}")
 
         asyncio.create_task(close_poll_after_timeout())
     except TelegramError as e:
         logger.error(f"Failed to start poll: {e}")
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось запустить голосование.")
+        state.last_error = f"Ошибка запуска голосования: {e}"
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось запустить голосование: {e}")
 
 async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the result of a poll."""
@@ -739,6 +792,11 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state.active_poll_id = None
     state.poll_message_id = None
     await save_state_from_botdata(context.bot_data)
+
+async def debug_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Логирует все входящие обновления для диагностики."""
+    user_id = update.effective_user.id if update.effective_user else None
+    logger.debug(f"Received update from user {user_id}: {update.to_dict()}")
 
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
@@ -780,8 +838,9 @@ def main():
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote|cmd):"))
     app.add_handler(PollHandler(handle_poll))
+    app.add_handler(MessageHandler(filters.ALL, debug_updates))  # Логирование всех обновлений
     logger.info("Starting bot polling...")
-    app.run_polling(timeout=5)  # Уменьшенный timeout для более частых getUpdates
+    app.run_polling(timeout=3)  # Уменьшенный timeout
 
 if __name__ == "__main__":
     main()
