@@ -3,6 +3,7 @@ import os
 import asyncio
 import json
 import random
+import shutil
 from pathlib import Path
 from typing import List, Optional
 from collections import deque
@@ -37,8 +38,9 @@ class Constants:
     DEFAULT_SOURCE = "soundcloud"
     PAUSE_BETWEEN_TRACKS = 90  # 1.5 minutes
     STATUS_UPDATE_INTERVAL = 10
-    STATUS_UPDATE_MIN_INTERVAL = 2  # Minimum interval between status updates to avoid rate limits
+    STATUS_UPDATE_MIN_INTERVAL = 2  # Minimum interval between status updates
     RETRY_INTERVAL = 90  # 1.5 minutes for refill retry
+    SEARCH_LIMIT = 10  # Number of tracks to show in /play
 
 # --- Setup ---
 load_dotenv()
@@ -137,18 +139,20 @@ def admin_only(func):
 async def get_tracks_soundcloud(genre: str) -> List[dict]:
     ydl_opts = {
         'format': 'bestaudio/best',
-        'default_search': f"scsearch10:{genre}",
+        'default_search': f"scsearch{Constants.SEARCH_LIMIT}:{genre}",
         'noplaylist': True,
-        'quiet': True,
+        'quiet': False,
         'extract_flat': 'in_playlist'
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, genre, download=False)
-        return [
+        tracks = [
             {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
             for e in info.get("entries", [])
         ]
+        logger.debug(f"SoundCloud returned {len(tracks)} tracks for genre {genre}")
+        return tracks
     except yt_dlp.YoutubeDLError as e:
         logger.error(f"SoundCloud search failed for genre {genre}: {e}")
         return []
@@ -156,18 +160,20 @@ async def get_tracks_soundcloud(genre: str) -> List[dict]:
 async def get_tracks_youtube(genre: str) -> List[dict]:
     ydl_opts = {
         'format': 'bestaudio/best',
-        'default_search': f"ytsearch10:{genre}",
+        'default_search': f"ytsearch{Constants.SEARCH_LIMIT}:{genre}",
         'noplaylist': True,
-        'quiet': True,
+        'quiet': False,
         'extract_flat': 'in_playlist'
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, genre, download=False)
-        return [
+        tracks = [
             {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
             for e in info.get("entries", [])
         ]
+        logger.debug(f"YouTube returned {len(tracks)} tracks for genre {genre}")
+        return tracks
     except yt_dlp.YoutubeDLError as e:
         logger.error(f"YouTube search failed for genre {genre}: {e}")
         return []
@@ -181,7 +187,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
         if state.source == "soundcloud":
             tracks = await get_tracks_soundcloud(state.genre)
         if not tracks:
-            logger.warning(f"No tracks found on {state.source}, trying YouTube")
+            logger.warning(f"No tracks found on {state.source}, switching to YouTube")
             state.source = "youtube"
             tracks = await get_tracks_youtube(state.genre)
             if not tracks:
@@ -192,8 +198,12 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 await refill_playlist(context)
                 return
 
-        filtered_tracks = [t for t in tracks if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION]
-        urls = [t["url"] for t in filtered_tracks if t["url"] not in state.played_radio_urls]
+        filtered_tracks = [
+            t for t in tracks
+            if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
+            and t["url"] not in state.played_radio_urls
+        ]
+        urls = [t["url"] for t in filtered_tracks]
         if urls:
             random.shuffle(urls)
             state.radio_playlist.extend(urls)
@@ -215,12 +225,13 @@ async def check_track_validity(url: str) -> Optional[dict]:
     ydl_opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
-        'quiet': True,
+        'quiet': False,
         'simulate': True
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=False)
+        logger.debug(f"Track valid: {url}, title: {info.get('title', 'Unknown')}")
         return {"url": url, "title": info.get("title", "Unknown"), "duration": info.get("duration", 0)}
     except Exception as e:
         logger.error(f"Failed to check track validity {url}: {e}")
@@ -228,16 +239,24 @@ async def check_track_validity(url: str) -> Optional[dict]:
 
 async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str, chat_id: int):
     state: State = context.bot_data['state']
+    # Check if FFmpeg is available
+    if not shutil.which("ffmpeg"):
+        logger.error("FFmpeg not found in system")
+        state.last_error = "FFmpeg не установлен"
+        await context.bot.send_message(chat_id, "⚠️ Ошибка: FFmpeg не установлен на сервере.")
+        return
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
         'noplaylist': True,
-        'quiet': True,
+        'quiet': False,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
+        'ffmpeg_location': shutil.which("ffmpeg")
     }
     try:
         async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
@@ -247,8 +266,23 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         if not filepath.exists():
             logger.error(f"MP3 file not found after conversion: {filepath}")
             state.last_error = "Ошибка конвертации трека в MP3"
-            await context.bot.send_message(chat_id, "⚠️ Ошибка конвертации трека.")
-            return
+            await context.bot.send_message(chat_id, "⚠️ Ошибка конвертации трека в MP3.")
+            # Fallback: Try downloading without postprocessing
+            ydl_opts['postprocessors'] = []
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                filepath = Path(ydl.prepare_filename(info))
+                if not filepath.exists():
+                    logger.error(f"Fallback download failed: {filepath}")
+                    state.last_error = "Ошибка загрузки трека даже без конвертации"
+                    await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек.")
+                    return
+            except Exception as e:
+                logger.error(f"Fallback download failed: {e}")
+                state.last_error = f"Ошибка загрузки трека: {e}"
+                await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек.")
+                return
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
             logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
@@ -272,7 +306,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
         state.last_error = f"Ошибка загрузки трека: {e}"
-        await context.bot.send_message(chat_id, "⚠️ Не удалось обработать трек.")
+        await context.bot.send_message(chat_id, f"⚠️ Не удалось обработать трек: {e}")
 
 async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     state: State = context.bot_data['state']
@@ -280,18 +314,27 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     if not track_info or not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
         logger.warning(f"Track {url} is invalid or out of duration range")
         state.last_error = "Недопустимый трек или неверная длительность"
+        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Недопустимый трек или неверная длительность.")
+        return
+
+    # Check if FFmpeg is available
+    if not shutil.which("ffmpeg"):
+        logger.error("FFmpeg not found in system")
+        state.last_error = "FFmpeg не установлен"
+        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка: FFmpeg не установлен на сервере.")
         return
 
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
         'noplaylist': True,
-        'quiet': True,
+        'quiet': False,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
+        'ffmpeg_location': shutil.which("ffmpeg")
     }
     try:
         async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
@@ -301,8 +344,23 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         if not filepath.exists():
             logger.error(f"MP3 file not found after conversion: {filepath}")
             state.last_error = "Ошибка конвертации трека в MP3"
-            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка конвертации трека.")
-            return
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка конвертации трека в MP3.")
+            # Fallback: Try downloading without postprocessing
+            ydl_opts['postprocessors'] = []
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                filepath = Path(ydl.prepare_filename(info))
+                if not filepath.exists():
+                    logger.error(f"Fallback download failed: {filepath}")
+                    state.last_error = "Ошибка загрузки трека даже без конвертации"
+                    await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось загрузить трек.")
+                    return
+            except Exception as e:
+                logger.error(f"Fallback download failed: {e}")
+                state.last_error = f"Ошибка загрузки трека: {e}"
+                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось загрузить трек.")
+                return
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
             logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
@@ -333,7 +391,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
         state.last_error = f"Ошибка загрузки трека: {e}"
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось обработать трек.")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось обработать трек: {e}")
 
 # --- Radio loop ---
 async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
@@ -369,11 +427,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 pass
             await asyncio.sleep(Constants.PAUSE_BETWEEN_TRACKS)
             logger.info(f"Paused for {Constants.PAUSE_BETWEEN_TRACKS} seconds between tracks.")
-
-            if state.now_playing:
-                elapsed = asyncio.get_event_loop().time() - state.now_playing.start_time
-                if elapsed < state.now_playing.duration:
-                    await update_status_panel(context, force=True)
+            await update_status_panel(context, force=True)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -590,42 +644,50 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = await update.message.reply_text(f'🔍 Поиск "{query}"...')
 
     state: State = context.bot_data['state']
-    search_prefix = "scsearch5" if state.source == "soundcloud" else "ytsearch5"
+    search_prefix = f"scsearch{Constants.SEARCH_LIMIT}" if state.source == "soundcloud" else f"ytsearch{Constants.SEARCH_LIMIT}"
     ydl_opts = {
-        'format': 'bestaudio',
+        'format': 'bestaudio/best',
         'noplaylist': True,
-        'quiet': True,
+        'quiet': False,
         'default_search': search_prefix,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
+        'extract_flat': 'in_playlist'
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
-            if not info.get('entries'):
-                logger.debug(f"No tracks found for query '{query}'")
-                state.last_error = "Треки не найдены"
-                await message.edit_text("Треки не найдены. 😔")
-                return
+            info = await asyncio.to_thread(ydl.extract_info, query, download=False)
+        if not info.get('entries'):
+            logger.debug(f"No tracks found for query '{query}'")
+            state.last_error = "Треки не найдены"
+            await message.edit_text("Треки не найдены. 😔")
+            return
 
-        keyboard = []
-        for i, entry in enumerate(info['entries'][:5]):
-            title = entry.get('title', 'Unknown Title')
-            video_id = entry.get('id')
-            keyboard.append([InlineKeyboardButton(f"▶️ {title}", callback_data=f"play_track:{video_id}")])
+        tracks = [
+            {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
+            for e in info['entries']
+        ]
+        filtered_tracks = [
+            t for t in tracks
+            if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
+        ]
+        if not filtered_tracks:
+            logger.debug(f"No valid tracks found after filtering for query '{query}'")
+            state.last_error = "Нет подходящих треков по длительности"
+            await message.edit_text("Нет подходящих треков по длительности. 😔")
+            return
 
+        keyboard = [
+            [InlineKeyboardButton(f"▶️ {t['title']} ({format_duration(t['duration'])})", callback_data=f"play_track:{t['url']}")]
+            for t in filtered_tracks[:Constants.SEARCH_LIMIT]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        logger.debug(f"Sending track selection message to {RADIO_CHAT_ID}")
+        logger.debug(f"Sending track selection message with {len(filtered_tracks)} tracks to {RADIO_CHAT_ID}")
         await message.edit_text('Выберите трек:', reply_markup=reply_markup)
 
     except Exception as e:
         logger.error(f"Error in /play search: {e}", exc_info=True)
         state.last_error = f"Ошибка поиска трека: {e}"
-        await message.edit_text("Произошла ошибка при поиске. 😔")
+        await message.edit_text(f"Произошла ошибка при поиске: {e}")
 
 async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -642,10 +704,10 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     command, data = query.data.split(":", 1)
 
     if command == "play_track":
-        video_id = data
+        url = data
         await query.edit_message_text(text="Обработка трека...")
         try:
-            await download_and_send_to_chat(context, video_id, query.message.chat_id)
+            await download_and_send_to_chat(context, url, query.message.chat_id)
             logger.debug(f"Sending track sent message to {query.message.chat_id}")
             await query.edit_message_text(text="Трек отправлен! 🎵")
         except Exception as e:
@@ -807,7 +869,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
                             state.radio_playlist.clear()
                             logger.debug(f"Selected genre from votes: {selected_genre}")
                             await context.bot.send_message(RADIO_CHAT_ID, f"🎵 Новый жанр: *{state.genre.title()}*")
-                            await refill_playlist(context)  # Ensure immediate playlist refill
+                            await refill_playlist(context)
                             if state.is_on and context.bot_data.get('radio_loop_task'):
                                 context.bot_data['radio_loop_task'].cancel()
                                 context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
@@ -867,7 +929,7 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state.radio_playlist.clear()
         logger.debug(f"Selected genre: {selected_genre}")
         await context.bot.send_message(RADIO_CHAT_ID, f"🎵 Новый жанр: *{state.genre.title()}*")
-        await refill_playlist(context)  # Ensure immediate playlist refill
+        await refill_playlist(context)
         if state.is_on and context.bot_data.get('radio_loop_task'):
             context.bot_data['radio_loop_task'].cancel()
             context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
@@ -890,7 +952,7 @@ async def post_init(application: Application):
     application.bot_data['skip_event'] = asyncio.Event()
     if application.bot_data['state'].is_on:
         application.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(application))
-        await refill_playlist(application)  # Ensure playlist is filled on startup
+        await refill_playlist(application)
 
     try:
         webhook_info = await application.bot.get_webhook_info()
