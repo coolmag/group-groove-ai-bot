@@ -31,7 +31,7 @@ class Constants:
     MIN_DURATION = 30
     PLAYED_URLS_MEMORY = 200
     DOWNLOAD_TIMEOUT = 120
-    DEFAULT_SOURCE = "fma"  # fma | soundcloud | youtube
+    DEFAULT_SOURCE = "soundcloud"  # soundcloud | youtube
 
 # --- Setup ---
 load_dotenv()
@@ -113,13 +113,6 @@ def admin_only(func):
     return wrapper
 
 # --- Music Sources ---
-async def get_tracks_fma(genre: str) -> List[dict]:
-    url = f"http://freemusicarchive.org/api/get/featured.json"  # публичный JSON
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.json()
-    return [{"url": t["track_url"], "title": t["track_title"], "duration": 180} for t in data.get("dataset", [])]
-
 async def get_tracks_soundcloud(genre: str) -> List[dict]:
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -151,9 +144,7 @@ async def refill_playlist(context):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist from {state.source} for genre: {state.genre}")
     try:
-        if state.source == "fma":
-            tracks = await get_tracks_fma(state.genre)
-        elif state.source == "soundcloud":
+        if state.source == "soundcloud":
             tracks = await get_tracks_soundcloud(state.genre)
         else:
             tracks = await get_tracks_youtube(state.genre)
@@ -309,8 +300,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or context.args[0] not in ["fma", "soundcloud", "youtube"]:
-        await update.message.reply_text("Использование: /source fma|soundcloud|youtube")
+    if not context.args or context.args[0] not in ["soundcloud", "youtube"]:
+        await update.message.reply_text("Использование: /source soundcloud|youtube")
         return
     state: State = context.bot_data['state']
     state.source = context.args[0]
