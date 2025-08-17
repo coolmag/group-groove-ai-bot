@@ -30,6 +30,7 @@ class Constants:
     PAUSE_BETWEEN_TRACKS = 1.5
     STATUS_UPDATE_INTERVAL = 10
     RETRY_INTERVAL = 3
+    POLL_CHECK_TIMEOUT = 10  # Увеличенный таймаут для проверки опроса
 
 # --- Setup ---
 load_dotenv()
@@ -56,6 +57,7 @@ class State(BaseModel):
     radio_playlist: deque[str] = Field(default_factory=deque)
     played_radio_urls: deque[str] = Field(default_factory=deque)
     active_poll_id: Optional[str] = None
+    poll_message_id: Optional[int] = None
     status_message_id: Optional[int] = None
     now_playing: Optional[NowPlaying] = None
     votable_genres: List[str] = Field(default_factory=lambda: [
@@ -396,6 +398,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
                 await update_status_panel(context)
             elif "Message is not modified" in str(e):
                 await asyncio.sleep(0.5)
+            elif "Bad Request: message text is empty" in str(e):
+                logger.error("Empty message text detected in update_status_panel")
             else:
                 logger.error(f"Unexpected Telegram error: {e}")
                 await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при обновлении статуса.")
@@ -411,6 +415,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**Статус радио**: {'🟢 Включено' if state.is_on else '🔴 Выключено'}",
         f"**Текущий жанр**: {state.genre.title()}",
         f"**Голосование**: {'🗳 Активно' if state.active_poll_id else '⏳ Не активно'}",
+        f"**Сейчас играет**: {state.now_playing.title if state.now_playing else 'Ничего не играет'}",
         "",
         "📜 *Команды для всех:*",
         "🎧 /play (/p) <название> - Поиск и воспроизведение трека",
@@ -432,7 +437,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh"), InlineKeyboardButton("🔧 Источник", callback_data="cmd:source")] if is_admin_user else [],
         [InlineKeyboardButton("📋 Меню", callback_data="cmd:menu")] if is_admin_user else []
     ]
-    logger.debug(f"Sending menu to user {user_id}")
+    logger.debug(f"Sending menu to user {user_id} with text: {repr(text)}")
     await update.message.reply_text(
         text,
         reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]),
@@ -458,7 +463,7 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await toggle_radio(context, turn_on)
     await update_status_panel(context)
     message = "Радио включено. 🎵" if turn_on else "Радио выключено. 🔇"
-    logger.debug(f"Sending message: {message}")
+    logger.debug(f"Sending message to {RADIO_CHAT_ID}: {message}")
     await update.message.reply_text(message, parse_mode="Markdown")
 
 @admin_only
@@ -466,6 +471,7 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.debug(f"Received /skip command from user {user_id}")
     await skip_track(context)
+    logger.debug(f"Sending skip message to {RADIO_CHAT_ID}")
     await update.message.reply_text("Пропускаю трек... ⏭")
 
 @admin_only
@@ -473,6 +479,7 @@ async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.debug(f"Received /vote command from user {user_id}")
     await start_vote(context)
+    logger.debug(f"Sending vote message to {RADIO_CHAT_ID}")
     await update.message.reply_text("Голосование запущено! 🗳")
 
 @admin_only
@@ -480,6 +487,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.debug(f"Received /refresh command from user {user_id}")
     await update_status_panel(context)
+    logger.debug(f"Sending refresh message to {RADIO_CHAT_ID}")
     await update.message.reply_text("Статус обновлен. 🔄")
 
 @admin_only
@@ -487,12 +495,13 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     logger.debug(f"Received /source command from user {user_id}")
     if not context.args or context.args[0] not in ["soundcloud", "youtube"]:
+        logger.debug(f"Sending source usage message to {RADIO_CHAT_ID}")
         await update.message.reply_text("Использование: /source (/src) soundcloud|youtube")
         return
     state: State = context.bot_data['state']
     state.source = context.args[0]
     message = f"Источник переключен на: {state.source.title()}"
-    logger.debug(f"Sending source message: {message}")
+    logger.debug(f"Sending source message to {RADIO_CHAT_ID}: {message}")
     await update.message.reply_text(message)
     await save_state_from_botdata(context.bot_data)
 
@@ -500,12 +509,13 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"Received /play command from user {user_id}")
     if not context.args:
+        logger.debug(f"Sending play usage message to {RADIO_CHAT_ID}")
         await update.message.reply_text("Пожалуйста, укажите название песни.")
         return
 
     query = " ".join(context.args)
-    message = await update.message.reply_text(f'🔍 Поиск "{query}"...')
     logger.info(f"Searching for '{query}' for user {user_id}")
+    message = await update.message.reply_text(f'🔍 Поиск "{query}"...')
 
     state: State = context.bot_data['state']
     search_prefix = "scsearch5" if state.source == "soundcloud" else "ytsearch5"
@@ -520,6 +530,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
             if not info.get('entries'):
+                logger.debug(f"No tracks found for query '{query}'")
                 await message.edit_text("Треки не найдены. 😔")
                 return
 
@@ -530,6 +541,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"▶️ {title}", callback_data=f"play_track:{video_id}")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
+        logger.debug(f"Sending track selection message to {RADIO_CHAT_ID}")
         await message.edit_text('Выберите трек:', reply_markup=reply_markup)
 
     except Exception as e:
@@ -553,6 +565,7 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text="Обработка трека...")
         try:
             await download_and_send_to_chat(context, video_id, query.message.chat_id)
+            logger.debug(f"Sending track sent message to {query.message.chat_id}")
             await query.edit_message_text(text="Трек отправлен! 🎵")
         except Exception as e:
             logger.error(f"Failed to process play button callback: {e}", exc_info=True)
@@ -567,6 +580,8 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
     except TelegramError as e:
         logger.error(f"Failed to answer callback query: {e}")
+        if "Bad Request" in str(e):
+            logger.error(f"Bad Request error in callback: {query.data}")
         return
 
     command, data = query.data.split(":", 1)
@@ -605,10 +620,13 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("Голосование запущено! 🗳")
     elif command == "cmd":
         if data == "play":
+            logger.debug(f"Sending play command prompt to {query.message.chat_id}")
             await query.message.reply_text("Введите /play <название песни> для поиска трека.")
         elif data == "source" and await is_admin(user_id):
+            logger.debug(f"Sending source command prompt to {query.message.chat_id}")
             await query.message.reply_text("Введите /source soundcloud|youtube для смены источника.")
         elif data == "menu" and await is_admin(user_id):
+            logger.debug(f"Showing menu for user {user_id}")
             await show_menu(update, context)
             await query.answer("Меню открыто. 📋")
         else:
@@ -647,7 +665,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
             open_period=Constants.POLL_DURATION_SECONDS
         )
         state.active_poll_id = poll.poll.id
-        state.poll_message_id = poll.message_id  # Сохраняем message_id для проверки
+        state.poll_message_id = poll.message_id
         logger.debug(f"Poll started with ID: {poll.poll.id}, message_id: {poll.message_id}")
         await context.bot.send_message(RADIO_CHAT_ID, "🗳 Голосование началось! Выберите жанр выше.")
         await save_state_from_botdata(context.bot_data)
@@ -655,25 +673,33 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         # Запускаем таймер для принудительного завершения голосования
         async def close_poll_after_timeout():
             try:
-                await asyncio.sleep(Constants.POLL_DURATION_SECONDS + 5)
-                if state.active_poll_id == poll.poll.id:
+                await asyncio.sleep(Constants.POLL_DURATION_SECONDS + Constants.POLL_CHECK_TIMEOUT)
+                if state.active_poll_id == poll.poll.id and state.poll_message_id:
                     logger.debug(f"Checking poll {poll.poll.id} status after timeout")
-                    try:
-                        poll_update = await context.bot.get_updates(allowed_updates=["poll"])
-                        for update in poll_update:
-                            if update.poll and update.poll.id == state.active_poll_id:
-                                logger.debug(f"Poll update received: {update.poll}")
-                                if update.poll.is_closed:
-                                    await handle_poll(update, context)
-                                    return
-                        logger.debug(f"Forcing poll {poll.poll.id} to close")
-                        poll_update = await context.bot.stop_poll(RADIO_CHAT_ID, poll.message_id)
-                        logger.debug(f"Forced poll {poll.poll.id} to close: {poll_update}")
-                        await handle_poll(Update(poll=poll_update), context)
-                    except TelegramError as e:
-                        logger.error(f"Failed to force close poll {poll.poll.id}: {e}")
+                    for _ in range(3):  # Попытки закрытия опроса
+                        try:
+                            poll_update = await context.bot.stop_poll(RADIO_CHAT_ID, state.poll_message_id)
+                            logger.debug(f"Forced poll {poll.poll.id} to close: {poll_update}")
+                            await handle_poll(Update(poll=poll_update), context)
+                            break
+                        except TelegramError as e:
+                            logger.error(f"Attempt to force close poll {poll.poll.id} failed: {e}")
+                            if "Poll has already been closed" in str(e):
+                                # Проверяем статус опроса
+                                updates = await context.bot.get_updates(allowed_updates=["poll"])
+                                for update in updates:
+                                    if update.poll and update.poll.id == state.active_poll_id:
+                                        logger.debug(f"Poll update received: {update.poll}")
+                                        await handle_poll(update, context)
+                                        break
+                                break
+                            await asyncio.sleep(1)  # Пауза между попытками
+                    else:
+                        logger.error(f"Failed to close poll {poll.poll.id} after retries")
+                        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось завершить голосование.")
             except Exception as e:
                 logger.error(f"Error in close_poll_after_timeout for poll {poll.poll.id}: {e}")
+                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при завершении голосования.")
 
         asyncio.create_task(close_poll_after_timeout())
     except TelegramError as e:
@@ -755,7 +781,7 @@ def main():
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote|cmd):"))
     app.add_handler(PollHandler(handle_poll))
     logger.info("Starting bot polling...")
-    app.run_polling()
+    app.run_polling(timeout=5)  # Уменьшенный timeout для более частых getUpdates
 
 if __name__ == "__main__":
     main()
