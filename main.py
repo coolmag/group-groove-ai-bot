@@ -301,6 +301,12 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update_status_panel(context)
     await save_state_from_botdata(context.bot_data)
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a welcome message when the /start command is issued."""
+    await update.message.reply_text("Привет! Я музыкальный бот. 🎵\n\n" 
+                                   "Используйте /play <название песни>, чтобы найти и послушать трек.\n" 
+                                   "Администраторы могут использовать /ron и /rof для управления радио.")
+
 @admin_only
 async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or context.args[0] not in ["fma", "soundcloud", "youtube"]:
@@ -385,6 +391,7 @@ def main():
         logger.critical("BOT_TOKEN или RADIO_CHAT_ID не заданы!")
         return
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("ron", lambda u, c: radio_on_off_command(u, c, True)))
     app.add_handler(CommandHandler("rof", lambda u, c: radio_on_off_command(u, c, False)))
     app.add_handler(CommandHandler("source", set_source_command))
