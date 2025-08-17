@@ -483,6 +483,10 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in /play search: {e}", exc_info=True)
         await message.edit_text("Произошла ошибка при поиске. 😔")
 
+async def fallback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.debug(f"Fallback callback query received: {update.callback_query.data}")
+    await update.callback_query.answer("Command not recognized.")
+
 async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     query = update.callback_query
@@ -646,6 +650,7 @@ def main():
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote):"))
+    app.add_handler(CallbackQueryHandler(fallback_callback))  # Fallback for all other callback queries
     app.add_handler(PollHandler(handle_poll))
     logger.info("Starting bot polling...")
     app.run_polling()
