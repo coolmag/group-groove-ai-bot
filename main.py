@@ -413,9 +413,43 @@ async def skip_track(context: ContextTypes.DEFAULT_TYPE):
 
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
-    if state.is_on:
-        # This is a placeholder for the voting logic
-        await context.bot.send_message(RADIO_CHAT_ID, "Voting is not implemented yet.")
+    if state.active_poll_id:
+        await context.bot.send_message(RADIO_CHAT_ID, "Голосование уже идет.")
+        return
+
+    if len(state.votable_genres) < 2:
+        await context.bot.send_message(RADIO_CHAT_ID, "Недостаточно жанров для голосования.")
+        return
+
+    options = random.sample(state.votable_genres, min(len(state.votable_genres), 5))
+    poll = await context.bot.send_poll(
+        chat_id=RADIO_CHAT_ID,
+        question="Выберите следующий жанр:",
+        options=options,
+        is_anonymous=False,
+        allows_multiple_answers=False,
+        open_period=Constants.POLL_DURATION_SECONDS
+    )
+    state.active_poll_id = poll.poll.id
+    await save_state_from_botdata(context.bot_data)
+
+async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the result of a poll."""
+    state: State = context.bot_data['state']
+    if update.poll.id == state.active_poll_id:
+        winning_option = max(update.poll.options, key=lambda o: o.voter_count)
+        if winning_option.voter_count > 0:
+            state.genre = winning_option.text
+            await context.bot.send_message(RADIO_CHAT_ID, f"Новый жанр: {state.genre}")
+            # Restart radio loop
+            if state.is_on and context.bot_data.get('radio_loop_task'):
+                context.bot_data['radio_loop_task'].cancel()
+                context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
+        else:
+            await context.bot.send_message(RADIO_CHAT_ID, "В голосовании никто не участвовал.")
+        
+        state.active_poll_id = None
+        await save_state_from_botdata(context.bot_data)
 
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
@@ -444,6 +478,7 @@ def main():
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote):"))
+    app.add_handler(PollHandler(handle_poll))
     logger.info("Starting bot polling...")
     app.run_polling()
 
