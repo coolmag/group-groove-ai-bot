@@ -233,7 +233,14 @@ async def radio_loop(context):
                 state.played_radio_urls.popleft()
             await download_and_send_track(context, url)
             await save_state_from_botdata(context.bot_data)
-            await asyncio.sleep(Constants.TRACK_INTERVAL_SECONDS)
+            
+            context.bot_data['skip_event'].clear()
+            sleep_duration = state.now_playing.duration if state.now_playing and state.now_playing.duration > 0 else Constants.TRACK_INTERVAL_SECONDS
+            try:
+                await context.bot_data['skip_event'].wait(timeout=sleep_duration)
+            except asyncio.TimeoutError:
+                pass # This is expected
+
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -394,9 +401,8 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def skip_track(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
-    if state.is_on and context.bot_data.get('radio_loop_task'):
-        context.bot_data['radio_loop_task'].cancel()
-        context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
+    if state.is_on:
+        context.bot_data['skip_event'].set()
 
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
@@ -407,6 +413,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
     application.bot_data['state'] = load_state()
+    application.bot_data['skip_event'] = asyncio.Event()
     if application.bot_data['state'].is_on:
         application.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(application))
 
