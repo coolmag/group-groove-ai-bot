@@ -5,13 +5,11 @@ import asyncio
 import json
 import random
 import shutil
-import uuid
 from pathlib import Path
 from typing import List, Optional
 from collections import deque
 from datetime import datetime
 import yt_dlp
-import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from telegram.error import TelegramError
@@ -29,10 +27,11 @@ class Constants:
     MAX_DURATION = 900
     MIN_DURATION = 60  # Минимум 60 секунд
     PLAYED_URLS_MEMORY = 200
-    DOWNLOAD_TIMEOUT = 30  # Уменьшен таймаут для скачивания
+    DOWNLOAD_TIMEOUT = 20  # Уменьшен таймаут
     DEFAULT_SOURCE = "soundcloud"
-    PAUSE_BETWEEN_TRACKS = 1.5  # Пауза между треками
-    STATUS_UPDATE_INTERVAL = 10  # Обновление статуса каждые 10 секунд
+    PAUSE_BETWEEN_TRACKS = 1.5
+    STATUS_UPDATE_INTERVAL = 10
+    RETRY_INTERVAL = 5  # Уменьшено время повторной попытки
 
 # --- Setup ---
 load_dotenv()
@@ -158,9 +157,12 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist from {state.source} for genre: {state.genre}")
     try:
+        tracks = []
         if state.source == "soundcloud":
             tracks = await get_tracks_soundcloud(state.genre)
-        else:
+        if not tracks:  # Резервный источник
+            logger.warning(f"No tracks found on {state.source}, trying YouTube")
+            state.source = "youtube"
             tracks = await get_tracks_youtube(state.genre)
 
         filtered_tracks = [t for t in tracks if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION]
@@ -171,9 +173,9 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             await save_state_from_botdata(context.bot_data)
             logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}).")
         else:
-            logger.warning("No valid tracks found after filtering. Retrying in 10 seconds.")
+            logger.warning(f"No valid tracks found after filtering. Retrying in {Constants.RETRY_INTERVAL} seconds.")
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
-            await asyncio.sleep(10)
+            await asyncio.sleep(Constants.RETRY_INTERVAL)
             await refill_playlist(context)
     except Exception as e:
         logger.error(f"Playlist refill failed: {e}")
@@ -267,7 +269,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 await refill_playlist(context)
                 if not state.radio_playlist:
                     await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(Constants.RETRY_INTERVAL)
                     continue
             url = state.radio_playlist.popleft()
             state.played_radio_urls.append(url)
@@ -281,13 +283,12 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             sleep_duration = state.now_playing.duration if state.now_playing and state.now_playing.duration > 0 else Constants.TRACK_INTERVAL_SECONDS
             logger.info(f"Waiting for {sleep_duration} seconds for track.")
             try:
-                await context.bot_data['skip_event'].wait(timeout=sleep_duration)
+                await asyncio.wait_for(context.bot_data['skip_event'].wait(), timeout=sleep_duration)
             except asyncio.TimeoutError:
                 pass
             await asyncio.sleep(Constants.PAUSE_BETWEEN_TRACKS)
             logger.info(f"Paused for {Constants.PAUSE_BETWEEN_TRACKS} seconds between tracks.")
             
-            # Обновление статуса каждые 10 секунд
             if state.now_playing:
                 elapsed = asyncio.get_event_loop().time() - state.now_playing.start_time
                 if elapsed < state.now_playing.duration:
@@ -295,7 +296,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"radio_loop error: {e}")
+            logger.error(f"radio_loop error: {e}", exc_info=True)
             await asyncio.sleep(5)
 
 # --- UI ---
@@ -329,6 +330,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
 
         last_status_text = context.bot_data.get('last_status_text')
         if text == last_status_text:
+            logger.debug("Status text unchanged, skipping update.")
             return
 
         keyboard = [
@@ -341,6 +343,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
         ]
         try:
             if state.status_message_id:
+                logger.debug(f"Editing message {state.status_message_id} with text: {repr(text)}")
                 await context.bot.edit_message_text(
                     chat_id=RADIO_CHAT_ID,
                     message_id=state.status_message_id,
@@ -349,6 +352,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
             else:
+                logger.debug(f"Sending new status message with text: {repr(text)}")
                 msg = await context.bot.send_message(
                     RADIO_CHAT_ID,
                     text,
@@ -385,15 +389,18 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await toggle_radio(context, turn_on)
     await update_status_panel(context)
     message = "Радио включено. 🎵" if turn_on else "Радио выключено. 🔇"
+    logger.debug(f"Sending message: {message}")
     await update.message.reply_text(message)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    message = (
         "🎵 *Привет! Я Groove AI Bot!* 🎵\n\n"
         "Я умею проигрывать музыку и запускать радио.\n"
         "- Используйте /play <название песни> для поиска треков.\n"
         "- Админы могут включать/выключать радио с /ron и /rof."
     )
+    logger.debug(f"Sending start message: {message}")
+    await update.message.reply_text(message, parse_mode="Markdown")
 
 @admin_only
 async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -402,7 +409,9 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     state: State = context.bot_data['state']
     state.source = context.args[0]
-    await update.message.reply_text(f"Источник переключен на: {state.source.title()}")
+    message = f"Источник переключен на: {state.source.title()}"
+    logger.debug(f"Sending source message: {message}")
+    await update.message.reply_text(message)
     await save_state_from_botdata(context.bot_data)
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -499,14 +508,17 @@ async def skip_track(context: ContextTypes.DEFAULT_TYPE):
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     if state.active_poll_id:
+        logger.debug("Poll already active, ignoring start_vote.")
         await context.bot.send_message(RADIO_CHAT_ID, "🗳 Голосование уже идет!")
         return
 
     if len(state.votable_genres) < 2:
+        logger.debug("Not enough genres for voting.")
         await context.bot.send_message(RADIO_CHAT_ID, "Недостаточно жанров для голосования. 😔")
         return
 
     options = random.sample(state.votable_genres, min(len(state.votable_genres), 5))
+    logger.debug(f"Starting poll with options: {options}")
     poll = await context.bot.send_poll(
         chat_id=RADIO_CHAT_ID,
         question="🎵 Выберите следующий жанр (голосование длится 1 минуту):",
@@ -516,29 +528,40 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         open_period=Constants.POLL_DURATION_SECONDS
     )
     state.active_poll_id = poll.poll.id
+    logger.debug(f"Poll started with ID: {poll.poll.id}")
     await context.bot.send_message(RADIO_CHAT_ID, "🗳 Голосование началось! Выберите жанр выше.")
     await save_state_from_botdata(context.bot_data)
 
 async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the result of a poll."""
     state: State = context.bot_data['state']
-    if update.poll.id == state.active_poll_id:
-        max_votes = max(o.voter_count for o in update.poll.options)
-        winning_options = [o.text for o in update.poll.options if o.voter_count == max_votes]
-        
-        if max_votes == 0:
-            await context.bot.send_message(RADIO_CHAT_ID, "В голосовании никто не участвовал. 😔")
-        else:
-            selected_genre = random.choice(winning_options)
-            state.genre = selected_genre
-            state.radio_playlist.clear()
-            await context.bot.send_message(RADIO_CHAT_ID, f"🎵 Новый жанр: *{state.genre.title()}*")
-            if state.is_on and context.bot_data.get('radio_loop_task'):
-                context.bot_data['radio_loop_task'].cancel()
-                context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
-        
-        state.active_poll_id = None
-        await save_state_from_botdata(context.bot_data)
+    if update.poll.id != state.active_poll_id:
+        logger.debug(f"Ignoring poll update for ID {update.poll.id}, active poll ID is {state.active_poll_id}")
+        return
+
+    if not update.poll.is_closed:
+        logger.debug(f"Poll {update.poll.id} is not closed yet, ignoring.")
+        return
+
+    logger.debug(f"Processing closed poll {update.poll.id}")
+    max_votes = max(o.voter_count for o in update.poll.options)
+    winning_options = [o.text for o in update.poll.options if o.voter_count == max_votes]
+    
+    if max_votes == 0:
+        logger.debug("No votes in poll.")
+        await context.bot.send_message(RADIO_CHAT_ID, "В голосовании никто не участвовал. 😔")
+    else:
+        selected_genre = random.choice(winning_options)
+        state.genre = selected_genre
+        state.radio_playlist.clear()
+        logger.debug(f"Selected genre: {selected_genre}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"🎵 Новый жанр: *{state.genre.title()}*")
+        if state.is_on and context.bot_data.get('radio_loop_task'):
+            context.bot_data['radio_loop_task'].cancel()
+            context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
+    
+    state.active_poll_id = None
+    await save_state_from_botdata(context.bot_data)
 
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
