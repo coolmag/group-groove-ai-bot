@@ -236,6 +236,7 @@ async def radio_loop(context):
             
             context.bot_data['skip_event'].clear()
             sleep_duration = state.now_playing.duration if state.now_playing and state.now_playing.duration > 0 else Constants.TRACK_INTERVAL_SECONDS
+            logger.info(f"Waiting for {sleep_duration} seconds.")
             try:
                 await context.bot_data['skip_event'].wait(timeout=sleep_duration)
             except asyncio.TimeoutError:
@@ -381,16 +382,18 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     command, data = query.data.split(":", 1)
     user_id = query.from_user.id
 
     if not await is_admin(user_id):
-        await context.bot.send_message(user_id, "Эта команда только для администраторов.")
+        await query.answer("Эта команда только для администраторов.", show_alert=True)
         return
 
     if command == "radio":
-        if data == "skip":
+        if data == "refresh":
+            await update_status_panel(context)
+            await query.answer("Статус обновлен.")
+        elif data == "skip":
             await skip_track(context)
             await query.answer("Пропускаю трек...")
         elif data == "on":
