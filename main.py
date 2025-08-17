@@ -278,7 +278,7 @@ async def update_status_panel(context):
 
 # --- Commands ---
 @admin_only
-async def radio_on_off_command(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     state.is_on = turn_on
     if turn_on:
@@ -373,9 +373,9 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         if data == "skip":
             await skip_track(context)
         elif data == "on":
-            await radio_on_off_command(context, True)
+            await radio_on_off_command(update, context, True)
         elif data == "off":
-            await radio_on_off_command(context, False)
+            await radio_on_off_command(update, context, False)
     elif command == "vote":
         if data == "start":
             await start_vote(context)
@@ -412,8 +412,8 @@ def main():
         return
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("ron", lambda u, c: radio_on_off_command(c, True)))
-    app.add_handler(CommandHandler("rof", lambda u, c: radio_on_off_command(c, False)))
+    app.add_handler(CommandHandler("ron", lambda u, c: radio_on_off_command(u, c, True)))
+    app.add_handler(CommandHandler("rof", lambda u, c: radio_on_off_command(u, c, False)))
     app.add_handler(CommandHandler("source", set_source_command))
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
