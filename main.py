@@ -37,6 +37,7 @@ class Constants:
     DEFAULT_SOURCE = "soundcloud"
     PAUSE_BETWEEN_TRACKS = 90  # 1.5 minutes
     STATUS_UPDATE_INTERVAL = 10
+    STATUS_UPDATE_MIN_INTERVAL = 2  # Minimum interval between status updates to avoid rate limits
     RETRY_INTERVAL = 90  # 1.5 minutes for refill retry
 
 # --- Setup ---
@@ -68,6 +69,7 @@ class State(BaseModel):
     poll_options: List[str] = Field(default_factory=list)
     poll_votes: List[int] = Field(default_factory=list)
     status_message_id: Optional[int] = None
+    last_status_update: float = 0.0
     now_playing: Optional[NowPlaying] = None
     last_error: Optional[str] = None
     votable_genres: List[str] = Field(
@@ -277,7 +279,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     track_info = await check_track_validity(url)
     if not track_info or not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
         logger.warning(f"Track {url} is invalid or out of duration range")
-        state.last_error = "Недопустимый трек"
+        state.last_error = "Недопустимый трек или неверная длительность"
         return
 
     ydl_opts = {
@@ -313,7 +315,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
             duration=int(info.get("duration", 0)),
             url=url
         )
-        await update_status_panel(context)
+        await update_status_panel(context, force=True)
         with open(filepath, 'rb') as f:
             logger.debug(f"Sending MP3 audio to chat {RADIO_CHAT_ID}: {state.now_playing.title}")
             await context.bot.send_audio(
@@ -323,7 +325,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
                 performer=info.get("uploader", "Unknown")
             )
         filepath.unlink(missing_ok=True)
-        await update_status_panel(context)  # Info after track
+        await update_status_panel(context, force=True)  # Info after track
     except asyncio.TimeoutError:
         logger.error(f"Download timeout for track {url}")
         state.last_error = "Таймаут загрузки трека"
@@ -336,7 +338,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
 # --- Radio loop ---
 async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
     """The main loop for the radio function."""
-    await update_status_panel(context)
+    await update_status_panel(context, force=True)
     while True:
         try:
             state: State = context.bot_data['state']
@@ -371,7 +373,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             if state.now_playing:
                 elapsed = asyncio.get_event_loop().time() - state.now_playing.start_time
                 if elapsed < state.now_playing.duration:
-                    await update_status_panel(context)
+                    await update_status_panel(context, force=True)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -380,9 +382,14 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(5)
 
 # --- UI ---
-async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
+async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
     async with status_lock:
         state: State = context.bot_data['state']
+        current_time = asyncio.get_event_loop().time()
+        if not force and current_time - state.last_status_update < Constants.STATUS_UPDATE_MIN_INTERVAL:
+            logger.debug("Skipping status update due to rate limit")
+            return
+
         lines = [
             "🎵 *Радио Groove AI* 🎵",
             f"**Статус**: {'🟢 Включено' if state.is_on else '🔴 Выключено'}",
@@ -412,7 +419,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
             return
 
         last_status_text = context.bot_data.get('last_status_text')
-        if text == last_status_text:
+        if not force and text == last_status_text:
             logger.debug("Status text unchanged, skipping update.")
             return
 
@@ -445,15 +452,16 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
                 )
                 state.status_message_id = msg.message_id
             context.bot_data['last_status_text'] = text
+            state.last_status_update = current_time
             await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
             logger.warning(f"Failed to update status panel: {e}")
             state.last_error = f"Ошибка обновления статуса: {e}"
             if "Message to edit not found" in str(e):
                 state.status_message_id = None
-                await update_status_panel(context)
+                await update_status_panel(context, force=True)
             elif "Message is not modified" in str(e):
-                await asyncio.sleep(0.5)
+                logger.debug("Message not modified, ignoring.")
             elif "Bad Request: message text is empty" in str(e):
                 logger.error("Empty message text detected in update_status_panel")
                 state.last_error = "Пустой текст сообщения в update_status_panel"
@@ -496,17 +504,23 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 Меню", callback_data="cmd:menu")] if is_admin_user else []
     ]
     logger.debug(f"Sending menu to user {user_id} with text: {repr(text)}")
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]),
-        parse_mode="Markdown"
-    )
+    try:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]),
+            parse_mode="Markdown"
+        )
+    except TelegramError as e:
+        logger.error(f"Failed to send menu: {e}")
+        state.last_error = f"Ошибка отправки меню: {e}"
+        await update.message.reply_text("⚠️ Ошибка при открытии меню.")
 
 async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     state.is_on = turn_on
     if turn_on:
         context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
+        await refill_playlist(context)  # Ensure playlist is filled on startup
     else:
         task = context.bot_data.get('radio_loop_task')
         if task:
@@ -519,7 +533,7 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     logger.debug(f"Received /{'ron' if turn_on else 'rof'} command from user {user_id}")
     await toggle_radio(context, turn_on)
-    await update_status_panel(context)
+    await update_status_panel(context, force=True)
     message = "Радио включено. 🎵" if turn_on else "Радио выключено. 🔇"
     logger.debug(f"Sending message to {RADIO_CHAT_ID}: {message}")
     await update.message.reply_text(message, parse_mode="Markdown")
@@ -544,7 +558,7 @@ async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.debug(f"Received /refresh command from user {user_id}")
-    await update_status_panel(context)
+    await update_status_panel(context, force=True)
     logger.debug(f"Sending refresh message to {RADIO_CHAT_ID}")
     await update.message.reply_text("Статус обновлен. 🔄")
 
@@ -669,7 +683,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
         if data == "refresh":
             logger.debug("Processing radio:refresh callback")
-            await update_status_panel(context)
+            await update_status_panel(context, force=True)
             await query.answer("Статус обновлен. 🔄")
         elif data == "skip":
             logger.debug("Processing radio:skip callback")
@@ -678,12 +692,12 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         elif data == "on":
             logger.debug("Processing radio:on callback")
             await toggle_radio(context, True)
-            await update_status_panel(context)
+            await update_status_panel(context, force=True)
             await query.answer("Радио включено. 🎵")
         elif data == "off":
             logger.debug("Processing radio:off callback")
             await toggle_radio(context, False)
-            await update_status_panel(context)
+            await update_status_panel(context, force=True)
             await query.answer("Радио выключено. 🔇")
     elif command == "vote":
         if not await is_admin(user_id):
@@ -764,7 +778,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
                                 if update.poll and update.poll.id == state.active_poll_id:
                                     logger.debug(f"Poll update received: {update.poll}")
                                     if update.poll.is_closed:
-                                        await handle_poll(update, context)
+                                        await handle_poll(Update(poll=update.poll), context)
                                         return
                             logger.debug(f"Attempt {attempt + 1}: Forcing poll {poll.poll.id} to close")
                             poll_update = await context.bot.stop_poll(RADIO_CHAT_ID, state.poll_message_id)
@@ -772,20 +786,19 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
                             await handle_poll(Update(poll=poll_update), context)
                             break
                         except TelegramError as e:
-                            logger.error(f"Attempt {attempt + 1}: Failed to force close poll {poll.poll.id}: {e}")
-                            state.last_error = f"Ошибка закрытия опроса: {e}"
                             if "Poll has already been closed" in str(e):
+                                logger.debug(f"Poll {poll.poll.id} already closed, fetching final updates")
                                 updates = await context.bot.get_updates(allowed_updates=["poll"])
                                 for update in updates:
                                     if update.poll and update.poll.id == state.active_poll_id:
                                         logger.debug(f"Poll update received: {update.poll}")
-                                        await handle_poll(update, context)
+                                        await handle_poll(Update(poll=update.poll), context)
                                         break
                                 break
+                            logger.error(f"Attempt {attempt + 1}: Failed to force close poll {poll.poll.id}: {e}")
                             await asyncio.sleep(2)
                     else:
-                        logger.error(f"Failed to close poll {poll.poll.id} after 3 attempts")
-                        state.last_error = "Не удалось завершить голосование после попыток"
+                        logger.warning(f"Failed to close poll {poll.poll.id} after 3 attempts")
                         max_votes = max(state.poll_votes) if state.poll_votes else 0
                         if max_votes > 0:
                             winning_indices = [i for i, v in enumerate(state.poll_votes) if v == max_votes]
@@ -794,6 +807,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
                             state.radio_playlist.clear()
                             logger.debug(f"Selected genre from votes: {selected_genre}")
                             await context.bot.send_message(RADIO_CHAT_ID, f"🎵 Новый жанр: *{state.genre.title()}*")
+                            await refill_playlist(context)  # Ensure immediate playlist refill
                             if state.is_on and context.bot_data.get('radio_loop_task'):
                                 context.bot_data['radio_loop_task'].cancel()
                                 context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
@@ -853,6 +867,7 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state.radio_playlist.clear()
         logger.debug(f"Selected genre: {selected_genre}")
         await context.bot.send_message(RADIO_CHAT_ID, f"🎵 Новый жанр: *{state.genre.title()}*")
+        await refill_playlist(context)  # Ensure immediate playlist refill
         if state.is_on and context.bot_data.get('radio_loop_task'):
             context.bot_data['radio_loop_task'].cancel()
             context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
@@ -875,6 +890,7 @@ async def post_init(application: Application):
     application.bot_data['skip_event'] = asyncio.Event()
     if application.bot_data['state'].is_on:
         application.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(application))
+        await refill_playlist(application)  # Ensure playlist is filled on startup
 
     try:
         webhook_info = await application.bot.get_webhook_info()
