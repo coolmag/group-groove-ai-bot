@@ -1,4 +1,3 @@
-# main.py
 import logging
 import os
 import asyncio
@@ -28,11 +27,11 @@ class Constants:
     POLL_DURATION_SECONDS = 60
     MAX_FILE_SIZE = 50_000_000
     MAX_DURATION = 900
-    MIN_DURATION = 30
+    MIN_DURATION = 60  # Изменено: минимум 60 секунд для треков
     PLAYED_URLS_MEMORY = 200
     DOWNLOAD_TIMEOUT = 120
     DEFAULT_SOURCE = "soundcloud"  # soundcloud | youtube
-    PAUSE_BETWEEN_TRACKS = 1.5  # Добавлено: пауза между треками в секундах
+    PAUSE_BETWEEN_TRACKS = 1.5  # Пауза между треками в секундах
 
 # --- Setup ---
 load_dotenv()
@@ -77,6 +76,7 @@ class State(BaseModel):
         return deque(v) if isinstance(v, list) else deque()
 
 state_lock = Lock()
+status_lock = Lock()  # Добавлено: Lock для синхронизации обновлений статусной панели
 
 # --- State ---
 def load_state() -> State:
@@ -123,10 +123,14 @@ async def get_tracks_soundcloud(genre: str) -> List[dict]:
         'quiet': True,
         'extract_flat': 'in_playlist'
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = await asyncio.to_thread(ydl.extract_info, genre, download=False)
-    return [{"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
-            for e in info.get("entries", [])]
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, genre, download=False)
+        return [{"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
+                for e in info.get("entries", [])]
+    except yt_dlp.YoutubeDLError as e:
+        logger.error(f"SoundCloud search failed for genre {genre}: {e}")
+        return []
 
 async def get_tracks_youtube(genre: str) -> List[dict]:
     ydl_opts = {
@@ -136,10 +140,14 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
         'quiet': True,
         'extract_flat': 'in_playlist'
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = await asyncio.to_thread(ydl.extract_info, genre, download=False)
-    return [{"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
-            for e in info.get("entries", [])]
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, genre, download=False)
+        return [{"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
+                for e in info.get("entries", [])]
+    except yt_dlp.YoutubeDLError as e:
+        logger.error(f"YouTube search failed for genre {genre}: {e}")
+        return []
 
 # --- Playlist refill ---
 async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
@@ -151,7 +159,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
         else:
             tracks = await get_tracks_youtube(state.genre)
 
-        # Добавлено: Фильтрация по длительности
+        # Фильтрация по длительности
         filtered_tracks = [t for t in tracks if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION]
         urls = [t["url"] for t in filtered_tracks if t["url"] not in state.played_radio_urls]
         if urls:
@@ -160,7 +168,9 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             await save_state_from_botdata(context.bot_data)
             logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}).")
         else:
-            logger.warning("No valid tracks found after filtering.")
+            logger.warning("No valid tracks found after filtering. Retrying in 10 seconds.")
+            await asyncio.sleep(10)
+            await refill_playlist(context)  # Рекурсивная попытка refill, если пусто
     except Exception as e:
         logger.error(f"Playlist refill failed: {e}")
 
@@ -177,6 +187,12 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
         filepath = Path(ydl.prepare_filename(info))
+        file_size = filepath.stat().st_size
+        if file_size > Constants.MAX_FILE_SIZE:
+            logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
+            await context.bot.send_message(chat_id, "⚠️ Трек слишком большой для отправки.")
+            filepath.unlink(missing_ok=True)
+            return
         with open(filepath, 'rb') as f:
             await context.bot.send_audio(
                 chat_id, f,
@@ -200,6 +216,12 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
         filepath = Path(ydl.prepare_filename(info))
+        file_size = filepath.stat().st_size
+        if file_size > Constants.MAX_FILE_SIZE:
+            logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Трек слишком большой для отправки.")
+            filepath.unlink(missing_ok=True)
+            return
         state.now_playing = NowPlaying(
             title=info.get("title", "Unknown"),
             duration=int(info.get("duration", 0)),
@@ -230,12 +252,14 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             if not state.radio_playlist:
                 await refill_playlist(context)
                 if not state.radio_playlist:
+                    await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
                     await asyncio.sleep(10)
                     continue
             url = state.radio_playlist.popleft()
             state.played_radio_urls.append(url)
             if len(state.played_radio_urls) > Constants.PLAYED_URLS_MEMORY:
                 state.played_radio_urls.popleft()
+            logger.info(f"Playing track {url}")
             await download_and_send_track(context, url)
             await save_state_from_botdata(context.bot_data)
             
@@ -247,7 +271,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             except asyncio.TimeoutError:
                 pass  # Ожидаемо после окончания трека
             
-            # Добавлено: Пауза 1.5 секунды между треками
+            # Пауза между треками
             await asyncio.sleep(Constants.PAUSE_BETWEEN_TRACKS)
             logger.info(f"Paused for {Constants.PAUSE_BETWEEN_TRACKS} seconds between tracks.")
 
@@ -259,40 +283,50 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
 
 # --- UI ---
 async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
-    state: State = context.bot_data['state']
-    lines = [
-        f"Статус: {'🟢' if state.is_on else '🔴'}",
-        f"Жанр: {state.genre}",
-        f"Источник: {state.source}"
-    ]
-    if state.now_playing:
-        lines.append(f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
-    else:
-        lines.append("Сейчас играет: ...загрузка...")
-    text = "n".join(lines)
-
-    last_status_text = context.bot_data.get('last_status_text')
-    if text == last_status_text:
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh")],  # Изменено: radio:refresh
-        [InlineKeyboardButton("⏭ Пропустить", callback_data="radio:skip")] if state.is_on else [],
-        [InlineKeyboardButton("🗳️ Голосование", callback_data="vote:start")] if state.is_on else [],
-        [InlineKeyboardButton("▶️ Запустить", callback_data="radio:on")] if not state.is_on else [InlineKeyboardButton("⏹️ Стоп", callback_data="radio:off")]
-    ]
-    try:
-        if state.status_message_id:
-            await context.bot.edit_message_text(
-                chat_id=RADIO_CHAT_ID, message_id=state.status_message_id,
-                text=text, reply_markup=InlineKeyboardMarkup([row for row in keyboard if row])
-            )
+    async with status_lock:  # Синхронизация обновлений
+        state: State = context.bot_data['state']
+        lines = [
+            f"Статус: {'🟢' if state.is_on else '🔴'}",
+            f"Жанр: {state.genre}",
+            f"Источник: {state.source}"
+        ]
+        if state.now_playing:
+            lines.append(f"Сейчас играет: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
         else:
-            msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]))
-            state.status_message_id = msg.message_id
-        context.bot_data['last_status_text'] = text
-    except TelegramError as e:
-        logger.warning(f"Failed to update status panel: {e}")
+            lines.append("Сейчас играет: ...загрузка...")
+        text = "\n".join(lines)
+
+        logger.debug(f"Updating status panel with text: {repr(text)}")  # Добавлено: дебаг-лог текста
+
+        last_status_text = context.bot_data.get('last_status_text')
+        if text == last_status_text:
+            return
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh")],
+            [InlineKeyboardButton("⏭ Пропустить", callback_data="radio:skip")] if state.is_on else [],
+            [InlineKeyboardButton("🗳️ Голосование", callback_data="vote:start")] if state.is_on else [],
+            [InlineKeyboardButton("▶️ Запустить", callback_data="radio:on")] if not state.is_on else [InlineKeyboardButton("⏹️ Стоп", callback_data="radio:off")]
+        ]
+        try:
+            if state.status_message_id:
+                await context.bot.edit_message_text(
+                    chat_id=RADIO_CHAT_ID, message_id=state.status_message_id,
+                    text=text, reply_markup=InlineKeyboardMarkup([row for row in keyboard if row])
+                )
+            else:
+                msg = await context.bot.send_message(RADIO_CHAT_ID, text, reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]))
+                state.status_message_id = msg.message_id
+            context.bot_data['last_status_text'] = text
+        except TelegramError as e:
+            logger.warning(f"Failed to update status panel: {e}")
+            if "Message to edit not found" in str(e):
+                state.status_message_id = None
+                await update_status_panel(context)  # Рекурсивная попытка с новым сообщением
+            elif "Message is not modified" in str(e):
+                await asyncio.sleep(0.5)  # Задержка, если текст не изменился
+            else:
+                raise
 
 # --- Commands ---
 async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
@@ -317,8 +351,8 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcome message when the /start command is issued."""
-    await update.message.reply_text("Привет! Я музыкальный бот. 🎵nn" 
-                                   "Используйте /play <название песни>, чтобы найти и послушать трек.n" 
+    await update.message.reply_text("Привет! Я музыкальный бот. 🎵\n\n" 
+                                   "Используйте /play <название песни>, чтобы найти и послушать трек.\n" 
                                    "Администраторы могут использовать /ron и /rof для управления радио.")
 
 @admin_only
@@ -342,11 +376,13 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = await update.message.reply_text(f'Searching for "{query}"...')
     logger.info(f"Searching for '{query}' for user {user_id}")
 
+    state: State = context.bot_data['state']
+    search_prefix = "scsearch5" if state.source == "soundcloud" else "ytsearch5"
     ydl_opts = {
         'format': 'bestaudio',
         'noplaylist': True,
         'quiet': True,
-        'default_search': 'scsearch5',
+        'default_search': search_prefix,
     }
 
     try:
@@ -396,7 +432,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if command == "radio":
-        if data == "refresh":  # Добавлено: обработка refresh
+        if data == "refresh":
             await update_status_panel(context)
             await query.answer("Статус обновлен.")
         elif data == "skip":
@@ -413,7 +449,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif command == "vote":
         if data == "start":
             await start_vote(context)
-            await query.answer("Голосование запущено.")  # Изменено: убрано "не реализовано"
+            await query.answer("Голосование запущено.")
 
 async def skip_track(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
@@ -449,7 +485,7 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winning_option = max(update.poll.options, key=lambda o: o.voter_count)
         if winning_option.voter_count > 0:
             state.genre = winning_option.text
-            state.radio_playlist.clear()  # Добавлено: очистка плейлиста для немедленной refill с новым жанром
+            state.radio_playlist.clear()  # Очистка плейлиста для немедленной refill
             await context.bot.send_message(RADIO_CHAT_ID, f"Новый жанр: {state.genre}")
             # Restart radio loop
             if state.is_on and context.bot_data.get('radio_loop_task'):
