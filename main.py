@@ -100,13 +100,14 @@ def format_duration(seconds: Optional[float]) -> str:
     return f"{s_int // 60:02d}:{s_int % 60:02d}"
 
 # --- Admin ---
-async def is_admin(update: Update) -> bool:
-    return update.effective_user and update.effective_user.id in ADMIN_IDS
+async def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 def admin_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        if not await is_admin(update):
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id or not await is_admin(user_id):
             await update.effective_message.reply_text("Эта команда только для администраторов.")
             return
         return await func(update, context, *args, **kwargs)
@@ -277,21 +278,28 @@ async def update_status_panel(context):
         logger.warning(f"Failed to update status panel: {e}")
 
 # --- Commands ---
-@admin_only
-async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     state.is_on = turn_on
+    message = ""
     if turn_on:
         context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
-        await context.bot.send_message(RADIO_CHAT_ID, f"Радио включено. Источник: {state.source}")
+        message = f"Радио включено. Источник: {state.source}"
     else:
         task = context.bot_data.get('radio_loop_task')
         if task:
             task.cancel()
         state.now_playing = None
-        await context.bot.send_message(RADIO_CHAT_ID, "Радио выключено.")
+        message = "Радио выключено."
+    
+    await context.bot.send_message(RADIO_CHAT_ID, message)
+
     await update_status_panel(context)
     await save_state_from_botdata(context.bot_data)
+
+@admin_only
+async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+    await toggle_radio(context, turn_on)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcome message when the /start command is issued."""
@@ -368,14 +376,18 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     command, data = query.data.split(":", 1)
+    user_id = query.from_user.id
 
     if command == "radio":
+        if not await is_admin(user_id):
+            await context.bot.send_message(user_id, "Эта команда только для администраторов.")
+            return
         if data == "skip":
             await skip_track(context)
         elif data == "on":
-            await radio_on_off_command(update, context, True)
+            await toggle_radio(context, True)
         elif data == "off":
-            await radio_on_off_command(update, context, False)
+            await toggle_radio(context, False)
     elif command == "vote":
         if data == "start":
             await start_vote(context)
