@@ -12,7 +12,6 @@ from collections import deque
 from datetime import datetime
 import yt_dlp
 import aiohttp
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, PollHandler
 from telegram.error import TelegramError
@@ -28,15 +27,16 @@ class Constants:
     POLL_DURATION_SECONDS = 60  # 1 минута для голосования
     MAX_FILE_SIZE = 50_000_000
     MAX_DURATION = 900
-    MIN_DURATION = 60  # Минимум 60 секунд для треков
+    MIN_DURATION = 60  # Минимум 60 секунд
     PLAYED_URLS_MEMORY = 200
-    DOWNLOAD_TIMEOUT = 120
-    DEFAULT_SOURCE = "soundcloud"  # soundcloud | youtube
+    DOWNLOAD_TIMEOUT = 30  # Уменьшен таймаут для скачивания
+    DEFAULT_SOURCE = "soundcloud"
     PAUSE_BETWEEN_TRACKS = 1.5  # Пауза между треками
+    STATUS_UPDATE_INTERVAL = 10  # Обновление статуса каждые 10 секунд
 
 # --- Setup ---
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG)  # Изменено на DEBUG
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -47,13 +47,12 @@ DOWNLOAD_DIR = Path("downloads")
 
 # --- Models ---
 class NowPlaying(BaseModel):
-    """Represents the currently playing track."""
     title: str
     duration: int
     url: str
+    start_time: float = Field(default_factory=lambda: asyncio.get_event_loop().time())
 
 class State(BaseModel):
-    """Represents the bot's state."""
     is_on: bool = False
     genre: str = "lo-fi hip hop"
     source: str = Constants.DEFAULT_SOURCE
@@ -100,6 +99,10 @@ def format_duration(seconds: Optional[float]) -> str:
         return "--:--"
     s_int = int(seconds)
     return f"{s_int // 60:02d}:{s_int % 60:02d}"
+
+def get_progress_bar(progress: float, width: int = 10) -> str:
+    filled = int(width * progress)
+    return "█" * filled + "▁" * (width - filled)
 
 # --- Admin ---
 async def is_admin(user_id: int) -> bool:
@@ -185,8 +188,9 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         'quiet': True
     }
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+        async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
         filepath = Path(ydl.prepare_filename(info))
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
@@ -195,12 +199,16 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
             filepath.unlink(missing_ok=True)
             return
         with open(filepath, 'rb') as f:
+            logger.debug(f"Sending audio to chat {chat_id}: {info.get('title', 'Unknown')}")
             await context.bot.send_audio(
                 chat_id, f,
                 title=info.get("title", "Unknown"),
                 duration=int(info.get("duration", 0))
             )
         filepath.unlink(missing_ok=True)
+    except asyncio.TimeoutError:
+        logger.error(f"Download timeout for track {url}")
+        await context.bot.send_message(chat_id, "⚠️ Время ожидания загрузки трека истекло.")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
         await context.bot.send_message(chat_id, "⚠️ Не удалось обработать трек.")
@@ -214,8 +222,9 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         'quiet': True
     }
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+        async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
         filepath = Path(ydl.prepare_filename(info))
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
@@ -230,12 +239,16 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         )
         await update_status_panel(context)
         with open(filepath, 'rb') as f:
+            logger.debug(f"Sending audio to chat {RADIO_CHAT_ID}: {state.now_playing.title}")
             await context.bot.send_audio(
                 RADIO_CHAT_ID, f,
                 title=state.now_playing.title,
                 duration=state.now_playing.duration
             )
         filepath.unlink(missing_ok=True)
+    except asyncio.TimeoutError:
+        logger.error(f"Download timeout for track {url}")
+        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Время ожидания загрузки трека истекло.")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось обработать трек.")
@@ -273,6 +286,12 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 pass
             await asyncio.sleep(Constants.PAUSE_BETWEEN_TRACKS)
             logger.info(f"Paused for {Constants.PAUSE_BETWEEN_TRACKS} seconds between tracks.")
+            
+            # Обновление статуса каждые 10 секунд
+            if state.now_playing:
+                elapsed = asyncio.get_event_loop().time() - state.now_playing.start_time
+                if elapsed < state.now_playing.duration:
+                    await update_status_panel(context)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -287,9 +306,16 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
             "🎵 *Радио Groove AI* 🎵",
             f"**Статус**: {'🟢 Включено' if state.is_on else '🔴 Выключено'}",
             f"**Жанр**: {state.genre.title()}",
-            f"**Источник**: {state.source.title()}",
-            f"**Сейчас играет**: {state.now_playing.title if state.now_playing else 'Ожидание трека...'} ({format_duration(state.now_playing.duration) if state.now_playing else '--:--'})"
+            f"**Источник**: {state.source.title()}"
         ]
+        if state.now_playing:
+            elapsed = asyncio.get_event_loop().time() - state.now_playing.start_time
+            progress = min(elapsed / state.now_playing.duration, 1.0) if state.now_playing.duration > 0 else 0
+            progress_bar = get_progress_bar(progress)
+            lines.append(f"**Сейчас играет**: {state.now_playing.title} ({format_duration(state.now_playing.duration)})")
+            lines.append(f"**Прогресс**: {progress_bar} {int(progress * 100)}%")
+        else:
+            lines.append("**Сейчас играет**: Ожидание трека...")
         if state.active_poll_id:
             lines.append(f"🗳 *Голосование активно* (осталось ~{Constants.POLL_DURATION_SECONDS} сек)")
         lines.append("────────────────")
@@ -305,14 +331,13 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
         if text == last_status_text:
             return
 
-        # Компактное расположение кнопок
         keyboard = [
             [
-                InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh"),
-                InlineKeyboardButton("⏭ Пропустить", callback_data="radio:skip") if state.is_on else InlineKeyboardButton("▶️ Запустить", callback_data="radio:on")
+                InlineKeyboardButton("🔄", callback_data="radio:refresh"),
+                InlineKeyboardButton("⏭" if state.is_on else "▶️", callback_data="radio:skip" if state.is_on else "radio:on")
             ],
             [InlineKeyboardButton("🗳 Голосовать", callback_data="vote:start")] if state.is_on and not state.active_poll_id else [],
-            [InlineKeyboardButton("⏹ Стоп", callback_data="radio:off")] if state.is_on else []
+            [InlineKeyboardButton("⏹", callback_data="radio:off")] if state.is_on else []
         ]
         try:
             if state.status_message_id:
@@ -504,7 +529,6 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if max_votes == 0:
             await context.bot.send_message(RADIO_CHAT_ID, "В голосовании никто не участвовал. 😔")
         else:
-            # Выбираем случайный жанр при ничьей
             selected_genre = random.choice(winning_options)
             state.genre = selected_genre
             state.radio_playlist.clear()
