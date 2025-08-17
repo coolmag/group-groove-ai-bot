@@ -214,6 +214,7 @@ async def download_and_send_track(context, url: str):
 # --- Radio loop ---
 async def radio_loop(context):
     """The main loop for the radio function."""
+    await update_status_panel(context)
     while True:
         try:
             state: State = context.bot_data['state']
@@ -277,18 +278,18 @@ async def update_status_panel(context):
 
 # --- Commands ---
 @admin_only
-async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+async def radio_on_off_command(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     state.is_on = turn_on
     if turn_on:
         context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
-        await update.message.reply_text(f"Радио включено. Источник: {state.source}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"Радио включено. Источник: {state.source}")
     else:
         task = context.bot_data.get('radio_loop_task')
         if task:
             task.cancel()
         state.now_playing = None
-        await update.message.reply_text("Радио выключено.")
+        await context.bot.send_message(RADIO_CHAT_ID, "Радио выключено.")
     await update_status_panel(context)
     await save_state_from_botdata(context.bot_data)
 
@@ -363,6 +364,34 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             await query.edit_message_text(f"Failed to process track: {e}")
 
+async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    command, data = query.data.split(":", 1)
+
+    if command == "radio":
+        if data == "skip":
+            await skip_track(context)
+        elif data == "on":
+            await radio_on_off_command(context, True)
+        elif data == "off":
+            await radio_on_off_command(context, False)
+    elif command == "vote":
+        if data == "start":
+            await start_vote(context)
+
+async def skip_track(context: ContextTypes.DEFAULT_TYPE):
+    state: State = context.bot_data['state']
+    if state.is_on and context.bot_data.get('radio_loop_task'):
+        context.bot_data['radio_loop_task'].cancel()
+        context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
+
+async def start_vote(context: ContextTypes.DEFAULT_TYPE):
+    state: State = context.bot_data['state']
+    if state.is_on:
+        # This is a placeholder for the voting logic
+        await context.bot.send_message(RADIO_CHAT_ID, "Voting is not implemented yet.")
+
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
     application.bot_data['state'] = load_state()
@@ -383,11 +412,12 @@ def main():
         return
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("ron", lambda u, c: radio_on_off_command(u, c, True)))
-    app.add_handler(CommandHandler("rof", lambda u, c: radio_on_off_command(u, c, False)))
+    app.add_handler(CommandHandler("ron", lambda u, c: radio_on_off_command(c, True)))
+    app.add_handler(CommandHandler("rof", lambda u, c: radio_on_off_command(c, False)))
     app.add_handler(CommandHandler("source", set_source_command))
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
+    app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote):"))
     logger.info("Starting bot polling...")
     app.run_polling()
 
