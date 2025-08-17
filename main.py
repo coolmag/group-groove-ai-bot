@@ -24,14 +24,14 @@ class Constants:
     TRACK_INTERVAL_SECONDS = 10
     POLL_DURATION_SECONDS = 60  # 1 минута для голосования
     MAX_FILE_SIZE = 50_000_000
-    MAX_DURATION = 1200  # Увеличено до 20 минут
+    MAX_DURATION = 1200
     MIN_DURATION = 60
     PLAYED_URLS_MEMORY = 200
-    DOWNLOAD_TIMEOUT = 15  # Уменьшен таймаут
+    DOWNLOAD_TIMEOUT = 15
     DEFAULT_SOURCE = "soundcloud"
     PAUSE_BETWEEN_TRACKS = 1.5
     STATUS_UPDATE_INTERVAL = 10
-    RETRY_INTERVAL = 3  # Уменьшено время повторной попытки
+    RETRY_INTERVAL = 3
 
 # --- Setup ---
 load_dotenv()
@@ -101,10 +101,11 @@ def format_duration(seconds: Optional[float]) -> str:
 
 def get_progress_bar(progress: float, width: int = 10) -> str:
     filled = int(width * progress)
-    return "█" * filled + " " * (width - filled)
+    return "█" * filled + "▁" * (width - filled)
 
 # --- Admin ---
 async def is_admin(user_id: int) -> bool:
+    logger.debug(f"Checking if user {user_id} is admin. Admin IDs: {ADMIN_IDS}")
     return user_id in ADMIN_IDS
 
 def admin_only(func):
@@ -112,6 +113,7 @@ def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id if update.effective_user else None
         if not user_id or not await is_admin(user_id):
+            logger.warning(f"User {user_id} attempted admin command but is not authorized")
             await update.effective_message.reply_text("Эта команда только для администраторов.")
             return
         return await func(update, context, *args, **kwargs)
@@ -192,7 +194,7 @@ async def check_track_validity(url: str) -> Optional[dict]:
         'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
-        'simulate': True  # Не скачивать, только получить метаданные
+        'simulate': True
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -238,7 +240,6 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
 
 async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     state: State = context.bot_data['state']
-    # Предварительная проверка трека
     track_info = await check_track_validity(url)
     if not track_info or not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
         logger.warning(f"Track {url} is invalid or out of duration range")
@@ -360,7 +361,6 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE):
             logger.debug("Status text unchanged, skipping update.")
             return
 
-        # Компактное расположение кнопок
         keyboard = [
             [
                 InlineKeyboardButton("🔄", callback_data="radio:refresh"),
@@ -414,6 +414,7 @@ async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
 
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+    logger.debug(f"Received /{'ron' if turn_on else 'rof'} command from user {update.effective_user.id}")
     await toggle_radio(context, turn_on)
     await update_status_panel(context)
     message = "Радио включено. 🎵" if turn_on else "Радио выключено. 🔇"
@@ -484,8 +485,8 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    logger.info(f"Received button callback from user {user_id}")
     query = update.callback_query
+    logger.debug(f"Received play button callback from user {user_id}: {query.data}")
     await query.answer()
 
     command, data = query.data.split(":", 1)
@@ -497,18 +498,27 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await download_and_send_to_chat(context, video_id, query.message.chat_id)
             await query.edit_message_text(text=f"Трек отправлен! 🎵")
         except Exception as e:
+            logger.error(f"Failed to process play button callback: {e}", exc_info=True)
             await query.edit_message_text(f"Не удалось обработать трек: {e}")
 
 async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    command, data = query.data.split(":", 1)
     user_id = query.from_user.id
-
-    if not await is_admin(user_id):
-        await query.answer("Эта команда только для администраторов.", show_alert=True)
+    logger.debug(f"Received radio button callback from user {user_id}: {query.data}")
+    
+    try:
+        await query.answer()
+    except TelegramError as e:
+        logger.error(f"Failed to answer callback query: {e}")
         return
 
+    command, data = query.data.split(":", 1)
+
     if command == "radio":
+        if not await is_admin(user_id):
+            logger.warning(f"User {user_id} attempted radio command but is not admin")
+            await query.answer("Эта команда только для администраторов.", show_alert=True)
+            return
         if data == "refresh":
             await update_status_panel(context)
             await query.answer("Статус обновлен.")
@@ -524,6 +534,10 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await update_status_panel(context)
             await query.answer("Радио выключено. 🔇")
     elif command == "vote":
+        if not await is_admin(user_id):
+            logger.warning(f"User {user_id} attempted vote command but is not admin")
+            await query.answer("Эта команда только для администраторов.", show_alert=True)
+            return
         if data == "start":
             await start_vote(context)
             await query.answer("Голосование запущено! 🗳")
@@ -531,6 +545,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def skip_track(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     if state.is_on:
+        logger.debug("Skipping track")
         context.bot_data['skip_event'].set()
 
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
@@ -547,22 +562,28 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
 
     options = random.sample(state.votable_genres, min(len(state.votable_genres), 5))
     logger.debug(f"Starting poll with options: {options}")
-    poll = await context.bot.send_poll(
-        chat_id=RADIO_CHAT_ID,
-        question="🎵 Выберите следующий жанр (голосование длится 1 минуту):",
-        options=options,
-        is_anonymous=False,
-        allows_multiple_answers=False,
-        open_period=Constants.POLL_DURATION_SECONDS
-    )
-    state.active_poll_id = poll.poll.id
-    logger.debug(f"Poll started with ID: {poll.poll.id}")
-    await context.bot.send_message(RADIO_CHAT_ID, "🗳 Голосование началось! Выберите жанр выше.")
-    await save_state_from_botdata(context.bot_data)
+    try:
+        poll = await context.bot.send_poll(
+            chat_id=RADIO_CHAT_ID,
+            question="🎵 Выберите следующий жанр (голосование длится 1 минуту):",
+            options=options,
+            is_anonymous=False,
+            allows_multiple_answers=False,
+            open_period=Constants.POLL_DURATION_SECONDS
+        )
+        state.active_poll_id = poll.poll.id
+        logger.debug(f"Poll started with ID: {poll.poll.id}")
+        await context.bot.send_message(RADIO_CHAT_ID, "🗳 Голосование началось! Выберите жанр выше.")
+        await save_state_from_botdata(context.bot_data)
+    except TelegramError as e:
+        logger.error(f"Failed to start poll: {e}")
+        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось запустить голосование.")
 
 async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the result of a poll."""
     state: State = context.bot_data['state']
+    logger.debug(f"Received poll update: ID {update.poll.id}, active poll ID: {state.active_poll_id}, is_closed: {update.poll.is_closed}")
+    
     if update.poll.id != state.active_poll_id:
         logger.debug(f"Ignoring poll update for ID {update.poll.id}, active poll ID is {state.active_poll_id}")
         return
@@ -597,6 +618,13 @@ async def post_init(application: Application):
     application.bot_data['skip_event'] = asyncio.Event()
     if application.bot_data['state'].is_on:
         application.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(application))
+    
+    # Проверка и сброс webhook
+    try:
+        await application.bot.set_webhook("")
+        logger.info("Webhook disabled, using polling mode")
+    except TelegramError as e:
+        logger.error(f"Failed to disable webhook: {e}")
 
 async def on_shutdown(application: Application):
     task = application.bot_data.get('radio_loop_task')
@@ -617,7 +645,7 @@ def main():
     app.add_handler(CommandHandler("source", set_source_command))
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
-    app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote):\n"))
+    app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote):"))
     app.add_handler(PollHandler(handle_poll))
     logger.info("Starting bot polling...")
     app.run_polling()
