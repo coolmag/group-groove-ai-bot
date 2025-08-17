@@ -114,7 +114,7 @@ def admin_only(func):
 
 # --- Music Sources ---
 async def get_tracks_fma(genre: str) -> List[dict]:
-    url = f"https://freemusicarchive.org/featured.json"  # публичный JSON
+    url = f"http://freemusicarchive.org/api/get/featured.json"  # публичный JSON
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             data = await resp.json()
