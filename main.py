@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import logging
 import os
 import asyncio
@@ -24,19 +25,19 @@ from telegram.error import BadRequest, TelegramError
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_serializer, field_validator
 from functools import wraps
-from asyncio import Lock
+from asyncio import Lock, Semaphore
 
-# --- Constants ---
+# --- Константы ---
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
-    TRACK_INTERVAL_SECONDS = 60
+    TRACK_INTERVAL_SECONDS = 600  # Увеличено до 10 минут
     POLL_DURATION_SECONDS = 60
     POLL_CHECK_TIMEOUT = 10
     MAX_FILE_SIZE = 50_000_000
     MAX_DURATION = 300
     MIN_DURATION = 30
     PLAYED_URLS_MEMORY = 100
-    DOWNLOAD_TIMEOUT = 30
+    DOWNLOAD_TIMEOUT = 300  # Увеличено до 5 минут
     DEFAULT_SOURCE = "soundcloud"
     DEFAULT_GENRE = "pop"
     PAUSE_BETWEEN_TRACKS = 0
@@ -45,8 +46,9 @@ class Constants:
     RETRY_INTERVAL = 30
     SEARCH_LIMIT = 50
     MAX_RETRIES = 3
+    MAX_SIMULTANEOUS_DOWNLOADS = 1  # Ограничение параллельных загрузок
 
-# --- Setup ---
+# --- Настройка ---
 load_dotenv()
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -54,7 +56,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7561017292:AAGGylvXSvXZv3AiiVfBYJ7v9Nxj24BVZKY"  # Новый токен
+BOT_TOKEN = "7561017292:AAGGylvXSvXZv3AiiVfBYJ7v9Nxj24BVZKY"
 ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id] or [482549032]
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", -1002892409779))
 CONFIG_FILE = Path("radio_config.json")
@@ -62,7 +64,10 @@ DOWNLOAD_DIR = Path("downloads")
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")
 PORT = int(os.getenv("PORT", 8080))
 
-# --- Models ---
+# Глобальный семафор для ограничения одновременных загрузок
+DOWNLOAD_SEMAPHORE = Semaphore(Constants.MAX_SIMULTANEOUS_DOWNLOADS)
+
+# --- Модели ---
 class NowPlaying(BaseModel):
     title: str
     duration: int
@@ -118,7 +123,7 @@ class State(BaseModel):
 state_lock = Lock()
 status_lock = Lock()
 
-# --- State ---
+# --- Состояние ---
 def load_state() -> State:
     if CONFIG_FILE.exists():
         try:
@@ -141,7 +146,7 @@ async def save_state_from_botdata(bot_data: dict):
             except Exception as e:
                 logger.error(f"Failed to save state: {e}")
 
-# --- Utils ---
+# --- Утилиты ---
 def format_duration(seconds: Optional[float]) -> str:
     if not seconds or seconds <= 0:
         return "--:--"
@@ -161,7 +166,7 @@ def escape_markdown_v2(text: str) -> str:
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None
 
-# --- Admin ---
+# --- Администрирование ---
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -178,14 +183,29 @@ def admin_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-# --- Music Sources ---
+# --- Источники музыки ---
 async def get_tracks_soundcloud(genre: str) -> List[dict]:
     ydl_opts = {
         'format': 'bestaudio/best',
         'default_search': f"scsearch{Constants.SEARCH_LIMIT}:{genre}",
         'noplaylist': True,
         'quiet': True,
-        'extract_flat': 'in_playlist'
+        'extract_flat': 'in_playlist',
+        'extractor_args': {
+            'soundcloud': {
+                'skip_download': False,
+                'force_ipv4': True,
+            }
+        },
+        'source_address': '0.0.0.0',
+        'http_chunk_size': 1048576,  # 1MB chunks
+        'retries': 10,
+        'fragment_retries': 10,
+        'buffersize': 65536,
+        'noprogress': True,
+        'hls_use_mpegts': True,
+        'fragment-retries': 'infinite',
+        'retry-sleep': 'exp=1:10',
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -206,7 +226,12 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
         'default_search': f"ytsearch{Constants.SEARCH_LIMIT}:{genre}",
         'noplaylist': True,
         'quiet': True,
-        'extract_flat': 'in_playlist'
+        'extract_flat': 'in_playlist',
+        'http_chunk_size': 1048576,
+        'retries': 10,
+        'fragment_retries': 10,
+        'buffersize': 65536,
+        'noprogress': True,
     }
     if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
         ydl_opts['cookiefile'] = YOUTUBE_COOKIES
@@ -223,7 +248,27 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
         logger.error(f"YouTube search failed for '{genre}': {e}")
         return []
 
-# --- Playlist refill ---
+# --- Проверка доступности трека ---
+async def is_track_available(url: str) -> bool:
+    ydl_opts = {
+        'quiet': True,
+        'simulate': True,
+        'skip_download': True,
+        'extractor_args': {
+            'soundcloud': {
+                'skip_download': True,
+                'force_ipv4': True,
+            }
+        }
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
+        return info.get('duration', 0) > 0
+    except Exception:
+        return False
+
+# --- Пополнение плейлиста ---
 async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist from {state.source} for genre: {state.genre}")
@@ -306,13 +351,20 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to {state.source}/{state.genre}.")
     await save_state_from_botdata(context.bot_data)
 
-# --- Download & send ---
+# --- Скачивание и отправка ---
 async def check_track_validity(url: str) -> Optional[dict]:
     ydl_opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
-        'simulate': True
+        'simulate': True,
+        'extractor_args': {
+            'soundcloud': {
+                'skip_download': True,
+                'force_ipv4': True,
+            }
+        },
+        'source_address': '0.0.0.0',
     }
     if "youtube.com" in url or "youtu.be" in url:
         if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
@@ -331,117 +383,141 @@ async def check_track_validity(url: str) -> Optional[dict]:
         return None
 
 async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
-    state: State = context.bot_data['state']
-    track_info = await check_track_validity(url)
-    if not track_info:
-        set_escaped_error(state, "Invalid track URL")
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Invalid track URL.")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-        return
-    
-    if not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
-        set_escaped_error(state, f"Duration out of range ({track_info['duration']}s)")
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Track duration out of range ({track_info['duration']}s).")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-        return
-
-    DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
-    if not os.access(DOWNLOAD_DIR, os.W_OK):
-        set_escaped_error(state, "Download directory not writable")
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Download directory not writable.")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-        return
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
-        'noplaylist': True,
-        'quiet': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'ffmpeg_location': shutil.which("ffmpeg"),
-        'ffprobe_location': shutil.which("ffprobe")
-    }
-    
-    if "youtube.com" in url or "youtu.be" in url:
-        if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
-            ydl_opts['cookiefile'] = YOUTUBE_COOKIES
-
-    filepath = None
-    try:
-        # First attempt with MP3
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-        filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
+    async with DOWNLOAD_SEMAPHORE:  # Ограничиваем параллельные загрузки
+        state: State = context.bot_data['state']
         
-        # If MP3 failed, try M4A
-        if not filepath.exists():
-            ydl_opts['postprocessors'] = [{
+        # Проверка доступности трека
+        if 'soundcloud' in url and not await is_track_available(url):
+            logger.warning(f"Трек недоступен: {url}")
+            await set_escaped_error(state, f"Трек недоступен: {url}")
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Трек недоступен, пропускаю...")
+            return
+            
+        track_info = await check_track_validity(url)
+        if not track_info:
+            set_escaped_error(state, "Invalid track URL")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Invalid track URL.")
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+            return
+        
+        if not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
+            set_escaped_error(state, f"Duration out of range ({track_info['duration']}s)")
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Track duration out of range ({track_info['duration']}s).")
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+            return
+
+        DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
+        if not os.access(DOWNLOAD_DIR, os.W_OK):
+            set_escaped_error(state, "Download directory not writable")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Download directory not writable.")
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+            return
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': True,
+            'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'm4a',
+                'preferredcodec': 'mp3',
                 'preferredquality': '192',
-            }]
+            }],
+            'ffmpeg_location': shutil.which("ffmpeg"),
+            'ffprobe_location': shutil.which("ffprobe"),
+            'extractor_args': {
+                'soundcloud': {
+                    'skip_download': False,
+                    'force_ipv4': True,
+                }
+            },
+            'source_address': '0.0.0.0',
+            'http_chunk_size': 1048576,
+            'retries': 10,
+            'fragment_retries': 10,
+            'buffersize': 65536,
+            'noprogress': True,
+            'hls_use_mpegts': True,
+            'fragment-retries': 'infinite',
+            'retry-sleep': 'exp=1:10',
+        }
+        
+        if "youtube.com" in url or "youtu.be" in url:
+            if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+                ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+
+        filepath = None
+        try:
+            # First attempt with MP3
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-            filepath = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
+            filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
             
-        if not filepath.exists():
-            set_escaped_error(state, "Failed to download track")
-            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Failed to download track.")
-            state.now_playing = None
-            await update_status_panel(context, force=True)
-            return
+            # If MP3 failed, try M4A
+            if not filepath.exists():
+                ydl_opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'm4a',
+                    'preferredquality': '192',
+                }]
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                filepath = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
+                
+            if not filepath.exists():
+                set_escaped_error(state, "Failed to download track")
+                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Failed to download track.")
+                state.now_playing = None
+                await update_status_panel(context, force=True)
+                return
 
-        if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
-            set_escaped_error(state, "Track exceeds max file size")
-            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track too large to send.")
-            state.now_playing = None
-            await update_status_panel(context, force=True)
-            filepath.unlink(missing_ok=True)
-            return
-
-        state.now_playing = NowPlaying(
-            title=info.get("title", "Unknown Track"),
-            duration=int(info.get("duration", 0)),
-            url=url
-        )
-        await update_status_panel(context, force=True)
-        
-        with open(filepath, 'rb') as f:
-            await context.bot.send_audio(
-                chat_id=RADIO_CHAT_ID,
-                audio=f,
-                title=state.now_playing.title,
-                duration=state.now_playing.duration,
-                performer=info.get("uploader", "Unknown Artist")
-            )
-        logger.info(f"Sent track: {state.now_playing.title}")
-        
-    except asyncio.TimeoutError:
-        set_escaped_error(state, "Track download timeout")
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track download timed out.")
-    except TelegramError as e:
-        set_escaped_error(state, f"Telegram error: {e}")
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Telegram error: {e}")
-    except Exception as e:
-        set_escaped_error(state, f"Track processing error: {e}")
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Track processing error: {e}")
-    finally:
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-        if filepath and filepath.exists():
-            try:
+            if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
+                set_escaped_error(state, "Track exceeds max file size")
+                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track too large to send.")
+                state.now_playing = None
+                await update_status_panel(context, force=True)
                 filepath.unlink(missing_ok=True)
-            except Exception:
-                pass
+                return
 
-# --- Radio loop ---
+            state.now_playing = NowPlaying(
+                title=info.get("title", "Unknown Track"),
+                duration=int(info.get("duration", 0)),
+                url=url
+            )
+            await update_status_panel(context, force=True)
+            
+            with open(filepath, 'rb') as f:
+                await context.bot.send_audio(
+                    chat_id=RADIO_CHAT_ID,
+                    audio=f,
+                    title=state.now_playing.title,
+                    duration=state.now_playing.duration,
+                    performer=info.get("uploader", "Unknown Artist")
+                )
+            logger.info(f"Sent track: {state.now_playing.title}")
+            
+        except asyncio.TimeoutError:
+            set_escaped_error(state, "Track download timeout")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track download timed out.")
+        except TelegramError as e:
+            set_escaped_error(state, f"Telegram error: {e}")
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Telegram error: {e}")
+        except Exception as e:
+            set_escaped_error(state, f"Track processing error: {e}")
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Track processing error: {e}")
+        finally:
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+            if filepath and filepath.exists():
+                try:
+                    filepath.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+# --- Радио-цикл ---
 async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info("Starting radio loop")
@@ -469,7 +545,18 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 state.played_radio_urls.popleft()
             
             logger.info(f"Playing track: {url}")
-            await download_and_send_track(context, url)
+            try:
+                await asyncio.wait_for(
+                    download_and_send_track(context, url),
+                    timeout=Constants.DOWNLOAD_TIMEOUT
+                )
+            except (asyncio.TimeoutError, yt_dlp.DownloadError) as e:
+                logger.error(f"Skipping problematic track: {url} - {e}")
+                await context.bot.send_message(
+                    RADIO_CHAT_ID, 
+                    f"⚠️ Не удалось загрузить трек, пропускаю..."
+                )
+            
             await save_state_from_botdata(context.bot_data)
             
             # Calculate sleep time based on track duration
@@ -489,7 +576,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Radio error: {e}")
             await asyncio.sleep(10)
 
-# --- UI ---
+# --- Интерфейс ---
 async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
     async with status_lock:
         state: State = context.bot_data['state']
@@ -584,7 +671,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             except Exception:
                 logger.error("Complete failure in status update")
 
-# --- Commands ---
+# --- Команды ---
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
