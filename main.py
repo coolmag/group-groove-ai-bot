@@ -144,7 +144,6 @@ def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         logger.debug(f"Invalid or empty input for MarkdownV2 escaping: {repr(text)}")
         return ""
-    # All MarkdownV2 reserved characters
     special_chars = r'([_*[\]()~`>#+-=|{}\.!&])'
     escaped = re.sub(special_chars, r'\\\1', str(text))
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
@@ -294,11 +293,11 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при заполнении плейлиста: {e}")
             state.retry_count += 1
             if attempt == Constants.MAX_RETRIES - 1:
-                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
-                    state.genre = Constants.DEFAULT_GENRE
-                    state.radio_playlist.clear()
-                    state.played_radio_urls.clear()
-                await asyncio.sleep(Constants.RETRY_INTERVAL)
+                logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+                state.genre = Constants.DEFAULT_GENRE
+                state.radio_playlist.clear()
+                state.played_radio_urls.clear()
+            await asyncio.sleep(Constants.RETRY_INTERVAL)
 
     logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts. Switching to SoundCloud and default genre.")
     state.source = "soundcloud"
@@ -657,26 +656,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                     logger.error(f"Problematic text snippet around offset {offset}: {repr(problematic_snippet)}")
             set_escaped_error(state, f"Ошибка обновления статуса: {str(e)}")
             if "Message to edit not found" in str(e):
-                logger.debug("Message to edit not found, resetting status_message_id and sending new message")
                 state.status_message_id = None
-                try:
-                    msg = await context.bot.send_message(
-                        RADIO_CHAT_ID,
-                        text,
-                        reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]),
-                        parse_mode="MarkdownV2"
-                    )
-                    state.status_message_id = msg.message_id
-                    context.bot_data['last_status_text'] = text
-                    state.last_status_update = current_time
-                    # Clear last_error after successful new message
-                    logger.debug(f"Clearing last_error after new message: {state.last_error}")
-                    state.last_error = None
-                    await save_state_from_botdata(context.bot_data)
-                except TelegramError as e2:
-                    logger.error(f"Failed to send new status message: {e2}, text: {repr(text)}")
-                    set_escaped_error(state, f"Ошибка отправки нового статуса: {str(e2)}")
-                    await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при отправке нового статуса: {e2}")
+                await update_status_panel(context, force=True)
             elif "Message is not modified" in str(e):
                 logger.debug("Message not modified, ignoring")
             elif "can't parse entities" in str(e):
@@ -714,10 +695,11 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.error(f"Unexpected Telegram error: {e}")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при обновлении статуса: {e}")
         finally:
-            # Clear last_error after every attempt
-            logger.debug(f"Clearing last_error in finally block: {state.last_error}")
-            state.last_error = None
-            await save_state_from_botdata(context.bot_data)
+            # Ensure last_error is cleared even on failure to prevent accumulation
+            if state.last_error:
+                logger.debug(f"Clearing last_error in finally block: {state.last_error}")
+                state.last_error = None
+                await save_state_from_botdata(context.bot_data)
 
 # --- Commands ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
