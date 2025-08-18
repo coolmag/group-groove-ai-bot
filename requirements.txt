@@ -1,4 +1,1 @@
-python-telegram-bot==20.7
-yt-dlp==2025.8.11
-pydantic==2.9.2
-python-dotenv==1.0.1
+python-telegram-bot==20.7 yt-dlp==2025.8.11 pydantic==2.9.2 python-dotenv==1.0.1
