@@ -25,17 +25,6 @@ from pydantic import BaseModel, Field, field_serializer, field_validator
 from functools import wraps
 from asyncio import Lock
 
-# --- Check Pydantic Version ---
-try:
-    import pydantic
-    logger = logging.getLogger(__name__)
-    logger.info(f"Pydantic version: {pydantic.__version__}")
-    if not pydantic.__version__.startswith("2."):
-        raise ImportError(f"Pydantic version 2.x is required, but found version {pydantic.__version__}")
-except ImportError as e:
-    logger.error(f"Pydantic import error: {e}")
-    raise
-
 # --- Constants ---
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
