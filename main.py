@@ -125,12 +125,12 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + "▁" * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-    """Escape special characters for MarkdownV2, ensuring periods are properly escaped."""
-    if not text:
+    """Escape all MarkdownV2 reserved characters, including periods and ampersands."""
+    if not isinstance(text, str) or not text:
+        logger.debug(f"Invalid or empty input for MarkdownV2 escaping: {repr(text)}")
         return ""
-    # List of MarkdownV2 special characters
-    special_chars = r'([_*[\]()~`>#+-=|{}.!])'
-    # Escape special characters with a single backslash
+    # All MarkdownV2 reserved characters
+    special_chars = r'([_*[\]()~`>#+-=|{}\.!&])'
     escaped = re.sub(special_chars, r'\\\1', str(text))
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
     return escaped
@@ -616,7 +616,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             elif "can't parse entities" in str(e):
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
                 # Fallback to plain text
-                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!:])', r'\1', text)
+                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])', r'\1', text)
                 try:
                     if state.status_message_id:
                         await context.bot.edit_message_text(
@@ -705,7 +705,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         logger.error(f"Failed to send menu: {e}, text: {repr(text)}")
         state.last_error = f"Ошибка отправки меню: {e}"
-        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!:])', r'\1', text)
+        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])', r'\1', text)
         try:
             await update.message.reply_text(
                 plain_text,
