@@ -145,13 +145,13 @@ def format_duration(seconds: Optional[float]) -> str:
 
 def get_progress_bar(progress: float, width: int = 10) -> str:
     filled = int(width * progress)
-    return "█" * filled + " " * (width - filled)
+    return "█" * filled + "▁" * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         logger.debug(f"Empty or invalid input for MarkdownV2 escaping: {repr(text)}")
         return ""
-    special_chars = r'([_*[]()~`>#+\-=|"{}.!])'
+    special_chars = r'([_*[\]()~`>#+-=|{}\.!])'
     return re.sub(special_chars, r'\\\1', text)
 
 def set_escaped_error(state: State, error: str):
@@ -298,7 +298,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state.genre = Constants.DEFAULT_GENRE
     set_escaped_error(state, f"Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to {state.source}/{state.genre}.")
     await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to {state.source}/{state.genre}.")
-    await save_state_from_botdata(context.bot_data)
+    await save_state_from_bot_data(context.bot_data)
 
 # --- Download & send ---
 async def check_track_validity(url: str) -> Optional[dict]:
@@ -351,7 +351,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
     try:
         async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                info = await asyncio.to_thread(ydl.extract_info, url, download=False)
         filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
         if not filepath.exists():
             ydl_opts['postprocessors'] = [{
@@ -572,7 +572,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 
         lines = [
             "🎵 *Radio Groove AI* 🎵",
-            f"**Status**: {"🟢 On" if state.is_on else "🔴 Off"}",
+            f"**Status**: {'🟢 On' if state.is_on else '🔴 Off'}",
             f"**Genre**: {genre_escaped}",
             f"**Source**: {source_escaped}"
         ]
@@ -581,12 +581,12 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             progress = min(elapsed / state.now_playing.duration, 1.0)
             progress_bar = get_progress_bar(progress)
             duration = format_duration(state.now_playing.duration)
-            lines.append(f"**Now Playing**: {now_playing_title_escaped} ({duration})")
-            lines.append(f"**Progress**: {progress_bar} {int(progress * 100)}%")
+            lines.append(f"**Now Playing**: {now_playing_title_escaped} \\({duration}\\)")
+            lines.append(f"**Progress**: {progress_bar} {int(progress * 100)}\\%")
         else:
             lines.append(f"**Now Playing**: {now_playing_title_escaped}")
         if state.active_poll_id:
-            lines.append(f"🗳 *Poll Active* (ends in ~{Constants.POLL_DURATION_SECONDS} sec)")
+            lines.append(f"🗳 *Poll Active* \\(ends in ~{Constants.POLL_DURATION_SECONDS} sec\\)")
         if state.last_error:
             lines.append(f"⚠️ **Last Error**: {last_error_escaped}")
         lines.append("────────────────")
@@ -597,8 +597,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             return
 
         last_status_text = context.bot_data.get('last_status_text', '')
-        current_no_progress = re.sub(r'█* *s*d+%', '', text)
-        last_no_progress = re.sub(r'█* *s*d+%', '', last_status_text)
+        current_no_progress = re.sub(r'█*▁*\s*\d+%', '', text)
+        last_no_progress = re.sub(r'█*▁*\s*\d+%', '', last_status_text)
         if not force and current_no_progress == last_no_progress:
             return
 
@@ -642,7 +642,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             elif "Message is not modified" in str(e):
                 logger.debug("Status message unchanged, ignoring")
             elif "can't parse entities" in str(e):
-                plain_text = re.sub(r'[_*`]', '', text)
+                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!])|[*~_]', r'\1', text)
                 try:
                     if state.status_message_id:
                         await context.bot.edit_message_text(
@@ -692,9 +692,9 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = [
         "🎵 *Groove AI Bot - Menu* 🎵",
-        f"**Radio Status**: {"🟢 On" if state.is_on else "🔴 Off"}",
+        f"**Radio Status**: {'🟢 On' if state.is_on else '🔴 Off'}",
         f"**Current Genre**: {escape_markdown_v2(state.genre.title())}",
-        f"**Voting**: {"🗳 Active" if state.active_poll_id else "⏳ Inactive"}",
+        f"**Voting**: {'🗳 Active' if state.active_poll_id else '⏳ Inactive'}",
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'Nothing playing')}",
         f"**Last Error**: {escape_markdown_v2(state.last_error or 'None')}",
         "",
@@ -731,7 +731,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("Menu displayed")
     except TelegramError as e:
         set_escaped_error(state, f"Menu send error: {e}")
-        plain_text = re.sub(r'[_*`]', '', text)
+        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!])|[*~_]', r'\1', text)
         try:
             await update.message.reply_text(
                 plain_text,
@@ -863,7 +863,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         keyboard = [
-            [InlineKeyboardButton(f"▶️ {escape_markdown_v2(t['title'])} ({format_duration(t['duration'])})", callback_data=f"play_track:{t['url']}")]
+            [InlineKeyboardButton(f"▶️ {escape_markdown_v2(t['title'])} \\({format_duration(t['duration'])}\\)", callback_data=f"play_track:{t['url']}")]
             for t in filtered_tracks[:Constants.SEARCH_LIMIT]
         ]
         await message.edit_text('Select a track:', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1117,14 +1117,15 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Bot is administrator in chat {RADIO_CHAT_ID}")
             # Test sending a message to verify permissions
             try:
-                await context.bot.send_message(
+                test_message = await context.bot.send_message(
                     RADIO_CHAT_ID,
                     "🔍 Checking bot permissions..."
                 )
-                logger.info(f"Bot successfully sent test message to chat {RADIO_CHAT_ID}")
+                await context.bot.delete_message(RADIO_CHAT_ID, test_message.message_id)
+                logger.info(f"Bot successfully sent and deleted test message in chat {RADIO_CHAT_ID}")
                 return True
             except TelegramError as e:
-                logger.error(f"Bot failed to send test message in chat {RADIO_CHAT_ID}: {e}")
+                logger.error(f"Bot failed to send or delete test message in chat {RADIO_CHAT_ID}: {e}")
                 return False
         elif bot_member.status == "member":
             # For non-admin members, check explicit permissions
