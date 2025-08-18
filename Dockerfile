@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+    iproute2 \  # Сетевые инструменты
+    dnsutils \   # DNS-утилиты
+    && rm -rf /var/lib/apt/lists/*
+
 
 # Copy the requirements file into the container
 COPY requirements.txt .
@@ -23,8 +27,3 @@ COPY . .
 
 # Command to run the application
 CMD ["python3", "main.py"]
-
-RUN apt-get update && apt-get install -y \
-    iproute2 \  # Сетевые инструменты
-    dnsutils \   # DNS-утилиты
-    && rm -rf /var/lib/apt/lists/*
