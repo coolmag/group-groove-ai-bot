@@ -9,6 +9,7 @@ from typing import List, Optional
 from collections import deque
 from datetime import datetime
 import re
+import subprocess
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, PollAnswer
 from telegram.ext import (
@@ -44,6 +45,7 @@ class Constants:
     RETRY_INTERVAL = 30
     SEARCH_LIMIT = 50
     MAX_RETRIES = 3
+    VOICE_STREAM_TIMEOUT = 300  # Timeout for voice chat streaming
 
 # --- Setup ---
 load_dotenv()
@@ -56,6 +58,7 @@ RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
 CONFIG_FILE = Path("radio_config.json")
 DOWNLOAD_DIR = Path("downloads")
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")
+VOICE_CHAT_ENABLED = os.getenv("VOICE_CHAT_ENABLED", "false").lower() == "true"
 
 # --- Models ---
 class NowPlaying(BaseModel):
@@ -100,6 +103,7 @@ class State(BaseModel):
         ])))
     )
     retry_count: int = 0
+    voice_chat_active: bool = False
 
     @field_serializer('radio_playlist', 'played_radio_urls')
     def _serialize_deques(self, v: deque[str], _info):
@@ -300,6 +304,71 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to {state.source}/{state.genre}.")
     await save_state_from_botdata(context.bot_data)
 
+# --- Voice Chat Streaming ---
+async def stream_to_voice_chat(context: ContextTypes.DEFAULT_TYPE, url: str):
+    state: State = context.bot_data['state']
+    if not shutil.which("ffmpeg"):
+        set_escaped_error(state, "FFmpeg not installed for voice chat streaming")
+        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Error: FFmpeg not installed for voice chat streaming.")
+        return
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'quiet': False,
+        'simulate': True
+    }
+    if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+        ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
+        stream_url = info.get('url')
+        title = info.get('title', 'Unknown')
+        duration = info.get('duration', 0)
+
+        if not (Constants.MIN_DURATION <= duration <= Constants.MAX_DURATION):
+            set_escaped_error(state, "Track duration out of range for voice chat")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track duration out of range for voice chat.")
+            return
+
+        # Note: python-telegram-bot does not support joining voice chats directly.
+        # This is a placeholder for streaming via FFmpeg to a Telegram voice chat.
+        # For full voice chat support, consider switching to pyrogram.
+        ffmpeg_cmd = [
+            "ffmpeg", "-i", stream_url, "-f", "mp3", "-acodec", "mp3", "-ab", "192k",
+            "-ar", "44100", "-f", "rtp", "rtp://127.0.0.1:1234"
+        ]
+        logger.info(f"Starting FFmpeg stream for {title}")
+        process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        state.now_playing = NowPlaying(title=title, duration=int(duration), url=url)
+        state.voice_chat_active = True
+        await context.bot.send_message(RADIO_CHAT_ID, f"🎙 Streaming to voice chat: *{escape_markdown_v2(title)}*")
+        await update_status_panel(context, force=True)
+
+        try:
+            await asyncio.sleep(duration)
+            process.terminate()
+            state.now_playing = None
+            state.voice_chat_active = False
+            await update_status_panel(context, force=True)
+            logger.info(f"Finished streaming {title}")
+        except asyncio.CancelledError:
+            process.terminate()
+            state.now_playing = None
+            state.voice_chat_active = False
+            await update_status_panel(context, force=True)
+            logger.info(f"Streaming {title} cancelled")
+    except Exception as e:
+        set_escaped_error(state, f"Voice chat streaming error: {e}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Voice chat streaming error: {e}")
+        logger.error(f"Voice chat streaming error for {url}: {e}")
+        state.now_playing = None
+        state.voice_chat_active = False
+        await update_status_panel(context, force=True)
+
 # --- Download & send ---
 async def check_track_validity(url: str) -> Optional[dict]:
     ydl_opts = {
@@ -405,101 +474,104 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         await update_status_panel(context, force=True)
         return
 
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        set_escaped_error(state, "FFmpeg or ffprobe not installed")
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Error: FFmpeg or ffprobe not installed.")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-        return
-
-    DOWNLOAD_DIR.mkdir(exist_ok=True)
-    if not os.access(DOWNLOAD_DIR, os.W_OK):
-        set_escaped_error(state, "Download directory not writable")
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Error: Download directory not writable.")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-        return
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
-        'noplaylist': True,
-        'quiet': False,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'ffmpeg_location': shutil.which("ffmpeg"),
-        'ffprobe_location': shutil.which("ffprobe")
-    }
-    if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
-        ydl_opts['cookiefile'] = YOUTUBE_COOKIES
-
-    filepath = None
-    try:
-        async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-        filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
-        if not filepath.exists():
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'm4a',
-                'preferredquality': '192',
-            }]
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-            filepath = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
-            if not filepath.exists():
-                set_escaped_error(state, "Failed to download track in mp3 or m4a format")
-                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Failed to download track in mp3 or m4a format.")
-                state.now_playing = None
-                await update_status_panel(context, force=True)
-                return
-
-        if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
-            set_escaped_error(state, "Track exceeds max file size")
-            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track too large to send.")
+    if VOICE_CHAT_ENABLED and state.voice_chat_active:
+        await stream_to_voice_chat(context, url)
+    else:
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            set_escaped_error(state, "FFmpeg or ffprobe not installed")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Error: FFmpeg or ffprobe not installed.")
             state.now_playing = None
             await update_status_panel(context, force=True)
-            filepath.unlink(missing_ok=True)
             return
 
-        state.now_playing = NowPlaying(
-            title=info.get("title", "Unknown"),
-            duration=int(info.get("duration", 0)),
-            url=url
-        )
-        await update_status_panel(context, force=True)
-        with open(filepath, 'rb') as f:
-            await context.bot.send_audio(
-                RADIO_CHAT_ID, f,
-                title=state.now_playing.title,
-                duration=state.now_playing.duration,
-                performer=info.get("uploader", "Unknown")
+        DOWNLOAD_DIR.mkdir(exist_ok=True)
+        if not os.access(DOWNLOAD_DIR, os.W_OK):
+            set_escaped_error(state, "Download directory not writable")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Error: Download directory not writable.")
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+            return
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': False,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'ffmpeg_location': shutil.which("ffmpeg"),
+            'ffprobe_location': shutil.which("ffprobe")
+        }
+        if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+            ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+
+        filepath = None
+        try:
+            async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+            filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
+            if not filepath.exists():
+                ydl_opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'm4a',
+                    'preferredquality': '192',
+                }]
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                filepath = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
+                if not filepath.exists():
+                    set_escaped_error(state, "Failed to download track in mp3 or m4a format")
+                    await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Failed to download track in mp3 or m4a format.")
+                    state.now_playing = None
+                    await update_status_panel(context, force=True)
+                    return
+
+            if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
+                set_escaped_error(state, "Track exceeds max file size")
+                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track too large to send.")
+                state.now_playing = None
+                await update_status_panel(context, force=True)
+                filepath.unlink(missing_ok=True)
+                return
+
+            state.now_playing = NowPlaying(
+                title=info.get("title", "Unknown"),
+                duration=int(info.get("duration", 0)),
+                url=url
             )
-        logger.info(f"Sent radio track: {state.now_playing.title}")
-        await update_status_panel(context, force=True)
-    except asyncio.TimeoutError:
-        set_escaped_error(state, "Track download timeout")
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track download timed out.")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-    except TelegramError as e:
-        set_escaped_error(state, f"Telegram error sending track: {e}")
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Telegram error sending track: {e}")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-    except Exception as e:
-        set_escaped_error(state, f"Track download error: {e}")
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Failed to process track: {e}")
-        state.now_playing = None
-        await update_status_panel(context, force=True)
-    finally:
-        if filepath and filepath.exists():
-            filepath.unlink(missing_ok=True)
-            logger.debug(f"Cleaned up file: {filepath}")
+            await update_status_panel(context, force=True)
+            with open(filepath, 'rb') as f:
+                await context.bot.send_audio(
+                    RADIO_CHAT_ID, f,
+                    title=state.now_playing.title,
+                    duration=state.now_playing.duration,
+                    performer=info.get("uploader", "Unknown")
+                )
+            logger.info(f"Sent radio track: {state.now_playing.title}")
+            await update_status_panel(context, force=True)
+        except asyncio.TimeoutError:
+            set_escaped_error(state, "Track download timeout")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track download timed out.")
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+        except TelegramError as e:
+            set_escaped_error(state, f"Telegram error sending track: {e}")
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Telegram error sending track: {e}")
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+        except Exception as e:
+            set_escaped_error(state, f"Track download error: {e}")
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Failed to process track: {e}")
+            state.now_playing = None
+            await update_status_panel(context, force=True)
+        finally:
+            if filepath and filepath.exists():
+                filepath.unlink(missing_ok=True)
+                logger.debug(f"Cleaned up file: {filepath}")
 
 # --- Radio loop ---
 async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
@@ -573,6 +645,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         lines = [
             "🎵 *Radio Groove AI* 🎵",
             f"**Status**: {'🟢 On' if state.is_on else '🔴 Off'}",
+            f"**Mode**: {'🎙 Voice Chat' if state.voice_chat_active else '📤 Audio Files'}",
             f"**Genre**: {genre_escaped}",
             f"**Source**: {source_escaped}"
         ]
@@ -609,6 +682,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             ],
             [InlineKeyboardButton("🗳 Vote", callback_data="vote:start")] if state.is_on and not state.active_poll_id else [],
             [InlineKeyboardButton("⏹ Stop", callback_data="radio:off")] if state.is_on else [],
+            [InlineKeyboardButton("🎙 Toggle Voice Chat", callback_data="cmd:toggle_voice")] if VOICE_CHAT_ENABLED else [],
             [InlineKeyboardButton("📋 Menu", callback_data="cmd:menu")]
         ]
         try:
@@ -693,6 +767,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = [
         "🎵 *Groove AI Bot - Menu* 🎵",
         f"**Radio Status**: {'🟢 On' if state.is_on else '🔴 Off'}",
+        f"**Mode**: {'🎙 Voice Chat' if state.voice_chat_active else '📤 Audio Files'}",
         f"**Current Genre**: {escape_markdown_v2(state.genre.title())}",
         f"**Voting**: {'🗳 Active' if state.active_poll_id else '⏳ Inactive'}",
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'Nothing playing')}",
@@ -709,6 +784,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🗳 /vote (/v) - Start voting",
         "🔄 /refresh (/r) - Refresh status",
         "🔧 /source (/src) <soundcloud|youtube> - Change source",
+        "🎙 /voice (/vc) - Toggle voice chat mode",
         "📋 /menu (/m) - Show this menu"
     ]
     text = "\n".join(text)
@@ -718,6 +794,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🛑 Stop Bot", callback_data="cmd:stopbot")] if is_admin_user else [],
         [InlineKeyboardButton("⏭ Skip", callback_data="radio:skip"), InlineKeyboardButton("🗳 Vote", callback_data="vote:start")] if is_admin_user and state.is_on and not state.active_poll_id else [],
         [InlineKeyboardButton("🔄 Refresh", callback_data="radio:refresh"), InlineKeyboardButton("🔧 Source", callback_data="cmd:source")] if is_admin_user else [],
+        [InlineKeyboardButton("🎙 Toggle Voice Chat", callback_data="cmd:toggle_voice")] if is_admin_user and VOICE_CHAT_ENABLED else [],
         [InlineKeyboardButton("📋 Menu", callback_data="cmd:menu")] if is_admin_user else []
     ]
     try:
@@ -757,6 +834,7 @@ async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
             task.cancel()
         state.now_playing = None
         state.radio_playlist.clear()
+        state.voice_chat_active = False
     await save_state_from_botdata(context.bot_data)
     logger.info(f"Radio {'started' if turn_on else 'stopped'}")
 
@@ -774,6 +852,7 @@ async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state.now_playing = None
     state.radio_playlist.clear()
     state.played_radio_urls.clear()
+    state.voice_chat_active = False
     task = context.bot_data.get('radio_loop_task')
     if task:
         task.cancel()
@@ -821,6 +900,21 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(message, parse_mode="MarkdownV2")
     await save_state_from_botdata(context.bot_data)
     logger.info(f"Source switched to {state.source}")
+
+@admin_only
+async def toggle_voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state: State = context.bot_data['state']
+    if not VOICE_CHAT_ENABLED:
+        await update.message.reply_text("Voice chat streaming is disabled. Enable VOICE_CHAT_ENABLED in environment variables.")
+        return
+    state.voice_chat_active = not state.voice_chat_active
+    if state.voice_chat_active:
+        await context.bot.send_message(RADIO_CHAT_ID, "🎙 Switched to voice chat mode. Start a voice chat in the group!")
+    else:
+        await context.bot.send_message(RADIO_CHAT_ID, "📤 Switched to audio file mode.")
+    await save_state_from_botdata(context.bot_data)
+    await update_status_panel(context, force=True)
+    logger.info(f"Toggled voice chat mode to {state.voice_chat_active}")
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
@@ -881,7 +975,10 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         command, url = query.data.split(":", 1)
         if command == "play_track":
             await query.edit_message_text("Processing track...")
-            await download_and_send_to_chat(context, url, query.message.chat_id)
+            if state.voice_chat_active and VOICE_CHAT_ENABLED:
+                await stream_to_voice_chat(context, url)
+            else:
+                await download_and_send_to_chat(context, url, query.message.chat_id)
             await query.edit_message_text("Track sent! 🎵")
             logger.info(f"Played track from callback: {url}")
     except TelegramError as e:
@@ -940,11 +1037,16 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         elif data == "source" and await is_admin(query.from_user.id):
             await query.message.reply_text("Enter /source soundcloud|youtube to change source.")
             logger.info("Source command button clicked")
+        elif data == "toggle_voice" and await is_admin(query.from_user.id) and VOICE_CHAT_ENABLED:
+            await toggle_voice_command(update, context)
+            await query.answer("Toggled voice chat mode. 🎙")
+            logger.info("Toggle voice chat button clicked")
         elif data == "stopbot" and await is_admin(query.from_user.id):
             state.is_on = False
             state.now_playing = None
             state.radio_playlist.clear()
             state.played_radio_urls.clear()
+            state.voice_chat_active = False
             task = context.bot_data.get('radio_loop_task')
             if task:
                 task.cancel()
@@ -974,6 +1076,7 @@ async def skip_track(context: ContextTypes.DEFAULT_TYPE):
     if state.is_on:
         context.bot_data['skip_event'].set()
         state.now_playing = None
+        state.voice_chat_active = False
         await update_status_panel(context, force=True)
         logger.info("Track skipped")
 
@@ -1076,6 +1179,7 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state.genre = selected_genre
         state.radio_playlist.clear()
         state.now_playing = None
+        state.voice_chat_active = False
         await context.bot.send_message(RADIO_CHAT_ID, f"🎵 New genre: *{escape_markdown_v2(state.genre.title())}*")
         await refill_playlist(context)
         if not state.is_on:
@@ -1107,24 +1211,26 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Bot Lifecycle ---
 async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE):
     try:
+        # Verify bot is in the chat
         chat = await context.bot.get_chat(RADIO_CHAT_ID)
         bot_member = await context.bot.get_chat_member(RADIO_CHAT_ID, context.bot.id)
         logger.info(f"Bot member status: {bot_member.status}, type: {bot_member.__class__.__name__}")
 
         # Check if bot is an administrator
         if bot_member.status == "administrator":
-            # For administrators, permissions may not be directly accessible in v20.7
-            # Assume basic permissions (send messages, send audio) if bot is admin
             logger.info(f"Bot is administrator in chat {RADIO_CHAT_ID}")
-            # Optionally check specific permissions if available
-            if hasattr(bot_member, 'can_post_messages') and not bot_member.can_post_messages:
-                logger.error(f"Bot lacks permission to post messages in chat {RADIO_CHAT_ID}")
+            # Test sending a message to verify permissions
+            try:
+                test_message = await context.bot.send_message(
+                    RADIO_CHAT_ID,
+                    "🔍 Checking bot permissions..."
+                )
+                await context.bot.delete_message(RADIO_CHAT_ID, test_message.message_id)
+                logger.info(f"Bot successfully sent and deleted test message in chat {RADIO_CHAT_ID}")
+                return True
+            except TelegramError as e:
+                logger.error(f"Bot failed to send or delete test message in chat {RADIO_CHAT_ID}: {e}")
                 return False
-            if hasattr(bot_member, 'can_send_audio') and not bot_member.can_send_audio:
-                logger.error(f"Bot lacks permission to send audio in chat {RADIO_CHAT_ID}")
-                return False
-            logger.info(f"Bot permissions assumed sufficient as administrator in chat {RADIO_CHAT_ID}")
-            return True
         elif bot_member.status == "member":
             # For non-admin members, check explicit permissions
             if not hasattr(bot_member, 'can_send_messages') or not bot_member.can_send_messages:
@@ -1153,7 +1259,7 @@ async def post_init(application: Application):
             await application.bot.send_message(RADIO_CHAT_ID, "⚠️ FFmpeg or ffprobe not installed.")
             return
         if not await check_bot_permissions(application):
-            application.bot_data['state'].last_error = f"Bot lacks permissions in chat {RADIO_CHAT_ID}"
+            application.bot_data['state'].last_error = f"Bot lacks permissions in chat {RADIO_CHAT_ID}. Please make the bot an admin with send message and audio permissions."
             await application.bot.send_message(RADIO_CHAT_ID, f"⚠️ Bot lacks permissions in chat {RADIO_CHAT_ID}. Please make the bot an admin with send message and audio permissions.")
             return
         if application.bot_data['state'].is_on:
@@ -1194,6 +1300,7 @@ def main():
     app.add_handler(CommandHandler(["vote", "v"], vote_command))
     app.add_handler(CommandHandler(["refresh", "r"], refresh_command))
     app.add_handler(CommandHandler(["source", "src"], set_source_command))
+    app.add_handler(CommandHandler(["voice", "vc"], toggle_voice_command))
     app.add_handler(CommandHandler(["play", "p"], play_command))
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern="^play_track:"))
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern="^(radio|vote|cmd):"))
