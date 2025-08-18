@@ -385,7 +385,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         if state.now_playing and state.now_playing.duration > 0:
             elapsed = current_time - state.now_playing.start_time
             progress = min(elapsed / state.now_playing.duration, 1.0)
-            lines.append(f"**Сейчас играет**: {escape_markdown_v2(state.now_playing.title)} \({format_duration(state.now_playing.duration)}\)")
+            lines.append(f"**Сейчас играет**: {escape_markdown_v2(state.now_playing.title)} \\({format_duration(state.now_playing.duration)}\\)")
             lines.append(f"**Прогресс**: {get_progress_bar(progress)} {int(progress * 100)}%")
         else:
             lines.append(f"**Сейчас играет**: {escape_markdown_v2('Ожидание трека...')}")
