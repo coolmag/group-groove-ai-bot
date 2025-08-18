@@ -19,6 +19,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     PollHandler,
     PollAnswerHandler,
+    MessageHandler,
+    filters,
 )
 from telegram.error import TelegramError, BadRequest, RetryAfter
 from dotenv import load_dotenv
@@ -48,7 +50,8 @@ class Constants:
 
 # --- Setup ---
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+# Set logging to DEBUG for detailed output
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -158,6 +161,7 @@ async def set_error(state: State, error: str):
 
 # --- Admin ---
 async def is_admin(user_id: int) -> bool:
+    logger.debug(f"Checking admin status for user_id: {user_id}. Admin list: {ADMIN_IDS}")
     return user_id in ADMIN_IDS
 
 def admin_only(func):
@@ -422,6 +426,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 
 # --- Commands ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.debug(f"show_menu triggered for user {update.effective_user.id}")
     state: State = context.bot_data['state']
     text = [
         "🎵 *Groove AI Bot - Menu* 🎵",
@@ -624,7 +629,11 @@ async def on_shutdown(application: Application):
     await save_state(application.bot_data['state'])
     logger.info("Shutdown completed")
 
+async def raw_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.debug(f"RAW UPDATE RECEIVED: {update.to_json()}")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.debug(f"start_command triggered for user {update.effective_user.id}")
     await show_menu(update, context)
 
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -639,6 +648,10 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     
+    # Diagnostic handler
+    app.add_handler(MessageHandler(filters.ALL, raw_update_handler), group=-1)
+
+    # Register handlers correctly
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CommandHandler("ron", radio_on_command))
