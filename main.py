@@ -42,6 +42,7 @@ class Constants:
     STATUS_UPDATE_MIN_INTERVAL = 2
     RETRY_INTERVAL = 90
     SEARCH_LIMIT = 10
+    MAX_RETRIES = 3  # Max retries for playlist refill
 
 # --- Setup ---
 load_dotenv()
@@ -53,6 +54,7 @@ ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",")
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
 CONFIG_FILE = Path("radio_config.json")
 DOWNLOAD_DIR = Path("downloads")
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")  # Path to cookies file, if provided
 
 # --- Models ---
 class NowPlaying(BaseModel):
@@ -81,6 +83,7 @@ class State(BaseModel):
             "metal", "reggae", "folk", "indie", "rap", "r&b", "soul", "funk", "disco"
         ]
     )
+    retry_count: int = 0  # Track retry attempts for playlist refill
 
     @field_serializer('radio_playlist', 'played_radio_urls')
     def _serialize_deques(self, v: deque[str], _info):
@@ -121,11 +124,14 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + "▁" * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-    """Escape special characters for MarkdownV2."""
+    """Escape special characters for MarkdownV2, handling additional edge cases."""
     if not text:
         return ""
-    special_chars = r'([_*[\]()~`>#+-=|{}.!])'
+    # Extended special characters to escape, including ':' for error messages
+    special_chars = r'([_*[\]()~`>#+-=|{}.!:])'
     escaped = re.sub(special_chars, r'\\\1', str(text))
+    # Ensure no double escapes or malformed sequences
+    escaped = escaped.replace('\\\\', '\\')
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
     return escaped
 
@@ -175,6 +181,9 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
         'quiet': False,
         'extract_flat': 'in_playlist'
     }
+    if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+        ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+        logger.debug(f"Using YouTube cookies from {YOUTUBE_COOKIES}")
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, genre, download=False)
@@ -186,6 +195,8 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
         return tracks
     except yt_dlp.YoutubeDLError as e:
         logger.error(f"YouTube search failed for genre {genre}: {e}")
+        if "Sign in to confirm you’re not a bot" in str(e):
+            logger.warning("YouTube requires authentication. Consider setting YOUTUBE_COOKIES environment variable.")
         return []
 
 # --- Playlist refill ---
@@ -196,45 +207,65 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     if len(state.played_radio_urls) > Constants.PLAYED_URLS_MEMORY * 0.8:
         state.played_radio_urls.clear()
         logger.info("Cleared played_radio_urls to prevent filtering out valid tracks")
-    try:
+    
+    async def attempt_refill(source: str) -> List[dict]:
         tracks = []
-        if state.source == "soundcloud":
+        if source == "soundcloud":
             tracks = await get_tracks_soundcloud(state.genre)
-        if not tracks:
-            logger.warning(f"No tracks found on {state.source}, switching to YouTube")
-            state.source = "youtube"
+        elif source == "youtube":
             tracks = await get_tracks_youtube(state.genre)
-            if not tracks:
-                logger.warning(f"No tracks found on YouTube for genre {state.genre}")
-                state.last_error = "Не удалось найти треки"
-                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
-                await asyncio.sleep(Constants.RETRY_INTERVAL)
-                await refill_playlist(context)
-                return
+        return tracks
 
-        logger.debug(f"Tracks before filtering: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in tracks]}")
-        filtered_tracks = [
-            t for t in tracks
-            if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
-            and t["url"] not in state.played_radio_urls
-        ]
-        logger.debug(f"Filtered tracks: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in filtered_tracks]}")
-        urls = [t["url"] for t in filtered_tracks]
-        if urls:
-            random.shuffle(urls)
-            state.radio_playlist.extend(urls)
-            await save_state_from_botdata(context.bot_data)
-            logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}). URLs: {urls}")
-        else:
-            logger.warning(f"No valid tracks found after filtering. Retrying in {Constants.RETRY_INTERVAL} seconds.")
-            state.last_error = "Нет подходящих треков"
-            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
+    for attempt in range(Constants.MAX_RETRIES):
+        try:
+            tracks = await attempt_refill(state.source)
+            if not tracks and state.source == "youtube":
+                logger.warning(f"No tracks found on YouTube, switching to SoundCloud")
+                state.source = "soundcloud"
+                tracks = await attempt_refill(state.source)
+            
+            if not tracks:
+                logger.warning(f"No tracks found on {state.source} after attempt {attempt + 1}")
+                state.last_error = f"Не удалось найти треки на {state.source}"
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось найти треки на {state.source}. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
+                state.retry_count += 1
+                await asyncio.sleep(Constants.RETRY_INTERVAL)
+                continue
+
+            logger.debug(f"Tracks before filtering: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in tracks]}")
+            filtered_tracks = [
+                t for t in tracks
+                if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
+                and t["url"] not in state.played_radio_urls
+            ]
+            logger.debug(f"Filtered tracks: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in filtered_tracks]}")
+            urls = [t["url"] for t in filtered_tracks]
+            if urls:
+                random.shuffle(urls)
+                state.radio_playlist.extend(urls)
+                state.retry_count = 0  # Reset retry count on success
+                await save_state_from_botdata(context.bot_data)
+                logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}). URLs: {urls}")
+                return
+            else:
+                logger.warning(f"No valid tracks found after filtering on {state.source}. Retrying...")
+                state.last_error = "Нет подходящих треков"
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source}. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
+                state.retry_count += 1
+                await asyncio.sleep(Constants.RETRY_INTERVAL)
+        except Exception as e:
+            logger.error(f"Playlist refill failed on attempt {attempt + 1}: {e}", exc_info=True)
+            state.last_error = f"Ошибка при заполнении плейлиста: {e}"
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при заполнении плейлиста: {e}")
+            state.retry_count += 1
             await asyncio.sleep(Constants.RETRY_INTERVAL)
-            await refill_playlist(context)
-    except Exception as e:
-        logger.error(f"Playlist refill failed: {e}", exc_info=True)
-        state.last_error = f"Ошибка при заполнении плейлиста: {e}"
-        await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при заполнении плейлиста.")
+
+    logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts. Switching to SoundCloud.")
+    state.source = "soundcloud"
+    state.last_error = "Не удалось найти треки после нескольких попыток. Переключено на SoundCloud."
+    await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки после нескольких попыток. Переключено на SoundCloud.")
+    await save_state_from_botdata(context.bot_data)
+    await refill_playlist(context)  # Try one more time with SoundCloud
 
 # --- Download & send ---
 async def check_track_validity(url: str) -> Optional[dict]:
@@ -244,6 +275,8 @@ async def check_track_validity(url: str) -> Optional[dict]:
         'quiet': False,
         'simulate': True
     }
+    if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+        ydl_opts['cookiefile'] = YOUTUBE_COOKIES
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=False)
@@ -283,6 +316,8 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         'ffmpeg_location': shutil.which("ffmpeg"),
         'ffprobe_location': shutil.which("ffprobe")
     }
+    if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+        ydl_opts['cookiefile'] = YOUTUBE_COOKIES
     try:
         async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -312,7 +347,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
             except Exception as e:
                 logger.error(f"Fallback m4a download failed: {e}")
                 state.last_error = f"Ошибка загрузки трека в формате m4a: {e}"
-                await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек в формате m4a.")
+                await context.bot.send_message(chat_id, f"⚠️ Не удалось загрузить трек в формате m4a: {e}")
                 return
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
@@ -337,7 +372,10 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
         state.last_error = f"Ошибка загрузки трека: {e}"
-        await context.bot.send_message(chat_id, f"⚠️ Не удалось обработать трек: {e}")
+        error_msg = f"⚠️ Не удалось обработать трек: {e}"
+        if "Sign in to confirm you’re not a bot" in str(e):
+            error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
+        await context.bot.send_message(chat_id, error_msg)
 
 async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     state: State = context.bot_data['state']
@@ -366,6 +404,8 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         }],
         'ffmpeg_location': shutil.which("ffmpeg")
     }
+    if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+        ydl_opts['cookiefile'] = YOUTUBE_COOKIES
     try:
         async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -389,7 +429,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
             except Exception as e:
                 logger.error(f"Fallback download failed: {e}")
                 state.last_error = f"Ошибка загрузки трека: {e}"
-                await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось загрузить трек.")
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось загрузить трек: {e}")
                 return
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
@@ -413,7 +453,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
                 performer=info.get("uploader", "Unknown")
             )
         filepath.unlink(missing_ok=True)
-        await update_status_panel(context, force=True)  # Info after track
+        await update_status_panel(context, force=True)
     except asyncio.TimeoutError:
         logger.error(f"Download timeout for track {url}")
         state.last_error = "Таймаут загрузки трека"
@@ -421,7 +461,10 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
         state.last_error = f"Ошибка загрузки трека: {e}"
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось обработать трек: {e}")
+        error_msg = f"⚠️ Не удалось обработать трек: {e}"
+        if "Sign in to confirm you’re not a bot" in str(e):
+            error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
+        await context.bot.send_message(RADIO_CHAT_ID, error_msg)
 
 # --- Radio loop ---
 async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
@@ -509,7 +552,6 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         logger.debug(f"Preparing to update status panel with text: {repr(text)}")
 
         last_status_text = context.bot_data.get('last_status_text', '')
-        # Compare without progress bar and percentage for more accurate change detection
         current_no_progress = re.sub(r'█*▁*\s*\d+%', '', text)
         last_no_progress = re.sub(r'█*▁*\s*\d+%', '', last_status_text)
         if not force and current_no_progress == last_no_progress:
@@ -557,7 +599,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.debug("Message not modified, ignoring")
             elif "can't parse entities" in str(e):
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
-                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!])', r'\1', text)  # Remove escapes for plain text
+                # Fallback to plain text
+                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!:])', r'\1', text)
                 try:
                     if state.status_message_id:
                         await context.bot.edit_message_text(
@@ -574,6 +617,9 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                         )
                         state.status_message_id = msg.message_id
                     logger.debug("Fallback to plain text succeeded")
+                    context.bot_data['last_status_text'] = plain_text
+                    state.last_status_update = current_time
+                    await save_state_from_botdata(context.bot_data)
                 except TelegramError as e2:
                     logger.error(f"Fallback to plain text failed: {e2}")
                     state.last_error = f"Ошибка обновления без Markdown: {e2}"
@@ -598,7 +644,6 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     is_admin_user = await is_admin(user_id)
 
-    # Проверка RADIO_CHAT_ID
     if update.effective_chat.id != RADIO_CHAT_ID:
         logger.warning(f"Command received in unauthorized chat {update.effective_chat.id}, expected {RADIO_CHAT_ID}")
         state.last_error = f"Команда отправлена в неверный чат: {update.effective_chat.id}"
@@ -643,7 +688,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         logger.error(f"Failed to send menu: {e}, text: {repr(text)}")
         state.last_error = f"Ошибка отправки меню: {e}"
-        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!])', r'\1', text)
+        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!:])', r'\1', text)
         try:
             await update.message.reply_text(
                 plain_text,
@@ -716,9 +761,12 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     state.source = context.args[0]
     state.radio_playlist.clear()
     state.now_playing = None
+    state.retry_count = 0
     logger.info(f"Source switched to {state.source}, playlist cleared")
     await refill_playlist(context)
     message = f"Источник переключен на: {escape_markdown_v2(state.source.title())}"
+    if state.source == "youtube" and not YOUTUBE_COOKIES:
+        message += "\n⚠️ Для YouTube может потребоваться авторизация (YOUTUBE_COOKIES)."
     logger.debug(f"Sending source message to {RADIO_CHAT_ID}: {message}")
     await update.message.reply_text(message, parse_mode="MarkdownV2")
     await save_state_from_botdata(context.bot_data)
@@ -744,7 +792,8 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'default_search': search_prefix,
         'extract_flat': 'in_playlist'
     }
-
+    if state.source == "youtube" and YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+        ydl_opts['cookiefile'] = YOUTUBE_COOKIES
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, query, download=False)
@@ -779,7 +828,10 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in /play search: {e}", exc_info=True)
         state.last_error = f"Ошибка поиска трека: {e}"
-        await message.edit_text(f"Произошла ошибка при поиске: {e}")
+        error_msg = f"Произошла ошибка при поиске: {e}"
+        if "Sign in to confirm you’re not a bot" in str(e):
+            error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
+        await message.edit_text(error_msg)
 
 async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.callback_query.from_user.id
@@ -806,7 +858,10 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.error(f"Failed to process play button callback: {e}", exc_info=True)
             state: State = context.bot_data['state']
             state.last_error = f"Ошибка обработки трека: {e}"
-            await query.edit_message_text(f"Не удалось обработать трек: {e}")
+            error_msg = f"Не удалось обработать трек: {e}"
+            if "Sign in to confirm you’re not a bot" in str(e):
+                error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
+            await query.edit_message_text(error_msg)
 
 async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1087,7 +1142,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     app.add_handler(CommandHandler(["start", "menu", "m"], show_menu))
     app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)))
-    app.add_handler(CommandHandler(["rof", "r_off", "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
+    app.add_handler(CommandHandler(["rof", "r_off, "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
     app.add_handler(CommandHandler(["skip", "s"], skip_command))
     app.add_handler(CommandHandler(["vote", "v"], vote_command))
     app.add_handler(CommandHandler(["refresh", "r"], refresh_command))
