@@ -125,16 +125,13 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + "▁" * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-    """Escape special characters for MarkdownV2, ensuring periods are handled."""
+    """Escape special characters for MarkdownV2, ensuring periods are properly escaped."""
     if not text:
         return ""
-    # Escape all special characters, including periods
-    special_chars = r'([_*[\]()~`>#+-=|{}.!:\\])'
+    # List of MarkdownV2 special characters
+    special_chars = r'([_*[\]()~`>#+-=|{}.!])'
+    # Escape special characters with a single backslash
     escaped = re.sub(special_chars, r'\\\1', str(text))
-    # Ensure no double backslashes remain
-    escaped = escaped.replace('\\\\', '\\')
-    # Double-check periods are escaped
-    escaped = re.sub(r'(?<!\\)\.', r'\.', escaped)
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
     return escaped
 
