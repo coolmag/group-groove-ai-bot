@@ -1142,7 +1142,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     app.add_handler(CommandHandler(["start", "menu", "m"], show_menu))
     app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)))
-    app.add_handler(CommandHandler(["rof", "r_off, "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
+    app.add_handler(CommandHandler(["rof", "r_off", "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
     app.add_handler(CommandHandler(["skip", "s"], skip_command))
     app.add_handler(CommandHandler(["vote", "v"], vote_command))
     app.add_handler(CommandHandler(["refresh", "r"], refresh_command))
