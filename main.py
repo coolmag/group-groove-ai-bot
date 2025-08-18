@@ -21,9 +21,20 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError, BadRequest, RetryAfter
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer, field_validator
 from functools import wraps
 from asyncio import Lock
+
+# --- Check Pydantic Version ---
+try:
+    import pydantic
+    logger = logging.getLogger(__name__)  # Define logger early for version check
+    logger.info(f"Pydantic version: {pydantic.__version__}")
+    if not pydantic.__version__.startswith("2."):
+        raise ImportError("Pydantic version 2.x is required, but found version {pydantic.__version__}")
+except ImportError as e:
+    logger.error(f"Pydantic import error: {e}")
+    raise
 
 # --- Constants ---
 class Constants:
@@ -80,7 +91,7 @@ class State(BaseModel):
     last_error: Optional[str] = None
     votable_genres: List[str] = Field(
         default_factory=lambda: sorted(list(set([
-            "pop", "pop 80s", "pop 90s", "pop	pm 2000s",
+            "pop", "pop 80s", "pop 90s", "pop 2000s",
             "rock", "rock 60s", "rock 70s", "rock 80s", "rock 90s",
             "hip hop", "hip hop 90s", "hip hop 2000s",
             "electronic", "electronic 90s", "electronic 2000s",
