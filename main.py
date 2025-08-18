@@ -289,7 +289,6 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
             logger.error(f"MP3 file not found after conversion: {filepath}")
             state.last_error = "Ошибка конвертации трека в MP3"
             await context.bot.send_message(chat_id, "⚠️ Ошибка конвертации трека в MP3.")
-            # Fallback: Попробовать m4a
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'm4a',
@@ -568,9 +567,26 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 # --- Commands ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the interactive menu with all available commands."""
+    if not update.effective_user or not update.message:
+        logger.error("Invalid update: missing effective_user or message")
+        state: State = context.bot_data['state']
+        state.last_error = "Ошибка: недопустимый запрос команды"
+        if update.message:
+            await update.message.reply_text("⚠️ Ошибка: недопустимый запрос команды.")
+        return
+
     user_id = update.effective_user.id
+    logger.debug(f"Received /start or /menu command from user {user_id} in chat {update.effective_chat.id}")
     state: State = context.bot_data['state']
     is_admin_user = await is_admin(user_id)
+
+    # Проверка RADIO_CHAT_ID
+    if update.effective_chat.id != RADIO_CHAT_ID:
+        logger.warning(f"Command received in unauthorized chat {update.effective_chat.id}, expected {RADIO_CHAT_ID}")
+        state.last_error = f"Команда отправлена в неверный чат: {update.effective_chat.id}"
+        await update.message.reply_text(f"⚠️ Эта команда работает только в чате с ID {RADIO_CHAT_ID}.")
+        return
+
     text = [
         "🎵 *Groove AI Bot - Меню* 🎵",
         f"**Статус радио**: {'🟢 Включено' if state.is_on else '🔴 Выключено'}",
@@ -599,7 +615,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh"), InlineKeyboardButton("🔧 Источник", callback_data="cmd:source")] if is_admin_user else [],
         [InlineKeyboardButton("📋 Меню", callback_data="cmd:menu")] if is_admin_user else []
     ]
-    logger.debug(f"Sending menu to user {user_id} with text: {repr(text)}")
+    logger.debug(f"Sending menu to user {user_id} in chat {RADIO_CHAT_ID} with text: {repr(text)}")
     try:
         await update.message.reply_text(
             text,
@@ -607,15 +623,24 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2"
         )
     except TelegramError as e:
-        logger.error(f"Failed to send menu: {e}")
+        logger.error(f"Failed to send menu: {e}, text: {repr(text)}")
         state.last_error = f"Ошибка отправки меню: {e}"
-        await update.message.reply_text("⚠️ Ошибка при открытии меню.")
+        try:
+            await update.message.reply_text(
+                text.replace('*', '').replace('_', ''),
+                reply_markup=InlineKeyboardMarkup([row for row in keyboard if row])
+            )
+            logger.debug("Fallback to plain text menu succeeded")
+        except TelegramError as e2:
+            logger.error(f"Fallback to plain text menu failed: {e2}")
+            state.last_error = f"Ошибка отправки меню без Markdown: {e2}"
+            await update.message.reply_text(f"⚠️ Ошибка при открытии меню: {e2}")
 
 async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     state.is_on = turn_on
     if turn_on:
-        state.now_playing = None  # Сбрасываем текущий трек при включении
+        state.now_playing = None
         context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
         await refill_playlist(context)
     else:
@@ -1037,9 +1062,9 @@ async def on_shutdown(application: Application):
 def main():
     """Starts the bot."""
     DOWNLOAD_DIR.mkdir(exist_ok=True)
-    if not BOT_TOKEN or not RADIO_CHAT_ID:
-        logger.critical("BOT_TOKEN или RADIO_CHAT_ID не заданы!")
-        return
+    if not BOT_TOKEN or not RADIO_CHAT_ID or not ADMIN_IDS:
+        logger.critical(f"Configuration error: BOT_TOKEN={bool(BOT_TOKEN)}, RADIO_CHAT_ID={RADIO_CHAT_ID}, ADMIN_IDS={ADMIN_IDS}")
+        raise ValueError("BOT_TOKEN, RADIO_CHAT_ID или ADMIN_IDS не заданы!")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     app.add_handler(CommandHandler(["start", "menu", "m"], show_menu))
     app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)))
