@@ -646,7 +646,7 @@ def main():
     if not all([BOT_TOKEN, RADIO_CHAT_ID, ADMIN_IDS]):
         raise ValueError("BOT_TOKEN, RADIO_CHAT_ID, or ADMIN_IDS not set!")
     
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).drop_pending_updates(True).build()
     
     # Diagnostic handler
     app.add_handler(MessageHandler(filters.ALL, raw_update_handler), group=-1)
