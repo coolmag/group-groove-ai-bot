@@ -32,17 +32,17 @@ class Constants:
     POLL_DURATION_SECONDS = 60
     POLL_CHECK_TIMEOUT = 10
     MAX_FILE_SIZE = 50_000_000
-    MAX_DURATION = 60  # Max track duration for filtering
-    MIN_DURATION = 30  # Min track duration
+    MAX_DURATION = 300  # Increased to 5 minutes
+    MIN_DURATION = 30   # Min track duration
     PLAYED_URLS_MEMORY = 100
     DOWNLOAD_TIMEOUT = 30
     DEFAULT_SOURCE = "soundcloud"
     DEFAULT_GENRE = "pop"
-    PAUSE_BETWEEN_TRACKS = 0  # No pause between tracks
+    PAUSE_BETWEEN_TRACKS = 0
     STATUS_UPDATE_INTERVAL = 10
     STATUS_UPDATE_MIN_INTERVAL = 2
-    RETRY_INTERVAL = 90
-    SEARCH_LIMIT = 20
+    RETRY_INTERVAL = 30  # Reduced to retry faster
+    SEARCH_LIMIT = 50    # Increased to fetch more tracks
     MAX_RETRIES = 3
 
 # --- Setup ---
@@ -140,7 +140,6 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + "▁" * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-    """Escape all MarkdownV2 reserved characters, including periods and ampersands."""
     if not isinstance(text, str) or not text:
         logger.debug(f"Invalid or empty input for MarkdownV2 escaping: {repr(text)}")
         return ""
@@ -150,7 +149,6 @@ def escape_markdown_v2(text: str) -> str:
     return escaped
 
 def set_escaped_error(state: State, error: str):
-    """Set state.last_error with escaped text."""
     state.last_error = escape_markdown_v2(error) if error else None
     logger.debug(f"Set escaped last_error: {repr(state.last_error)}")
 
@@ -191,7 +189,7 @@ async def get_tracks_soundcloud(genre: str) -> List[dict]:
         logger.debug(f"SoundCloud returned {len(tracks)} tracks for genre {genre}: {[t['title'] for t in tracks]}")
         return tracks
     except yt_dlp.YoutubeDLError as e:
-        logger.error(f"SoundCloud search failed for genre {genre}: {e}")
+        logger.error(f"SoundCloud search failed for genre {genre}: {e}", exc_info=True)
         return []
 
 async def get_tracks_youtube(genre: str) -> List[dict]:
@@ -215,7 +213,7 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
         logger.debug(f"YouTube returned {len(tracks)} tracks for genre {genre}: {[t['title'] for t in tracks]}")
         return tracks
     except yt_dlp.YoutubeDLError as e:
-        logger.error(f"YouTube search failed for genre {genre}: {e}")
+        logger.error(f"YouTube search failed for genre {genre}: {e}", exc_info=True)
         if "Sign in to confirm you’re not a bot" in str(e):
             logger.warning("YouTube requires authentication. Consider setting YOUTUBE_COOKIES environment variable.")
         return []
@@ -242,30 +240,36 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     for attempt in range(Constants.MAX_RETRIES):
         try:
             tracks = await attempt_refill(state.source, state.genre)
-            if not tracks and state.source == "youtube":
-                logger.warning(f"No tracks found on YouTube, switching to SoundCloud")
-                state.source = "soundcloud"
-                tracks = await attempt_refill(state.source, state.genre)
-            
             if not tracks:
                 logger.warning(f"No tracks found on {state.source} for genre {state.genre} after attempt {attempt + 1}")
                 set_escaped_error(state, f"Не удалось найти треки на {state.source} для жанра {state.genre}")
-                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source} после фильтрации. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет треков на {state.source} для жанра {state.genre}. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
-                if attempt == Constants.MAX_RETRIES - 1:
-                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+                if state.source == "soundcloud" and attempt == 0:  # Switch to YouTube after first SoundCloud failure
+                    logger.info("Switching to YouTube for next attempt")
+                    state.source = "youtube"
+                elif attempt == Constants.MAX_RETRIES - 1:
+                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE} and source: {Constants.DEFAULT_SOURCE}")
                     state.genre = Constants.DEFAULT_GENRE
+                    state.source = Constants.DEFAULT_SOURCE
                     state.radio_playlist.clear()
                     state.played_radio_urls.clear()
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
                 continue
 
             logger.debug(f"Tracks before filtering: {[{'title': t['title'], 'duration': t['duration'], 'url': t['url']} for t in tracks]}")
-            filtered_tracks = [
-                t for t in tracks
-                if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
-                and t["url"] not in state.played_radio_urls
-            ]
+            filtered_tracks = []
+            for t in tracks:
+                duration = t["duration"]
+                url = t["url"]
+                if not (Constants.MIN_DURATION <= duration <= Constants.MAX_DURATION):
+                    logger.debug(f"Track filtered out due to duration: {t['title']} ({duration}s)")
+                    continue
+                if url in state.played_radio_urls:
+                    logger.debug(f"Track filtered out due to already played: {t['title']} ({url})")
+                    continue
+                filtered_tracks.append(t)
+
             logger.debug(f"Filtered tracks: {[{'title': t['title'], 'duration': t['duration'], 'url': t['url']} for t in filtered_tracks]}")
             urls = [t["url"] for t in filtered_tracks]
             if urls:
@@ -273,6 +277,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 state.radio_playlist.extend(urls)
                 state.retry_count = 0
                 state.genre = original_genre
+                state.source = state.source  # Retain current source unless changed
                 await save_state_from_botdata(context.bot_data)
                 logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}). URLs: {urls}")
                 return
@@ -281,9 +286,14 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 set_escaped_error(state, f"Нет подходящих треков на {state.source} после фильтрации")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source} после фильтрации. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
-                if attempt == Constants.MAX_RETRIES - 1:
-                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+                state.played_radio_urls.clear()  # Clear played URLs on each retry
+                if state.source == "soundcloud" and attempt == 0:
+                    logger.info("Switching to YouTube for next attempt")
+                    state.source = "youtube"
+                elif attempt == Constants.MAX_RETRIES - 1:
+                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE} and source: {Constants.DEFAULT_SOURCE}")
                     state.genre = Constants.DEFAULT_GENRE
+                    state.source = Constants.DEFAULT_SOURCE
                     state.radio_playlist.clear()
                     state.played_radio_urls.clear()
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
@@ -292,15 +302,20 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             set_escaped_error(state, f"Ошибка при заполнении плейлиста: {e}")
             await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при заполнении плейлиста: {e}")
             state.retry_count += 1
-            if attempt == Constants.MAX_RETRIES - 1:
-                logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+            state.played_radio_urls.clear()  # Clear played URLs on error
+            if state.source == "soundcloud" and attempt == 0:
+                logger.info("Switching to YouTube for next attempt")
+                state.source = "youtube"
+            elif attempt == Constants.MAX_RETRIES - 1:
+                logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE} and source: {Constants.DEFAULT_SOURCE}")
                 state.genre = Constants.DEFAULT_GENRE
+                state.source = Constants.DEFAULT_SOURCE
                 state.radio_playlist.clear()
                 state.played_radio_urls.clear()
             await asyncio.sleep(Constants.RETRY_INTERVAL)
 
     logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts. Switching to SoundCloud and default genre.")
-    state.source = "soundcloud"
+    state.source = Constants.DEFAULT_SOURCE
     state.genre = Constants.DEFAULT_GENRE
     set_escaped_error(state, f"Не удалось найти треки после нескольких попыток. Переключено на {state.source} с жанром {state.genre}.")
     await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось найти треки после нескольких попыток. Переключено на {state.source} с жанром {state.genre}.")
@@ -559,14 +574,12 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             logger.debug("Skipping status update due to rate limit")
             return
 
-        # Prepare fields and log raw values
         genre = state.genre.title() if state.genre else "Unknown"
         source = state.source.title() if state.source else "Unknown"
         now_playing_title = state.now_playing.title if state.now_playing else "Ожидание трека..."
         last_error = state.last_error or "Отсутствует"
         logger.debug(f"Raw status panel fields: genre={repr(genre)}, source={repr(source)}, now_playing_title={repr(now_playing_title)}, last_error={repr(last_error)}")
 
-        # Escape all fields
         genre_escaped = escape_markdown_v2(genre)
         source_escaped = escape_markdown_v2(source)
         now_playing_title_escaped = escape_markdown_v2(now_playing_title)
@@ -639,14 +652,12 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 state.status_message_id = msg.message_id
             context.bot_data['last_status_text'] = text
             state.last_status_update = current_time
-            # Clear last_error after successful update
             logger.debug(f"Clearing last_error after successful update: {state.last_error}")
             state.last_error = None
             await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
             logger.error(f"Failed to update status panel: {e}, problematic text: {repr(text)}")
             if "can't parse entities" in str(e):
-                # Log problematic text around byte offset
                 match = re.search(r"at byte offset (\d+)", str(e))
                 if match:
                     offset = int(match.group(1))
@@ -662,7 +673,6 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.debug("Message not modified, ignoring")
             elif "can't parse entities" in str(e):
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
-                # Fallback to plain text
                 plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])|[*~_]', r'\1', text)
                 logger.debug(f"Fallback plain text: {repr(plain_text)}")
                 try:
@@ -683,7 +693,6 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                     logger.debug("Fallback to plain text succeeded")
                     context.bot_data['last_status_text'] = plain_text
                     state.last_status_update = current_time
-                    # Clear last_error after fallback
                     logger.debug(f"Clearing last_error after fallback: {state.last_error}")
                     state.last_error = None
                     await save_state_from_botdata(context.bot_data)
@@ -695,7 +704,6 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.error(f"Unexpected Telegram error: {e}")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при обновлении статуса: {e}")
         finally:
-            # Ensure last_error is cleared even on failure to prevent accumulation
             if state.last_error:
                 logger.debug(f"Clearing last_error in finally block: {state.last_error}")
                 state.last_error = None
@@ -759,7 +767,6 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]),
             parse_mode="MarkdownV2"
         )
-        # Clear last_error after displaying in menu
         if state.last_error:
             logger.debug(f"Clearing last_error after menu display: {state.last_error}")
             state.last_error = None
@@ -774,7 +781,6 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([row for row in keyboard if row])
             )
             logger.debug("Fallback to plain text menu succeeded")
-            # Clear last_error after displaying in menu
             if state.last_error:
                 logger.debug(f"Clearing last_error after fallback menu: {state.last_error}")
                 state.last_error = None
