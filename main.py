@@ -632,16 +632,23 @@ async def on_shutdown(application: Application):
     await save_state(application.bot_data['state'])
     logger.info("Shutdown completed")
 
+async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await radio_on_off_command(update, context, turn_on=True)
+
+async def radio_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await radio_on_off_command(update, context, turn_on=False)
+
 def main():
     if not all([BOT_TOKEN, RADIO_CHAT_ID, ADMIN_IDS]):
         raise ValueError("BOT_TOKEN, RADIO_CHAT_ID, or ADMIN_IDS not set!")
     
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     
-    app.add_handler(CommandHandler("start", lambda u,c: show_menu(u,c)))
-    app.add_handler(CommandHandler("menu", lambda u,c: show_menu(u,c)))
-    app.add_handler(CommandHandler("ron", lambda u, c: radio_on_off_command(u, c, True)))
-    app.add_handler(CommandHandler("rof", lambda u, c: radio_on_off_command(u, c, False)))
+    # Register handlers correctly
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("ron", radio_on_command))
+    app.add_handler(CommandHandler("rof", radio_off_command))
     app.add_handler(CommandHandler("stopbot", stop_bot_command))
     app.add_handler(CommandHandler("skip", skip_command))
     app.add_handler(CommandHandler("vote", vote_command))
