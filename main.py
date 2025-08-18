@@ -34,16 +34,16 @@ class Constants:
     MAX_FILE_SIZE = 50_000_000
     MAX_DURATION = 1800  # 30 минут
     MIN_DURATION = 30  # 30 секунд
-    PLAYED_URLS_MEMORY = 100  # Reduced to prevent over-filtering
+    PLAYED_URLS_MEMORY = 100
     DOWNLOAD_TIMEOUT = 30
     DEFAULT_SOURCE = "soundcloud"
-    DEFAULT_GENRE = "pop"  # Fallback genre
-    PAUSE_BETWEEN_TRACKS = 90  # 1.5 минуты
+    DEFAULT_GENRE = "pop"
+    PAUSE_BETWEEN_TRACKS = 90
     STATUS_UPDATE_INTERVAL = 10
     STATUS_UPDATE_MIN_INTERVAL = 2
     RETRY_INTERVAL = 90
-    SEARCH_LIMIT = 20  # Increased to fetch more tracks
-    MAX_RETRIES = 3  # Max retries for playlist refill
+    SEARCH_LIMIT = 20
+    MAX_RETRIES = 3
 
 # --- Setup ---
 load_dotenv()
@@ -55,7 +55,7 @@ ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",")
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
 CONFIG_FILE = Path("radio_config.json")
 DOWNLOAD_DIR = Path("downloads")
-YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")  # Path to cookies file, if provided
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")
 
 # --- Models ---
 class NowPlaying(BaseModel):
@@ -84,7 +84,7 @@ class State(BaseModel):
             "metal", "reggae", "folk", "indie", "rap", "r&b", "soul", "funk", "disco"
         ]
     )
-    retry_count: int = 0  # Track retry attempts for playlist refill
+    retry_count: int = 0
 
     @field_serializer('radio_playlist', 'played_radio_urls')
     def _serialize_deques(self, v: deque[str], _info):
@@ -125,12 +125,16 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + "▁" * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-    """Escape special characters for MarkdownV2, including periods."""
+    """Escape special characters for MarkdownV2, ensuring periods are handled."""
     if not text:
         return ""
+    # Escape all special characters, including periods
     special_chars = r'([_*[\]()~`>#+-=|{}.!:\\])'
     escaped = re.sub(special_chars, r'\\\1', str(text))
+    # Ensure no double backslashes remain
     escaped = escaped.replace('\\\\', '\\')
+    # Double-check periods are escaped
+    escaped = re.sub(r'(?<!\\)\.', r'\.', escaped)
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
     return escaped
 
@@ -250,7 +254,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 random.shuffle(urls)
                 state.radio_playlist.extend(urls)
                 state.retry_count = 0
-                state.genre = original_genre  # Restore original genre if successful
+                state.genre = original_genre
                 await save_state_from_botdata(context.bot_data)
                 logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}). URLs: {urls}")
                 return
@@ -484,7 +488,6 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
 
 # --- Radio loop ---
 async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
-    """The main loop for the radio function."""
     await update_status_panel(context, force=True)
     while True:
         try:
@@ -615,6 +618,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.debug("Message not modified, ignoring")
             elif "can't parse entities" in str(e):
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
+                # Fallback to plain text
                 plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!:])', r'\1', text)
                 try:
                     if state.status_message_id:
@@ -636,7 +640,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                     state.last_status_update = current_time
                     await save_state_from_botdata(context.bot_data)
                 except TelegramError as e2:
-                    logger.error(f"Fallback to plain text failed: {e2}")
+                    logger.error(f"Fallback to plain text failed: {e2}, plain text: {repr(plain_text)}")
                     state.last_error = f"Ошибка обновления без Markdown: {e2}"
                     await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при обновлении статуса: {e2}")
             else:
@@ -645,7 +649,6 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 
 # --- Commands ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the interactive menu with all available commands."""
     if not update.effective_user or not update.message:
         logger.error("Invalid update: missing effective_user or message")
         state: State = context.bot_data['state']
@@ -1095,7 +1098,6 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось запустить голосование: {e}")
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles individual votes as they come in."""
     state: State = context.bot_data['state']
     poll_answer: PollAnswer = update.poll_answer
     logger.debug(f"Received poll answer for poll {poll_answer.poll_id}, option: {poll_answer.option_ids}")
@@ -1107,7 +1109,6 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await save_state_from_botdata(context.bot_data)
 
 async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the result of a poll."""
     state: State = context.bot_data['state']
     logger.debug(f"Received poll update: ID {update.poll.id}, active poll ID: {state.active_poll_id}, is_closed: {update.poll.is_closed}")
 
@@ -1157,7 +1158,6 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status_panel(context, force=True)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message when the /start command is issued."""
     user_id = update.effective_user.id
     logger.debug(f"Received /start command from user {user_id}")
     state: State = context.bot_data['state']
@@ -1189,7 +1189,6 @@ async def on_shutdown(application: Application):
     await save_state_from_botdata(application.bot_data)
 
 def main():
-    """Starts the bot."""
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     if not BOT_TOKEN or not RADIO_CHAT_ID or not ADMIN_IDS:
         logger.critical(f"Configuration error: BOT_TOKEN={bool(BOT_TOKEN)}, RADIO_CHAT_ID={RADIO_CHAT_ID}, ADMIN_IDS={ADMIN_IDS}")
@@ -1197,7 +1196,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     app.add_handler(CommandHandler(["start", "menu", "m"], show_menu))
     app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)))
-    app.add_handler(CommandHandler(["rof", "r_off", "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
+    app.add_handler(CommandHandler(["rof", "r_off, "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
     app.add_handler(CommandHandler(["stopbot"], stop_bot_command))
     app.add_handler(CommandHandler(["skip", "s"], skip_command))
     app.add_handler(CommandHandler(["vote", "v"], vote_command))
