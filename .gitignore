@@ -1,18 +1,6 @@
-# Sensitive information
 .env
-
-# Session files
-*.session
-
-# Configuration and state files
-radio_config.json
-
-# Downloaded media
 downloads/
-
-# Log files
-*.log
-
-# Python cache
+radio_config.json
 __pycache__/
 *.pyc
+venv/
