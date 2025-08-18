@@ -31,7 +31,7 @@ try:
     logger = logging.getLogger(__name__)  # Define logger early for version check
     logger.info(f"Pydantic version: {pydantic.__version__}")
     if not pydantic.__version__.startswith("2."):
-        raise ImportError("Pydantic version 2.x is required, but found version {pydantic.__version__}")
+        raise ImportError(f"Pydantic version 2.x is required, but found version {pydantic.__version__}")
 except ImportError as e:
     logger.error(f"Pydantic import error: {e}")
     raise
@@ -1120,11 +1120,35 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE):
     try:
         chat = await context.bot.get_chat(RADIO_CHAT_ID)
         bot_member = await context.bot.get_chat_member(RADIO_CHAT_ID, context.bot.id)
-        if not bot_member.can_send_messages or not bot_member.can_send_audio:
-            logger.error(f"Bot lacks permissions in chat {RADIO_CHAT_ID}: {bot_member.status}")
+        logger.info(f"Bot member status: {bot_member.status}, type: {bot_member.__class__.__name__}")
+
+        # Check if bot is an administrator
+        if bot_member.status == "administrator":
+            # For administrators, permissions may not be directly accessible in v20.7
+            # Assume basic permissions (send messages, send audio) if bot is admin
+            logger.info(f"Bot is administrator in chat {RADIO_CHAT_ID}")
+            # Optionally check specific permissions if available
+            if hasattr(bot_member, 'can_post_messages') and not bot_member.can_post_messages:
+                logger.error(f"Bot lacks permission to post messages in chat {RADIO_CHAT_ID}")
+                return False
+            if hasattr(bot_member, 'can_send_audio') and not bot_member.can_send_audio:
+                logger.error(f"Bot lacks permission to send audio in chat {RADIO_CHAT_ID}")
+                return False
+            logger.info(f"Bot permissions assumed sufficient as administrator in chat {RADIO_CHAT_ID}")
+            return True
+        elif bot_member.status == "member":
+            # For non-admin members, check explicit permissions
+            if not hasattr(bot_member, 'can_send_messages') or not bot_member.can_send_messages:
+                logger.error(f"Bot lacks permission to send messages in chat {RADIO_CHAT_ID}")
+                return False
+            if not hasattr(bot_member, 'can_send_audio') or not bot_member.can_send_audio:
+                logger.error(f"Bot lacks permission to send audio in chat {RADIO_CHAT_ID}")
+                return False
+            logger.info(f"Bot permissions verified for non-admin member in chat {RADIO_CHAT_ID}")
+            return True
+        else:
+            logger.error(f"Bot is not a member or administrator in chat {RADIO_CHAT_ID}: status={bot_member.status}")
             return False
-        logger.info(f"Bot permissions verified in chat {RADIO_CHAT_ID}")
-        return True
     except TelegramError as e:
         logger.error(f"Failed to verify bot permissions in chat {RADIO_CHAT_ID}: {e}")
         return False
@@ -1141,7 +1165,7 @@ async def post_init(application: Application):
             return
         if not await check_bot_permissions(application):
             application.bot_data['state'].last_error = f"Bot lacks permissions in chat {RADIO_CHAT_ID}"
-            await application.bot.send_message(RADIO_CHAT_ID, f"⚠️ Bot lacks permissions in chat {RADIO_CHAT_ID}.")
+            await application.bot.send_message(RADIO_CHAT_ID, f"⚠️ Bot lacks permissions in chat {RADIO_CHAT_ID}. Please make the bot an admin with send message and audio permissions.")
             return
         if application.bot_data['state'].is_on:
             logger.info("Radio is on, starting radio loop")
