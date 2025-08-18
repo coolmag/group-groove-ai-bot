@@ -537,26 +537,39 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             logger.debug("Skipping status update due to rate limit")
             return
 
+        # Prepare fields and log raw values
+        genre = state.genre.title() if state.genre else "Unknown"
+        source = state.source.title() if state.source else "Unknown"
+        now_playing_title = state.now_playing.title if state.now_playing else "Ожидание трека..."
+        last_error = state.last_error or "Отсутствует"
+        logger.debug(f"Raw status panel fields: genre={repr(genre)}, source={repr(source)}, now_playing_title={repr(now_playing_title)}, last_error={repr(last_error)}")
+
+        # Escape all fields
+        genre_escaped = escape_markdown_v2(genre)
+        source_escaped = escape_markdown_v2(source)
+        now_playing_title_escaped = escape_markdown_v2(now_playing_title)
+        last_error_escaped = escape_markdown_v2(last_error)
+        logger.debug(f"Escaped status panel fields: genre={repr(genre_escaped)}, source={repr(source_escaped)}, now_playing_title={repr(now_playing_title_escaped)}, last_error={repr(last_error_escaped)}")
+
         lines = [
             "🎵 *Радио Groove AI* 🎵",
             f"**Статус**: {'🟢 Включено' if state.is_on else '🔴 Выключено'}",
-            f"**Жанр**: {escape_markdown_v2(state.genre.title())}",
-            f"**Источник**: {escape_markdown_v2(state.source.title())}"
+            f"**Жанр**: {genre_escaped}",
+            f"**Источник**: {source_escaped}"
         ]
         if state.now_playing:
             elapsed = current_time - state.now_playing.start_time
             progress = min(elapsed / state.now_playing.duration, 1.0) if state.now_playing.duration > 0 else 0
             progress_bar = get_progress_bar(progress)
-            title = escape_markdown_v2(state.now_playing.title)
             duration = format_duration(state.now_playing.duration)
-            lines.append(f"**Сейчас играет**: {title} \\({duration}\\)")
+            lines.append(f"**Сейчас играет**: {now_playing_title_escaped} \\({duration}\\)")
             lines.append(f"**Прогресс**: {progress_bar} {int(progress * 100)}\\%")
         else:
-            lines.append("**Сейчас играет**: Ожидание трека...")
+            lines.append(f"**Сейчас играет**: {now_playing_title_escaped}")
         if state.active_poll_id:
             lines.append(f"🗳 *Голосование активно* \\(осталось ~{Constants.POLL_DURATION_SECONDS} сек\\)")
         if state.last_error:
-            lines.append(f"⚠️ **Последняя ошибка**: {escape_markdown_v2(state.last_error)}")
+            lines.append(f"⚠️ **Последняя ошибка**: {last_error_escaped}")
         lines.append("────────────────")
         text = "\n".join(lines)
 
@@ -565,7 +578,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             state.last_error = "Попытка отправки пустого сообщения статуса"
             return
 
-        logger.debug(f"Preparing to update status panel with text: {repr(text)}")
+        logger.debug(f"Final status panel text: {repr(text)}")
 
         last_status_text = context.bot_data.get('last_status_text', '')
         current_no_progress = re.sub(r'█*▁*\s*\d+%', '', text)
@@ -604,6 +617,10 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 state.status_message_id = msg.message_id
             context.bot_data['last_status_text'] = text
             state.last_status_update = current_time
+            # Clear last_error to prevent reintroducing unescaped text
+            if state.last_error:
+                logger.debug(f"Clearing last_error: {state.last_error}")
+                state.last_error = None
             await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
             logger.error(f"Failed to update status panel: {e}, problematic text: {repr(text)}")
@@ -617,6 +634,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
                 # Fallback to plain text
                 plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])', r'\1', text)
+                logger.debug(f"Fallback plain text: {repr(plain_text)}")
                 try:
                     if state.status_message_id:
                         await context.bot.edit_message_text(
@@ -635,6 +653,10 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                     logger.debug("Fallback to plain text succeeded")
                     context.bot_data['last_status_text'] = plain_text
                     state.last_status_update = current_time
+                    # Clear last_error to prevent reintroducing unescaped text
+                    if state.last_error:
+                        logger.debug(f"Clearing last_error after fallback: {state.last_error}")
+                        state.last_error = None
                     await save_state_from_botdata(context.bot_data)
                 except TelegramError as e2:
                     logger.error(f"Fallback to plain text failed: {e2}, plain text: {repr(plain_text)}")
@@ -702,6 +724,11 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([row for row in keyboard if row]),
             parse_mode="MarkdownV2"
         )
+        # Clear last_error after displaying in menu
+        if state.last_error:
+            logger.debug(f"Clearing last_error after menu display: {state.last_error}")
+            state.last_error = None
+            await save_state_from_botdata(context.bot_data)
     except TelegramError as e:
         logger.error(f"Failed to send menu: {e}, text: {repr(text)}")
         state.last_error = f"Ошибка отправки меню: {e}"
@@ -712,6 +739,11 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([row for row in keyboard if row])
             )
             logger.debug("Fallback to plain text menu succeeded")
+            # Clear last_error after displaying in menu
+            if state.last_error:
+                logger.debug(f"Clearing last_error after fallback menu: {state.last_error}")
+                state.last_error = None
+                await save_state_from_botdata(context.bot_data)
         except TelegramError as e2:
             logger.error(f"Fallback to plain text menu failed: {e2}")
             state.last_error = f"Ошибка отправки меню без Markdown: {e2}"
