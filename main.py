@@ -258,13 +258,8 @@ async def download_and_send(context: ContextTypes.DEFAULT_TYPE, url: str, chat_i
         'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
         'noplaylist': True,
         'quiet': False,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
         'ffmpeg_location': shutil.which("ffmpeg"),
-        'ffprobe_location': shutil.which("ffprobe")
     }
     if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
         ydl_opts['cookiefile'] = YOUTUBE_COOKIES
@@ -316,17 +311,15 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(10)
                 continue
             
+            url = None
             async with state_lock:
-                if not state.radio_playlist:
-                    is_playlist_empty = True
-                else:
-                    is_playlist_empty = False
+                if state.radio_playlist:
                     url = state.radio_playlist.popleft()
                     state.played_radio_urls.append(url)
                     if len(state.played_radio_urls) > Constants.PLAYED_URLS_MEMORY:
                         state.played_radio_urls.popleft()
             
-            if is_playlist_empty:
+            if not url:
                 logger.info("Playlist empty, refilling")
                 await refill_playlist(context)
                 continue
@@ -428,7 +421,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                     state.status_message_id = None
 
 # --- Commands ---
-def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     text = [
         "🎵 *Groove AI Bot - Menu* 🎵",
@@ -449,7 +442,7 @@ def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("\n".join(text), parse_mode="MarkdownV2")
 
-def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     async with state_lock:
         state: State = context.bot_data['state']
         if state.is_on == turn_on: return
@@ -466,27 +459,27 @@ def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     if turn_on: await refill_playlist(context)
 
 @admin_only
-def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     await toggle_radio(context, turn_on)
     await update.message.reply_text(f"Radio turned {'on' if turn_on else 'off'}.")
     await update_status_panel(context, force=True)
 
 @admin_only
-def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Bot stopping.")
     await context.application.stop_running()
 
 @admin_only
-def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data['skip_event'].set()
     await update.message.reply_text("Skipping track... ⏭")
 
 @admin_only
-def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_vote(context)
 
 @admin_only
-def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or context.args[0] not in ["soundcloud", "youtube"]:
         await update.message.reply_text("Usage: /source <soundcloud|youtube>")
         return
@@ -619,7 +612,6 @@ async def post_init(application: Application):
     application.bot_data['skip_event'] = asyncio.Event()
     if not await check_bot_permissions(application):
         logger.critical("Bot lacks necessary permissions. Shutting down.")
-        # Cannot send message if permissions are missing, just log and exit.
         return
     if application.bot_data['state'].is_on:
         logger.info("Radio is on, starting radio loop")
@@ -631,6 +623,9 @@ async def on_shutdown(application: Application):
     if task: task.cancel()
     await save_state(application.bot_data['state'])
     logger.info("Shutdown completed")
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_menu(update, context)
 
 async def radio_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await radio_on_off_command(update, context, turn_on=True)
@@ -644,7 +639,6 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).build()
     
-    # Register handlers correctly
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CommandHandler("ron", radio_on_command))
