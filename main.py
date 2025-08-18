@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-import logging
+# -*- coding: utf-8 -*-import logging
 import os
 import asyncio
 import json
@@ -150,8 +149,8 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    special_chars = r'([_*[]()~`>#+\-=|"{}.!])'
-    return re.sub(special_chars, r'\\1', text)
+    special_chars = r'([_*[\\\]()~`>#+\-=|"{}.!])'
+    return re.sub(special_chars, r'\\\1', text)
 
 async def set_error(state: State, error: str):
     async with state_lock:
@@ -182,7 +181,7 @@ async def get_tracks(source: str, genre: str) -> List[dict]:
         'noplaylist': True,
         'quiet': False,
         'extract_flat': 'in_playlist',
-        'default_search': f"{('scsearch' if source == 'soundcloud' else 'ytsearch')}{Constants.SEARCH_LIMIT}:{genre}"
+        'default_search': f"{'scsearch' if source == 'soundcloud' else 'ytsearch'}{Constants.SEARCH_LIMIT}:{genre}"
     }
     if source == 'youtube' and YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
         ydl_opts['cookiefile'] = YOUTUBE_COOKIES
@@ -427,8 +426,14 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"show_menu triggered for user {update.effective_user.id}")
     state: State = context.bot_data['state']
+    # Temporarily disabled for private chat testing
+    # if update.effective_chat.id != RADIO_CHAT_ID:
+    #     await set_error(state, f"Command sent in wrong chat: {update.effective_chat.id}")
+    #     await update.message.reply_text(f"⚠️ This command works only in chat ID {RADIO_CHAT_ID}.")
+    #     return
+
     text = [
-        "🎵 *Groove AI Bot - Menu* 🎵",
+        "🎵 *Radio Groove AI* 🎵",
         f"**Radio Status**: {'🟢 On' if state.is_on else '🔴 Off'}",
         f"**Current Genre**: {escape_markdown_v2(state.genre.title())}",
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'Nothing playing')}",
