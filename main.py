@@ -150,7 +150,7 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    special_chars = r'([_*[]()~`>#+\-=|"{}.!])'
+    special_chars = r'([_*[\\\]()~`>#+\-=|"{}.!])'
     return re.sub(special_chars, r'\\\1', text)
 
 async def set_error(state: State, error: str):
@@ -182,7 +182,7 @@ async def get_tracks(source: str, genre: str) -> List[dict]:
         'noplaylist': True,
         'quiet': False,
         'extract_flat': 'in_playlist',
-        'default_search': f"{('scsearch' if source == 'soundcloud' else 'ytsearch')}{Constants.SEARCH_LIMIT}:{genre}"
+        'default_search': f"{'scsearch' if source == 'soundcloud' else 'ytsearch'}{Constants.SEARCH_LIMIT}:{genre}"
     }
     if source == 'youtube' and YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
         ydl_opts['cookiefile'] = YOUTUBE_COOKIES
@@ -386,7 +386,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         if state.now_playing and state.now_playing.duration > 0:
             elapsed = current_time - state.now_playing.start_time
             progress = min(elapsed / state.now_playing.duration, 1.0)
-            lines.append(f"**Сейчас играет**: {escape_markdown_v2(state.now_playing.title)} \({format_duration(state.now_playing.duration)}\)")
+            lines.append(f"**Сейчас играет**: {escape_markdown_v2(state.now_playing.title)} \\({format_duration(state.now_playing.duration)}\\)")
             lines.append(f"**Прогресс**: {get_progress_bar(progress)} {int(progress * 100)}%")
         else:
             lines.append(f"**Сейчас играет**: {escape_markdown_v2('Ожидание трека...')}")
@@ -404,7 +404,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         keyboard = [
             [InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh"), InlineKeyboardButton("⏭ Пропустить" if state.is_on else "▶️ Включить", callback_data="radio:skip" if state.is_on else "radio:on")],
             [InlineKeyboardButton("🗳 Голосовать", callback_data="vote:start")] if state.is_on and not state.active_poll_id else [],
-            [InlineKeyboardButton("⏹ Стоп", callback_data="radio:off")] if state.is_on else [],
+            [InlineKeyboardButton("⏹ Стоп Радио", callback_data="radio:off")] if state.is_on else [],
+            [InlineKeyboardButton("🤖 Стоп Бот", callback_data="cmd:stopbot")] if await is_admin(context._user_id) else [],
             [InlineKeyboardButton("📋 Меню", callback_data="cmd:menu")]
         ]
         try:
@@ -433,7 +434,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"Команда show_menu вызвана пользователем {update.effective_user.id}")
     state: State = context.bot_data['state']
-    # Временно отключено для теста в личном чате
+    # Закомментировано для теста в личном чате. Раскомментируйте для работы только в группе.
     # if update.effective_chat.id != RADIO_CHAT_ID:
     #     await set_error(state, f"Команда отправлена в неправильный чат: {update.effective_chat.id}")
     #     await update.message.reply_text(f"⚠️ Эта команда работает только в чате с ID {RADIO_CHAT_ID}.")
@@ -452,6 +453,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⏭ /skip - Пропустить трек",
         "🗳 /vote - Начать голосование",
         "🔧 /source <soundcloud|youtube> - Сменить источник",
+        "🛑 /stop, /stopbot - Полностью остановить бота",
         "",
         "📜 *Команды для всех:*",
         "🎧 /play <название> - Найти и воспроизвести трек",
@@ -545,8 +547,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == "vote" and data == "start":
         if not await is_admin(query.from_user.id): return await query.answer("Только для администраторов.", show_alert=True)
         await start_vote(context)
-    elif command == "cmd" and data == "menu":
-        await show_menu(update, context)
+    elif command == "cmd":
+        if data == "menu":
+            await show_menu(update, context)
+        elif data == "stopbot" and await is_admin(query.from_user.id):
+            await query.answer("🛑 Останавливаю бота...")
+            await context.application.stop_running()
 
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
@@ -667,7 +673,7 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CommandHandler("ron", radio_on_command))
     app.add_handler(CommandHandler("rof", radio_off_command))
-    app.add_handler(CommandHandler("stopbot", stop_bot_command))
+    app.add_handler(CommandHandler(["stop", "stopbot"], stop_bot_command))
     app.add_handler(CommandHandler("skip", skip_command))
     app.add_handler(CommandHandler("vote", vote_command))
     app.add_handler(CommandHandler("source", set_source_command))
