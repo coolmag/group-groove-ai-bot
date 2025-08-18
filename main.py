@@ -34,14 +34,15 @@ class Constants:
     MAX_FILE_SIZE = 50_000_000
     MAX_DURATION = 1800  # 30 минут
     MIN_DURATION = 30  # 30 секунд
-    PLAYED_URLS_MEMORY = 200
+    PLAYED_URLS_MEMORY = 100  # Reduced to prevent over-filtering
     DOWNLOAD_TIMEOUT = 30
     DEFAULT_SOURCE = "soundcloud"
+    DEFAULT_GENRE = "pop"  # Fallback genre
     PAUSE_BETWEEN_TRACKS = 90  # 1.5 минуты
     STATUS_UPDATE_INTERVAL = 10
     STATUS_UPDATE_MIN_INTERVAL = 2
     RETRY_INTERVAL = 90
-    SEARCH_LIMIT = 10
+    SEARCH_LIMIT = 20  # Increased to fetch more tracks
     MAX_RETRIES = 3  # Max retries for playlist refill
 
 # --- Setup ---
@@ -127,12 +128,9 @@ def escape_markdown_v2(text: str) -> str:
     """Escape special characters for MarkdownV2, including periods."""
     if not text:
         return ""
-    # Extended special characters, explicitly including '.'
     special_chars = r'([_*[\]()~`>#+-=|{}.!:\\])'
     escaped = re.sub(special_chars, r'\\\1', str(text))
-    # Remove double escapes and ensure proper escaping
     escaped = escaped.replace('\\\\', '\\')
-    # Log the escaped text for debugging
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
     return escaped
 
@@ -205,32 +203,38 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist from {state.source} for genre: {state.genre}")
     logger.debug(f"Played URLs size: {len(state.played_radio_urls)}")
-    if len(state.played_radio_urls) > Constants.PLAYED_URLS_MEMORY * 0.8:
+    if len(state.played_radio_urls) > Constants.PLAYED_URLS_MEMORY * 0.5:
         state.played_radio_urls.clear()
-        logger.info("Cleared played_radio_urls to prevent filtering out valid tracks")
-    
-    async def attempt_refill(source: str) -> List[dict]:
+        logger.info("Cleared played_radio_urls to prevent over-filtering")
+
+    async def attempt_refill(source: str, genre: str) -> List[dict]:
         tracks = []
         if source == "soundcloud":
-            tracks = await get_tracks_soundcloud(state.genre)
+            tracks = await get_tracks_soundcloud(genre)
         elif source == "youtube":
-            tracks = await get_tracks_youtube(state.genre)
+            tracks = await get_tracks_youtube(genre)
         logger.debug(f"Attempted refill from {source}, found {len(tracks)} tracks")
         return tracks
 
+    original_genre = state.genre
     for attempt in range(Constants.MAX_RETRIES):
         try:
-            tracks = await attempt_refill(state.source)
+            tracks = await attempt_refill(state.source, state.genre)
             if not tracks and state.source == "youtube":
                 logger.warning(f"No tracks found on YouTube, switching to SoundCloud")
                 state.source = "soundcloud"
-                tracks = await attempt_refill(state.source)
+                tracks = await attempt_refill(state.source, state.genre)
             
             if not tracks:
-                logger.warning(f"No tracks found on {state.source} after attempt {attempt + 1}")
-                state.last_error = f"Не удалось найти треки на {state.source}"
-                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось найти треки на {state.source}. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
+                logger.warning(f"No tracks found on {state.source} for genre {state.genre} after attempt {attempt + 1}")
+                state.last_error = f"Не удалось найти треки на {state.source} для жанра {state.genre}"
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source} после фильтрации. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
+                if attempt == Constants.MAX_RETRIES - 1:
+                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+                    state.genre = Constants.DEFAULT_GENRE
+                    state.radio_playlist.clear()
+                    state.played_radio_urls.clear()
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
                 continue
 
@@ -245,29 +249,41 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             if urls:
                 random.shuffle(urls)
                 state.radio_playlist.extend(urls)
-                state.retry_count = 0  # Reset retry count on success
+                state.retry_count = 0
+                state.genre = original_genre  # Restore original genre if successful
                 await save_state_from_botdata(context.bot_data)
                 logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}). URLs: {urls}")
                 return
             else:
                 logger.warning(f"No valid tracks after filtering on {state.source}. Reasons: {['Duration out of range' if not (Constants.MIN_DURATION <= t['duration'] <= Constants.MAX_DURATION) else 'Already played' for t in tracks]}")
-                state.last_error = "Нет подходящих треков после фильтрации"
+                state.last_error = f"Нет подходящих треков на {state.source} после фильтрации"
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source} после фильтрации. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
+                if attempt == Constants.MAX_RETRIES - 1:
+                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+                    state.genre = Constants.DEFAULT_GENRE
+                    state.radio_playlist.clear()
+                    state.played_radio_urls.clear()
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
         except Exception as e:
             logger.error(f"Playlist refill failed on attempt {attempt + 1}: {e}", exc_info=True)
             state.last_error = f"Ошибка при заполнении плейлиста: {e}"
             await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при заполнении плейлиста: {e}")
             state.retry_count += 1
+            if attempt == Constants.MAX_RETRIES - 1:
+                logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+                state.genre = Constants.DEFAULT_GENRE
+                state.radio_playlist.clear()
+                state.played_radio_urls.clear()
             await asyncio.sleep(Constants.RETRY_INTERVAL)
 
-    logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts. Switching to SoundCloud.")
+    logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts. Switching to SoundCloud and default genre.")
     state.source = "soundcloud"
-    state.last_error = "Не удалось найти треки после нескольких попыток. Переключено на SoundCloud."
-    await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки после нескольких попыток. Переключено на SoundCloud.")
+    state.genre = Constants.DEFAULT_GENRE
+    state.last_error = f"Не удалось найти треки после нескольких попыток. Переключено на {state.source} с жанром {state.genre}."
+    await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось найти треки после нескольких попыток. Переключено на {state.source} с жанром {state.genre}.")
     await save_state_from_botdata(context.bot_data)
-    await refill_playlist(context)  # Try one more time with SoundCloud
+    await refill_playlist(context)
 
 # --- Download & send ---
 async def check_track_validity(url: str) -> Optional[dict]:
@@ -330,7 +346,6 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
             logger.error(f"MP3 file not found after conversion: {filepath}")
             state.last_error = "Ошибка конвертации трека в MP3"
             await context.bot.send_message(chat_id, "⚠️ Ошибка конвертации трека в MP3.")
-            # Fallback: Попробовать m4a
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'm4a',
@@ -417,7 +432,6 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
             logger.error(f"MP3 file not found after conversion: {filepath}")
             state.last_error = "Ошибка конвертации трека в MP3"
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка конвертации трека в MP3.")
-            # Fallback: Try downloading without postprocessing
             ydl_opts['postprocessors'] = []
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -601,7 +615,6 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.debug("Message not modified, ignoring")
             elif "can't parse entities" in str(e):
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
-                # Fallback to plain text
                 plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!:])', r'\1', text)
                 try:
                     if state.status_message_id:
@@ -666,6 +679,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📜 *Команды для админов:*",
         "▶️ /ron (/r_on) - Включить радио",
         "⏹ /rof (/r_off, /stop, /t) - Выключить радио",
+        "🛑 /stopbot - Полностью остановить бота",
         "⏭ /skip (/s) - Пропустить трек",
         "🗳 /vote (/v) - Запустить голосование",
         "🔄 /refresh (/r) - Обновить статус",
@@ -676,6 +690,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎧 Найти трек", callback_data="cmd:play")],
         [InlineKeyboardButton("▶️ Вкл радио", callback_data="radio:on"), InlineKeyboardButton("⏹ Выкл радио", callback_data="radio:off")] if is_admin_user else [],
+        [InlineKeyboardButton("🛑 Стоп бот", callback_data="cmd:stopbot")] if is_admin_user else [],
         [InlineKeyboardButton("⏭ Пропустить", callback_data="radio:skip"), InlineKeyboardButton("🗳 Голосовать", callback_data="vote:start")] if is_admin_user and state.is_on and not state.active_poll_id else [],
         [InlineKeyboardButton("🔄 Обновить", callback_data="radio:refresh"), InlineKeyboardButton("🔧 Источник", callback_data="cmd:source")] if is_admin_user else [],
         [InlineKeyboardButton("📋 Меню", callback_data="cmd:menu")] if is_admin_user else []
@@ -726,6 +741,27 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
     message = "Радио включено. 🎵" if turn_on else "Радио выключено. 🔇"
     logger.debug(f"Sending message to {RADIO_CHAT_ID}: {message}")
     await update.message.reply_text(message, parse_mode="Markdown")
+
+@admin_only
+async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    logger.debug(f"Received /stopbot command from user {user_id}")
+    state: State = context.bot_data['state']
+    state.is_on = False
+    state.now_playing = None
+    state.radio_playlist.clear()
+    state.played_radio_urls.clear()
+    task = context.bot_data.get('radio_loop_task')
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.debug("Radio loop task cancelled via /stopbot")
+    await save_state_from_botdata(context.bot_data)
+    await update.message.reply_text("🛑 Бот останавливается. Вы можете перезапустить его на сервере.")
+    logger.info("Stopping bot via /stopbot command")
+    await context.application.stop_running()
 
 @admin_only
 async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -927,6 +963,23 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         elif data == "source" and await is_admin(user_id):
             logger.debug(f"Sending source command prompt to {query.message.chat_id}")
             await query.message.reply_text("Введите /source soundcloud|youtube для смены источника.")
+        elif data == "stopbot" and await is_admin(user_id):
+            logger.debug(f"Processing stopbot callback from user {user_id}")
+            state.is_on = False
+            state.now_playing = None
+            state.radio_playlist.clear()
+            state.played_radio_urls.clear()
+            task = context.bot_data.get('radio_loop_task')
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.debug("Radio loop task cancelled via stopbot callback")
+            await save_state_from_botdata(context.bot_data)
+            await query.message.reply_text("🛑 Бот останавливается. Вы можете перезапустить его на сервере.")
+            logger.info("Stopping bot via stopbot callback")
+            await context.application.stop_running()
         elif data == "menu" and await is_admin(user_id):
             logger.debug(f"Showing menu for user {user_id}")
             await show_menu(update, context)
@@ -1145,6 +1198,7 @@ def main():
     app.add_handler(CommandHandler(["start", "menu", "m"], show_menu))
     app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)))
     app.add_handler(CommandHandler(["rof", "r_off", "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
+    app.add_handler(CommandHandler(["stopbot"], stop_bot_command))
     app.add_handler(CommandHandler(["skip", "s"], skip_command))
     app.add_handler(CommandHandler(["vote", "v"], vote_command))
     app.add_handler(CommandHandler(["refresh", "r"], refresh_command))
