@@ -31,8 +31,8 @@ class Constants:
     POLL_DURATION_SECONDS = 60
     POLL_CHECK_TIMEOUT = 10
     MAX_FILE_SIZE = 50_000_000
-    MAX_DURATION = 1200
-    MIN_DURATION = 60
+    MAX_DURATION = 1800  # Увеличено до 30 минут
+    MIN_DURATION = 30  # Уменьшено до 30 секунд
     PLAYED_URLS_MEMORY = 200
     DOWNLOAD_TIMEOUT = 30
     DEFAULT_SOURCE = "soundcloud"
@@ -182,6 +182,10 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
 async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     logger.info(f"Refilling playlist from {state.source} for genre: {state.genre}")
+    logger.debug(f"Played URLs size: {len(state.played_radio_urls)}")
+    if len(state.played_radio_urls) > Constants.PLAYED_URLS_MEMORY * 0.8:
+        state.played_radio_urls.clear()
+        logger.info("Cleared played_radio_urls to prevent filtering out valid tracks")
     try:
         tracks = []
         if state.source == "soundcloud":
@@ -198,17 +202,19 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 await refill_playlist(context)
                 return
 
+        logger.debug(f"Tracks before filtering: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in tracks]}")
         filtered_tracks = [
             t for t in tracks
             if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
             and t["url"] not in state.played_radio_urls
         ]
+        logger.debug(f"Filtered tracks: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in filtered_tracks]}")
         urls = [t["url"] for t in filtered_tracks]
         if urls:
             random.shuffle(urls)
             state.radio_playlist.extend(urls)
             await save_state_from_botdata(context.bot_data)
-            logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}).")
+            logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}). URLs: {urls}")
         else:
             logger.warning(f"No valid tracks found after filtering. Retrying in {Constants.RETRY_INTERVAL} seconds.")
             state.last_error = "Нет подходящих треков"
@@ -216,7 +222,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(Constants.RETRY_INTERVAL)
             await refill_playlist(context)
     except Exception as e:
-        logger.error(f"Playlist refill failed: {e}")
+        logger.error(f"Playlist refill failed: {e}", exc_info=True)
         state.last_error = f"Ошибка при заполнении плейлиста: {e}"
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка при заполнении плейлиста.")
 
@@ -239,11 +245,19 @@ async def check_track_validity(url: str) -> Optional[dict]:
 
 async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str, chat_id: int):
     state: State = context.bot_data['state']
-    # Check if FFmpeg is available
-    if not shutil.which("ffmpeg"):
-        logger.error("FFmpeg not found in system")
-        state.last_error = "FFmpeg не установлен"
-        await context.bot.send_message(chat_id, "⚠️ Ошибка: FFmpeg не установлен на сервере.")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        logger.error("FFmpeg or ffprobe not found in system")
+        state.last_error = "FFmpeg или ffprobe не установлен"
+        await context.bot.send_message(chat_id, "⚠️ Ошибка: FFmpeg или ffprobe не установлен на сервере.")
+        return
+
+    if not DOWNLOAD_DIR.exists():
+        logger.error(f"Download directory {DOWNLOAD_DIR} does not exist")
+        DOWNLOAD_DIR.mkdir(exist_ok=True)
+    if not os.access(DOWNLOAD_DIR, os.W_OK):
+        logger.error(f"Download directory {DOWNLOAD_DIR} is not writable")
+        state.last_error = "Нет доступа к директории downloads"
+        await context.bot.send_message(chat_id, "⚠️ Нет доступа к директории для загрузки.")
         return
 
     ydl_opts = {
@@ -256,32 +270,39 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'ffmpeg_location': shutil.which("ffmpeg")
+        'ffmpeg_location': shutil.which("ffmpeg"),
+        'ffprobe_location': shutil.which("ffprobe")
     }
     try:
         async with asyncio.timeout(Constants.DOWNLOAD_TIMEOUT):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
         filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
+        logger.debug(f"Downloaded file: {filepath}, format: {info.get('ext', 'unknown')}, audio codec: {info.get('acodec', 'unknown')}")
         if not filepath.exists():
             logger.error(f"MP3 file not found after conversion: {filepath}")
             state.last_error = "Ошибка конвертации трека в MP3"
             await context.bot.send_message(chat_id, "⚠️ Ошибка конвертации трека в MP3.")
-            # Fallback: Try downloading without postprocessing
-            ydl_opts['postprocessors'] = []
+            # Fallback: Попробовать m4a
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'm4a',
+                'preferredquality': '192',
+            }]
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-                filepath = Path(ydl.prepare_filename(info))
+                filepath = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
+                logger.debug(f"Fallback to m4a: {filepath}")
                 if not filepath.exists():
-                    logger.error(f"Fallback download failed: {filepath}")
-                    state.last_error = "Ошибка загрузки трека даже без конвертации"
-                    await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек.")
+                    logger.error(f"Fallback m4a file not found: {filepath}")
+                    state.last_error = "Ошибка загрузки трека даже в формате m4a"
+                    await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек в формате m4a.")
                     return
             except Exception as e:
-                logger.error(f"Fallback download failed: {e}")
-                state.last_error = f"Ошибка загрузки трека: {e}"
-                await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек.")
+                logger.error(f"Fallback m4a download failed: {e}")
+                state.last_error = f"Ошибка загрузки трека в формате m4a: {e}"
+                await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек в формате m4a.")
                 return
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
@@ -291,7 +312,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
             filepath.unlink(missing_ok=True)
             return
         with open(filepath, 'rb') as f:
-            logger.debug(f"Sending MP3 audio to chat {chat_id}: {info.get('title', 'Unknown')}")
+            logger.debug(f"Sending audio to chat {chat_id}: {info.get('title', 'Unknown')}")
             await context.bot.send_audio(
                 chat_id, f,
                 title=info.get("title", "Unknown"),
@@ -401,11 +422,14 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
         try:
             state: State = context.bot_data['state']
             if not state.is_on:
+                logger.debug("Radio is off, sleeping for 10 seconds")
                 await asyncio.sleep(10)
                 continue
             if not state.radio_playlist:
+                logger.debug("Playlist is empty, refilling")
                 await refill_playlist(context)
                 if not state.radio_playlist:
+                    logger.warning("Playlist still empty after refill")
                     state.last_error = "Не удалось найти треки"
                     await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
                     await asyncio.sleep(Constants.RETRY_INTERVAL)
@@ -429,10 +453,12 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Paused for {Constants.PAUSE_BETWEEN_TRACKS} seconds between tracks.")
             await update_status_panel(context, force=True)
         except asyncio.CancelledError:
+            logger.debug("Radio loop cancelled")
             break
         except Exception as e:
             logger.error(f"radio_loop error: {e}", exc_info=True)
             state.last_error = f"Ошибка radio_loop: {e}"
+            await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка радио: {e}")
             await asyncio.sleep(5)
 
 # --- UI ---
@@ -465,12 +491,12 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         lines.append("────────────────")
         text = "\n".join(lines)
 
-        logger.debug(f"Preparing to update status panel with text: {repr(text)}")
-
         if not text.strip():
-            logger.error("Attempted to send empty status message!")
+            logger.error("Generated empty status message")
             state.last_error = "Попытка отправки пустого сообщения статуса"
             return
+
+        logger.debug(f"Preparing to update status panel with text: {repr(text)}")
 
         last_status_text = context.bot_data.get('last_status_text')
         if not force and text == last_status_text:
@@ -626,6 +652,9 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     state: State = context.bot_data['state']
     state.source = context.args[0]
+    state.radio_playlist.clear()  # Очистить плейлист при смене источника
+    logger.info(f"Source switched to {state.source}, playlist cleared")
+    await refill_playlist(context)
     message = f"Источник переключен на: {state.source.title()}"
     logger.debug(f"Sending source message to {RADIO_CHAT_ID}: {message}")
     await update.message.reply_text(message)
@@ -926,13 +955,20 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         selected_genre = random.choice(winning_options)
         state.genre = selected_genre
+        logger.debug("Clearing playlist before refilling for new genre")
         state.radio_playlist.clear()
         logger.debug(f"Selected genre: {selected_genre}")
         await context.bot.send_message(RADIO_CHAT_ID, f"🎵 Новый жанр: *{state.genre.title()}*")
         await refill_playlist(context)
         if state.is_on and context.bot_data.get('radio_loop_task'):
-            context.bot_data['radio_loop_task'].cancel()
+            try:
+                context.bot_data['radio_loop_task'].cancel()
+                await context.bot_data['radio_loop_task']
+                logger.debug("Previous radio_loop task cancelled")
+            except asyncio.CancelledError:
+                pass
             context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
+            logger.debug("New radio_loop task started")
 
     state.active_poll_id = None
     state.poll_message_id = None
