@@ -666,7 +666,7 @@ def main():
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     
     logger.info("Starting bot polling...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
