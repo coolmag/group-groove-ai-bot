@@ -23,3 +23,8 @@ COPY . .
 
 # Command to run the application
 CMD ["python3", "main.py"]
+
+RUN apt-get update && apt-get install -y \
+    iproute2 \  # Сетевые инструменты
+    dnsutils \   # DNS-утилиты
+    && rm -rf /var/lib/apt/lists/*
