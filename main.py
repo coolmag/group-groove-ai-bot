@@ -135,6 +135,11 @@ def escape_markdown_v2(text: str) -> str:
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
     return escaped
 
+def set_escaped_error(state: State, error: str):
+    """Set state.last_error with escaped text."""
+    state.last_error = escape_markdown_v2(error) if error else None
+    logger.debug(f"Set escaped last_error: {repr(state.last_error)}")
+
 # --- Admin ---
 async def is_admin(user_id: int) -> bool:
     logger.debug(f"Checking if user {user_id} is admin. Admin IDs: {ADMIN_IDS}")
@@ -146,6 +151,8 @@ def admin_only(func):
         user_id = update.effective_user.id if update.effective_user else None
         if not user_id or not await is_admin(user_id):
             logger.warning(f"User {user_id} attempted admin command but is not authorized")
+            state: State = context.bot_data['state']
+            set_escaped_error(state, "Попытка неавторизованного доступа")
             await update.effective_message.reply_text("Эта команда только для администраторов.")
             return
         return await func(update, context, *args, **kwargs)
@@ -228,7 +235,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             
             if not tracks:
                 logger.warning(f"No tracks found on {state.source} for genre {state.genre} after attempt {attempt + 1}")
-                state.last_error = f"Не удалось найти треки на {state.source} для жанра {state.genre}"
+                set_escaped_error(state, f"Не удалось найти треки на {state.source} для жанра {state.genre}")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source} после фильтрации. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
                 if attempt == Constants.MAX_RETRIES - 1:
@@ -257,7 +264,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 return
             else:
                 logger.warning(f"No valid tracks after filtering on {state.source}. Reasons: {['Duration out of range' if not (Constants.MIN_DURATION <= t['duration'] <= Constants.MAX_DURATION) else 'Already played' for t in tracks]}")
-                state.last_error = f"Нет подходящих треков на {state.source} после фильтрации"
+                set_escaped_error(state, f"Нет подходящих треков на {state.source} после фильтрации")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source} после фильтрации. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
                 if attempt == Constants.MAX_RETRIES - 1:
@@ -268,7 +275,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
         except Exception as e:
             logger.error(f"Playlist refill failed on attempt {attempt + 1}: {e}", exc_info=True)
-            state.last_error = f"Ошибка при заполнении плейлиста: {e}"
+            set_escaped_error(state, f"Ошибка при заполнении плейлиста: {str(e)}")
             await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при заполнении плейлиста: {e}")
             state.retry_count += 1
             if attempt == Constants.MAX_RETRIES - 1:
@@ -281,7 +288,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts. Switching to SoundCloud and default genre.")
     state.source = "soundcloud"
     state.genre = Constants.DEFAULT_GENRE
-    state.last_error = f"Не удалось найти треки после нескольких попыток. Переключено на {state.source} с жанром {state.genre}."
+    set_escaped_error(state, f"Не удалось найти треки после нескольких попыток. Переключено на {state.source} с жанром {state.genre}.")
     await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось найти треки после нескольких попыток. Переключено на {state.source} с жанром {state.genre}.")
     await save_state_from_botdata(context.bot_data)
     await refill_playlist(context)
@@ -309,7 +316,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
     state: State = context.bot_data['state']
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         logger.error("FFmpeg or ffprobe not found in system")
-        state.last_error = "FFmpeg или ffprobe не установлен"
+        set_escaped_error(state, "FFmpeg или ffprobe не установлен")
         await context.bot.send_message(chat_id, "⚠️ Ошибка: FFmpeg или ffprobe не установлен на сервере.")
         return
 
@@ -318,7 +325,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         DOWNLOAD_DIR.mkdir(exist_ok=True)
     if not os.access(DOWNLOAD_DIR, os.W_OK):
         logger.error(f"Download directory {DOWNLOAD_DIR} is not writable")
-        state.last_error = "Нет доступа к директории downloads"
+        set_escaped_error(state, "Нет доступа к директории downloads")
         await context.bot.send_message(chat_id, "⚠️ Нет доступа к директории для загрузки.")
         return
 
@@ -345,7 +352,7 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         logger.debug(f"Downloaded file: {filepath}, format: {info.get('ext', 'unknown')}, audio codec: {info.get('acodec', 'unknown')}")
         if not filepath.exists():
             logger.error(f"MP3 file not found after conversion: {filepath}")
-            state.last_error = "Ошибка конвертации трека в MP3"
+            set_escaped_error(state, "Ошибка конвертации трека в MP3")
             await context.bot.send_message(chat_id, "⚠️ Ошибка конвертации трека в MP3.")
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
@@ -359,18 +366,18 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
                 logger.debug(f"Fallback to m4a: {filepath}")
                 if not filepath.exists():
                     logger.error(f"Fallback m4a file not found: {filepath}")
-                    state.last_error = "Ошибка загрузки трека даже в формате m4a"
+                    set_escaped_error(state, "Ошибка загрузки трека даже в формате m4a")
                     await context.bot.send_message(chat_id, "⚠️ Не удалось загрузить трек в формате m4a.")
                     return
             except Exception as e:
                 logger.error(f"Fallback m4a download failed: {e}")
-                state.last_error = f"Ошибка загрузки трека в формате m4a: {e}"
+                set_escaped_error(state, f"Ошибка загрузки трека в формате m4a: {str(e)}")
                 await context.bot.send_message(chat_id, f"⚠️ Не удалось загрузить трек в формате m4a: {e}")
                 return
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
             logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
-            state.last_error = "Трек слишком большой"
+            set_escaped_error(state, "Трек слишком большой")
             await context.bot.send_message(chat_id, "⚠️ Трек слишком большой для отправки.")
             filepath.unlink(missing_ok=True)
             return
@@ -385,11 +392,11 @@ async def download_and_send_to_chat(context: ContextTypes.DEFAULT_TYPE, url: str
         filepath.unlink(missing_ok=True)
     except asyncio.TimeoutError:
         logger.error(f"Download timeout for track {url}")
-        state.last_error = "Таймаут загрузки трека"
+        set_escaped_error(state, "Таймаут загрузки трека")
         await context.bot.send_message(chat_id, "⚠️ Время ожидания загрузки трека истекло.")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
-        state.last_error = f"Ошибка загрузки трека: {e}"
+        set_escaped_error(state, f"Ошибка загрузки трека: {str(e)}")
         error_msg = f"⚠️ Не удалось обработать трек: {e}"
         if "Sign in to confirm you’re not a bot" in str(e):
             error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
@@ -400,13 +407,13 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
     track_info = await check_track_validity(url)
     if not track_info or not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
         logger.warning(f"Track {url} is invalid or out of duration range")
-        state.last_error = "Недопустимый трек или неверная длительность"
+        set_escaped_error(state, "Недопустимый трек или неверная длительность")
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Недопустимый трек или неверная длительность.")
         return
 
     if not shutil.which("ffmpeg"):
         logger.error("FFmpeg not found in system")
-        state.last_error = "FFmpeg не установлен"
+        set_escaped_error(state, "FFmpeg не установлен")
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка: FFmpeg не установлен на сервере.")
         return
 
@@ -431,7 +438,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
         if not filepath.exists():
             logger.error(f"MP3 file not found after conversion: {filepath}")
-            state.last_error = "Ошибка конвертации трека в MP3"
+            set_escaped_error(state, "Ошибка конвертации трека в MP3")
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Ошибка конвертации трека в MP3.")
             ydl_opts['postprocessors'] = []
             try:
@@ -440,18 +447,18 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
                 filepath = Path(ydl.prepare_filename(info))
                 if not filepath.exists():
                     logger.error(f"Fallback download failed: {filepath}")
-                    state.last_error = "Ошибка загрузки трека даже без конвертации"
+                    set_escaped_error(state, "Ошибка загрузки трека даже без конвертации")
                     await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось загрузить трек.")
                     return
             except Exception as e:
                 logger.error(f"Fallback download failed: {e}")
-                state.last_error = f"Ошибка загрузки трека: {e}"
+                set_escaped_error(state, f"Ошибка загрузки трека: {str(e)}")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось загрузить трек: {e}")
                 return
         file_size = filepath.stat().st_size
         if file_size > Constants.MAX_FILE_SIZE:
             logger.warning(f"Track {url} exceeds max file size: {file_size} bytes")
-            state.last_error = "Трек слишком большой"
+            set_escaped_error(state, "Трек слишком большой")
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Трек слишком большой для отправки.")
             filepath.unlink(missing_ok=True)
             return
@@ -473,11 +480,11 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         await update_status_panel(context, force=True)
     except asyncio.TimeoutError:
         logger.error(f"Download timeout for track {url}")
-        state.last_error = "Таймаут загрузки трека"
+        set_escaped_error(state, "Таймаут загрузки трека")
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Время ожидания загрузки трека истекло.")
     except Exception as e:
         logger.error(f"Failed to download/send track {url}: {e}", exc_info=True)
-        state.last_error = f"Ошибка загрузки трека: {e}"
+        set_escaped_error(state, f"Ошибка загрузки трека: {str(e)}")
         error_msg = f"⚠️ Не удалось обработать трек: {e}"
         if "Sign in to confirm you’re not a bot" in str(e):
             error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
@@ -498,7 +505,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 await refill_playlist(context)
                 if not state.radio_playlist:
                     logger.warning("Playlist still empty after refill")
-                    state.last_error = "Не удалось найти треки"
+                    set_escaped_error(state, "Не удалось найти треки")
                     await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Не удалось найти треки. Попробую снова.")
                     await asyncio.sleep(Constants.RETRY_INTERVAL)
                     continue
@@ -525,7 +532,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             break
         except Exception as e:
             logger.error(f"radio_loop error: {e}", exc_info=True)
-            state.last_error = f"Ошибка radio_loop: {e}"
+            set_escaped_error(state, f"Ошибка radio_loop: {str(e)}")
             await asyncio.sleep(5)
 
 # --- UI ---
@@ -575,7 +582,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 
         if not text.strip():
             logger.error(f"Generated empty status message: {lines}")
-            state.last_error = "Попытка отправки пустого сообщения статуса"
+            set_escaped_error(state, "Попытка отправки пустого сообщения статуса")
             return
 
         logger.debug(f"Final status panel text: {repr(text)}")
@@ -617,14 +624,22 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 state.status_message_id = msg.message_id
             context.bot_data['last_status_text'] = text
             state.last_status_update = current_time
-            # Clear last_error to prevent reintroducing unescaped text
-            if state.last_error:
-                logger.debug(f"Clearing last_error: {state.last_error}")
-                state.last_error = None
+            # Clear last_error after successful update
+            logger.debug(f"Clearing last_error after successful update: {state.last_error}")
+            state.last_error = None
             await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
             logger.error(f"Failed to update status panel: {e}, problematic text: {repr(text)}")
-            state.last_error = f"Ошибка обновления статуса: {e}"
+            if "can't parse entities" in str(e):
+                # Log problematic text around byte offset
+                match = re.search(r"at byte offset (\d+)", str(e))
+                if match:
+                    offset = int(match.group(1))
+                    start = max(0, offset - 20)
+                    end = min(len(text.encode('utf-8')), offset + 20)
+                    problematic_snippet = text.encode('utf-8')[start:end].decode('utf-8', errors='replace')
+                    logger.error(f"Problematic text snippet around offset {offset}: {repr(problematic_snippet)}")
+            set_escaped_error(state, f"Ошибка обновления статуса: {str(e)}")
             if "Message to edit not found" in str(e):
                 state.status_message_id = None
                 await update_status_panel(context, force=True)
@@ -633,7 +648,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             elif "can't parse entities" in str(e):
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
                 # Fallback to plain text
-                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])', r'\1', text)
+                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])|[*~_]', r'\1', text)
                 logger.debug(f"Fallback plain text: {repr(plain_text)}")
                 try:
                     if state.status_message_id:
@@ -653,25 +668,30 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                     logger.debug("Fallback to plain text succeeded")
                     context.bot_data['last_status_text'] = plain_text
                     state.last_status_update = current_time
-                    # Clear last_error to prevent reintroducing unescaped text
-                    if state.last_error:
-                        logger.debug(f"Clearing last_error after fallback: {state.last_error}")
-                        state.last_error = None
+                    # Clear last_error after fallback
+                    logger.debug(f"Clearing last_error after fallback: {state.last_error}")
+                    state.last_error = None
                     await save_state_from_botdata(context.bot_data)
                 except TelegramError as e2:
                     logger.error(f"Fallback to plain text failed: {e2}, plain text: {repr(plain_text)}")
-                    state.last_error = f"Ошибка обновления без Markdown: {e2}"
+                    set_escaped_error(state, f"Ошибка обновления без Markdown: {str(e2)}")
                     await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при обновлении статуса: {e2}")
             else:
                 logger.error(f"Unexpected Telegram error: {e}")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при обновлении статуса: {e}")
+        finally:
+            # Ensure last_error is cleared even on failure to prevent accumulation
+            if state.last_error:
+                logger.debug(f"Clearing last_error in finally block: {state.last_error}")
+                state.last_error = None
+                await save_state_from_botdata(context.bot_data)
 
 # --- Commands ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message:
         logger.error("Invalid update: missing effective_user or message")
         state: State = context.bot_data['state']
-        state.last_error = "Ошибка: недопустимый запрос команды"
+        set_escaped_error(state, "Ошибка: недопустимый запрос команды")
         if update.message:
             await update.message.reply_text("⚠️ Ошибка: недопустимый запрос команды.")
         return
@@ -683,7 +703,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.effective_chat.id != RADIO_CHAT_ID:
         logger.warning(f"Command received in unauthorized chat {update.effective_chat.id}, expected {RADIO_CHAT_ID}")
-        state.last_error = f"Команда отправлена в неверный чат: {update.effective_chat.id}"
+        set_escaped_error(state, f"Команда отправлена в неверный чат: {update.effective_chat.id}")
         await update.message.reply_text(f"⚠️ Эта команда работает только в чате с ID {RADIO_CHAT_ID}.")
         return
 
@@ -731,8 +751,8 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await save_state_from_botdata(context.bot_data)
     except TelegramError as e:
         logger.error(f"Failed to send menu: {e}, text: {repr(text)}")
-        state.last_error = f"Ошибка отправки меню: {e}"
-        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])', r'\1', text)
+        set_escaped_error(state, f"Ошибка отправки меню: {str(e)}")
+        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}\.!&])|[*~_]', r'\1', text)
         try:
             await update.message.reply_text(
                 plain_text,
@@ -746,7 +766,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await save_state_from_botdata(context.bot_data)
         except TelegramError as e2:
             logger.error(f"Fallback to plain text menu failed: {e2}")
-            state.last_error = f"Ошибка отправки меню без Markdown: {e2}"
+            set_escaped_error(state, f"Ошибка отправки меню без Markdown: {str(e2)}")
             await update.message.reply_text(f"⚠️ Ошибка при открытии меню: {e2}")
 
 async def toggle_radio(context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
@@ -869,7 +889,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             info = await asyncio.to_thread(ydl.extract_info, query, download=False)
         if not info.get('entries'):
             logger.debug(f"No tracks found for query '{query}'")
-            state.last_error = "Треки не найдены"
+            set_escaped_error(state, "Треки не найдены")
             await message.edit_text("Треки не найдены. 😔")
             return
 
@@ -883,7 +903,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         if not filtered_tracks:
             logger.debug(f"No valid tracks found after filtering for query '{query}'")
-            state.last_error = "Нет подходящих треков по длительности"
+            set_escaped_error(state, "Нет подходящих треков по длительности")
             await message.edit_text("Нет подходящих треков по длительности. 😔")
             return
 
@@ -897,7 +917,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error in /play search: {e}", exc_info=True)
-        state.last_error = f"Ошибка поиска трека: {e}"
+        set_escaped_error(state, f"Ошибка поиска трека: {str(e)}")
         error_msg = f"Произошла ошибка при поиске: {e}"
         if "Sign in to confirm you’re not a bot" in str(e):
             error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
@@ -912,7 +932,7 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     except TelegramError as e:
         logger.error(f"Failed to answer play button callback: {e}")
         state: State = context.bot_data['state']
-        state.last_error = f"Ошибка ответа на callback: {e}"
+        set_escaped_error(state, f"Ошибка ответа на callback: {str(e)}")
         return
 
     command, data = query.data.split(":", 1)
@@ -927,7 +947,7 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"Failed to process play button callback: {e}", exc_info=True)
             state: State = context.bot_data['state']
-            state.last_error = f"Ошибка обработки трека: {e}"
+            set_escaped_error(state, f"Ошибка обработки трека: {str(e)}")
             error_msg = f"Не удалось обработать трек: {e}"
             if "Sign in to confirm you’re not a bot" in str(e):
                 error_msg += "\nYouTube требует авторизации. Используйте /source soundcloud или настройте YOUTUBE_COOKIES."
@@ -943,21 +963,21 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
     except TelegramError as e:
         logger.error(f"Failed to answer callback query: {e}")
-        state.last_error = f"Ошибка ответа на callback: {e}"
+        set_escaped_error(state, f"Ошибка ответа на callback: {str(e)}")
         return
 
     try:
         command, data = query.data.split(":", 1)
     except ValueError:
         logger.error(f"Invalid callback data format: {query.data}")
-        state.last_error = "Недопустимый формат callback"
+        set_escaped_error(state, "Недопустимый формат callback")
         await query.answer("Ошибка обработки команды.", show_alert=True)
         return
 
     if command == "radio":
         if not await is_admin(user_id):
             logger.warning(f"User {user_id} attempted radio command but is not admin")
-            state.last_error = "Попытка неавторизованного доступа"
+            set_escaped_error(state, "Попытка неавторизованного доступа")
             await query.answer("Эта команда только для администраторов.", show_alert=True)
             return
         if data == "refresh":
@@ -981,7 +1001,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif command == "vote":
         if not await is_admin(user_id):
             logger.warning(f"User {user_id} attempted vote command but is not admin")
-            state.last_error = "Попытка неавторизованного доступа"
+            set_escaped_error(state, "Попытка неавторизованного доступа")
             await query.answer("Эта команда только для администраторов.", show_alert=True)
             return
         if data == "start":
@@ -1017,11 +1037,11 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             await show_menu(update, context)
             await query.answer("Меню открыто. 📋")
         else:
-            state.last_error = "Команда недоступна"
+            set_escaped_error(state, "Команда недоступна")
             await query.answer("Команда недоступна.", show_alert=True)
     else:
         logger.warning(f"Unknown callback command: {command}")
-        state.last_error = f"Неизвестная команда: {command}"
+        set_escaped_error(state, f"Неизвестная команда: {command}")
         await query.answer("Неизвестная команда.")
 
 async def skip_track(context: ContextTypes.DEFAULT_TYPE):
@@ -1039,7 +1059,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
 
     if len(state.votable_genres) < 2:
         logger.debug("Not enough genres for voting.")
-        state.last_error = "Недостаточно жанров для голосования"
+        set_escaped_error(state, "Недостаточно жанров для голосования")
         await context.bot.send_message(RADIO_CHAT_ID, "Недостаточно жанров для голосования. 😔")
         return
 
@@ -1117,13 +1137,13 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
                 await save_state_from_botdata(context.bot_data)
             except Exception as e:
                 logger.error(f"Error in close_poll_after_timeout for poll {poll.poll.id}: {e}", exc_info=True)
-                state.last_error = f"Критическая ошибка голосования: {e}"
+                set_escaped_error(state, f"Критическая ошибка голосования: {str(e)}")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Критическая ошибка при завершении голосования: {e}")
 
         asyncio.create_task(close_poll_after_timeout())
     except TelegramError as e:
         logger.error(f"Failed to start poll: {e}")
-        state.last_error = f"Ошибка запуска голосования: {e}"
+        set_escaped_error(state, f"Ошибка запуска голосования: {str(e)}")
         await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Не удалось запустить голосование: {e}")
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
