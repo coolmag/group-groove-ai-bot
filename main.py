@@ -124,14 +124,15 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + "▁" * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-    """Escape special characters for MarkdownV2, handling additional edge cases."""
+    """Escape special characters for MarkdownV2, including periods."""
     if not text:
         return ""
-    # Extended special characters to escape, including ':' for error messages
-    special_chars = r'([_*[\]()~`>#+-=|{}.!:])'
+    # Extended special characters, explicitly including '.'
+    special_chars = r'([_*[\]()~`>#+-=|{}.!:\\])'
     escaped = re.sub(special_chars, r'\\\1', str(text))
-    # Ensure no double escapes or malformed sequences
+    # Remove double escapes and ensure proper escaping
     escaped = escaped.replace('\\\\', '\\')
+    # Log the escaped text for debugging
     logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
     return escaped
 
@@ -167,7 +168,7 @@ async def get_tracks_soundcloud(genre: str) -> List[dict]:
             {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
             for e in info.get("entries", [])
         ]
-        logger.debug(f"SoundCloud returned {len(tracks)} tracks for genre {genre}")
+        logger.debug(f"SoundCloud returned {len(tracks)} tracks for genre {genre}: {[t['title'] for t in tracks]}")
         return tracks
     except yt_dlp.YoutubeDLError as e:
         logger.error(f"SoundCloud search failed for genre {genre}: {e}")
@@ -191,7 +192,7 @@ async def get_tracks_youtube(genre: str) -> List[dict]:
             {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
             for e in info.get("entries", [])
         ]
-        logger.debug(f"YouTube returned {len(tracks)} tracks for genre {genre}")
+        logger.debug(f"YouTube returned {len(tracks)} tracks for genre {genre}: {[t['title'] for t in tracks]}")
         return tracks
     except yt_dlp.YoutubeDLError as e:
         logger.error(f"YouTube search failed for genre {genre}: {e}")
@@ -214,6 +215,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             tracks = await get_tracks_soundcloud(state.genre)
         elif source == "youtube":
             tracks = await get_tracks_youtube(state.genre)
+        logger.debug(f"Attempted refill from {source}, found {len(tracks)} tracks")
         return tracks
 
     for attempt in range(Constants.MAX_RETRIES):
@@ -232,13 +234,13 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
                 continue
 
-            logger.debug(f"Tracks before filtering: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in tracks]}")
+            logger.debug(f"Tracks before filtering: {[{'title': t['title'], 'duration': t['duration'], 'url': t['url']} for t in tracks]}")
             filtered_tracks = [
                 t for t in tracks
                 if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
                 and t["url"] not in state.played_radio_urls
             ]
-            logger.debug(f"Filtered tracks: {[{ 'title': t['title'], 'duration': t['duration'], 'url': t['url'] } for t in filtered_tracks]}")
+            logger.debug(f"Filtered tracks: {[{'title': t['title'], 'duration': t['duration'], 'url': t['url']} for t in filtered_tracks]}")
             urls = [t["url"] for t in filtered_tracks]
             if urls:
                 random.shuffle(urls)
@@ -248,9 +250,9 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Added {len(urls)} new tracks (filtered from {len(tracks)}). URLs: {urls}")
                 return
             else:
-                logger.warning(f"No valid tracks found after filtering on {state.source}. Retrying...")
-                state.last_error = "Нет подходящих треков"
-                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source}. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
+                logger.warning(f"No valid tracks after filtering on {state.source}. Reasons: {['Duration out of range' if not (Constants.MIN_DURATION <= t['duration'] <= Constants.MAX_DURATION) else 'Already played' for t in tracks]}")
+                state.last_error = "Нет подходящих треков после фильтрации"
+                await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Нет подходящих треков на {state.source} после фильтрации. Попробую снова ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
         except Exception as e:
@@ -590,7 +592,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             state.last_status_update = current_time
             await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
-            logger.warning(f"Failed to update status panel: {e}, problematic text: {repr(text)}")
+            logger.error(f"Failed to update status panel: {e}, problematic text: {repr(text)}")
             state.last_error = f"Ошибка обновления статуса: {e}"
             if "Message to edit not found" in str(e):
                 state.status_message_id = None
@@ -766,7 +768,7 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await refill_playlist(context)
     message = f"Источник переключен на: {escape_markdown_v2(state.source.title())}"
     if state.source == "youtube" and not YOUTUBE_COOKIES:
-        message += "\n⚠️ Для YouTube может потребоваться авторизация (YOUTUBE_COOKIES)."
+        message += "\n⚠️ Для YouTube может потребоваться авторизация. Настройте YOUTUBE_COOKIES или используйте /source soundcloud."
     logger.debug(f"Sending source message to {RADIO_CHAT_ID}: {message}")
     await update.message.reply_text(message, parse_mode="MarkdownV2")
     await save_state_from_botdata(context.bot_data)
