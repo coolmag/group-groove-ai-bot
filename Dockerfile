@@ -1,29 +1,33 @@
-# Use an official Python runtime as a parent image
+# Используем официальный образ Python
 FROM python:3.11-slim
 
-# Set the working directory in the container
-WORKDIR /app
+# Устанавливаем переменные окружения
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV DEBIAN_FRONTEND noninteractive
 
-# Install system dependencies, including ffmpeg and curl
-# We run apt-get update and install in one command to reduce image size
+# Устанавливаем системные зависимости и чистим кэш
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    iproute2 \
+    dnsutils \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-    iproute2 \  # Сетевые инструменты
-    dnsutils \   # DNS-утилиты
-    && rm -rf /var/lib/apt/lists/*
 
+# Создаем директорию приложения
+WORKDIR /app
 
-# Copy the requirements file into the container
+# Устанавливаем зависимости Python
 COPY requirements.txt .
-
-# Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code into the container
+# Копируем исходный код
 COPY . .
 
-# Command to run the application
-CMD ["python3", "main.py"]
+# Создаем директорию для загрузок и устанавливаем права
+RUN mkdir -p downloads \
+    && chmod 777 downloads
+
+# Команда запуска приложения
+CMD ["python", "main.py"]
