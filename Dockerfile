@@ -5,7 +5,6 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies, including ffmpeg and curl
-# We run apt-get update and install in one command to reduce image size
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -17,6 +16,12 @@ COPY requirements.txt .
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Update yt-dlp to the latest version
+RUN pip install -U yt-dlp
+
+# Create downloads directory with permissions
+RUN mkdir -p /app/downloads && chmod -R 777 /app/downloads
 
 # Copy the rest of the application code into the container
 COPY . .
