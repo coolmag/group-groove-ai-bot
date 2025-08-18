@@ -28,7 +28,7 @@ from asyncio import Lock
 # --- Check Pydantic Version ---
 try:
     import pydantic
-    logger = logging.getLogger(__name__)  # Define logger early for version check
+    logger = logging.getLogger(__name__)
     logger.info(f"Pydantic version: {pydantic.__version__}")
     if not pydantic.__version__.startswith("2."):
         raise ImportError(f"Pydantic version 2.x is required, but found version {pydantic.__version__}")
