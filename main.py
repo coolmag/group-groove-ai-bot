@@ -122,8 +122,12 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
 
 def escape_markdown_v2(text: str) -> str:
     """Escape special characters for MarkdownV2."""
+    if not text:
+        return ""
     special_chars = r'([_*[\]()~`>#+-=|{}.!])'
-    return re.sub(special_chars, r'\\\1', text)
+    escaped = re.sub(special_chars, r'\\\1', str(text))
+    logger.debug(f"Escaped MarkdownV2 text: {repr(text)} -> {repr(escaped)}")
+    return escaped
 
 # --- Admin ---
 async def is_admin(user_id: int) -> bool:
@@ -481,16 +485,17 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             f"**Источник**: {escape_markdown_v2(state.source.title())}"
         ]
         if state.now_playing:
-            elapsed = asyncio.get_event_loop().time() - state.now_playing.start_time
+            elapsed = current_time - state.now_playing.start_time
             progress = min(elapsed / state.now_playing.duration, 1.0) if state.now_playing.duration > 0 else 0
             progress_bar = get_progress_bar(progress)
             title = escape_markdown_v2(state.now_playing.title)
-            lines.append(f"**Сейчас играет**: {title} \$$ {format_duration(state.now_playing.duration)}\ $$")
+            duration = format_duration(state.now_playing.duration)
+            lines.append(f"**Сейчас играет**: {title} \\({duration}\\)")
             lines.append(f"**Прогресс**: {progress_bar} {int(progress * 100)}\\%")
         else:
             lines.append("**Сейчас играет**: Ожидание трека...")
         if state.active_poll_id:
-            lines.append(f"🗳 *Голосование активно* \$$ осталось ~{Constants.POLL_DURATION_SECONDS} сек\ $$")
+            lines.append(f"🗳 *Голосование активно* \\(осталось ~{Constants.POLL_DURATION_SECONDS} сек\\)")
         if state.last_error:
             lines.append(f"⚠️ **Последняя ошибка**: {escape_markdown_v2(state.last_error)}")
         lines.append("────────────────")
@@ -504,8 +509,11 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         logger.debug(f"Preparing to update status panel with text: {repr(text)}")
 
         last_status_text = context.bot_data.get('last_status_text', '')
-        if not force and text.replace('█', '').replace('▁', '') == last_status_text.replace('█', '').replace('▁', ''):
-            logger.debug("Status text unchanged (ignoring progress bar), skipping update")
+        # Compare without progress bar and percentage for more accurate change detection
+        current_no_progress = re.sub(r'█*▁*\s*\d+%', '', text)
+        last_no_progress = re.sub(r'█*▁*\s*\d+%', '', last_status_text)
+        if not force and current_no_progress == last_no_progress:
+            logger.debug("Status text unchanged (ignoring progress bar and percentage), skipping update")
             return
 
         keyboard = [
@@ -540,7 +548,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             state.last_status_update = current_time
             await save_state_from_botdata(context.bot_data)
         except TelegramError as e:
-            logger.warning(f"Failed to update status panel: {e}")
+            logger.warning(f"Failed to update status panel: {e}, problematic text: {repr(text)}")
             state.last_error = f"Ошибка обновления статуса: {e}"
             if "Message to edit not found" in str(e):
                 state.status_message_id = None
@@ -549,7 +557,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.debug("Message not modified, ignoring")
             elif "can't parse entities" in str(e):
                 logger.error(f"Markdown parsing error: {e}, text: {repr(text)}")
-                plain_text = text.replace('*', '').replace('_', '').replace('\\', '')
+                plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!])', r'\1', text)  # Remove escapes for plain text
                 try:
                     if state.status_message_id:
                         await context.bot.edit_message_text(
@@ -602,7 +610,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**Статус радио**: {'🟢 Включено' if state.is_on else '🔴 Выключено'}",
         f"**Текущий жанр**: {escape_markdown_v2(state.genre.title())}",
         f"**Голосование**: {'🗳 Активно' if state.active_poll_id else '⏳ Не активно'}",
-        f"**Сейчас играет**: {escape_markdown_v2(state.now_playing.title) if state.now_playing else 'Ничего не играет'}",
+        f"**Сейчас играет**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'Ничего не играет')}",
         f"**Последняя ошибка**: {escape_markdown_v2(state.last_error or 'Отсутствует')}",
         "",
         "📜 *Команды для всех:*",
@@ -635,7 +643,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         logger.error(f"Failed to send menu: {e}, text: {repr(text)}")
         state.last_error = f"Ошибка отправки меню: {e}"
-        plain_text = text.replace('*', '').replace('_', '').replace('\\', '')
+        plain_text = re.sub(r'\\([_*[\]()~`>#+-=|{}.!])', r'\1', text)
         try:
             await update.message.reply_text(
                 plain_text,
@@ -761,7 +769,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         keyboard = [
-            [InlineKeyboardButton(f"▶️ {escape_markdown_v2(t['title'])} \$$ {format_duration(t['duration'])}\ $$", callback_data=f"play_track:{t['url']}")]
+            [InlineKeyboardButton(f"▶️ {escape_markdown_v2(t['title'])} \\({format_duration(t['duration'])}\\)", callback_data=f"play_track:{t['url']}")]
             for t in filtered_tracks[:Constants.SEARCH_LIMIT]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
