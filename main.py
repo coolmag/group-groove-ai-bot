@@ -28,17 +28,17 @@ from asyncio import Lock
 # --- Constants ---
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
-    TRACK_INTERVAL_SECONDS = 10
+    TRACK_INTERVAL_SECONDS = 60  # Tracks change every 60 seconds
     POLL_DURATION_SECONDS = 60
     POLL_CHECK_TIMEOUT = 10
     MAX_FILE_SIZE = 50_000_000
-    MAX_DURATION = 1800  # 30 минут
-    MIN_DURATION = 30  # 30 секунд
+    MAX_DURATION = 60  # Max track duration for filtering
+    MIN_DURATION = 30  # Min track duration
     PLAYED_URLS_MEMORY = 100
     DOWNLOAD_TIMEOUT = 30
     DEFAULT_SOURCE = "soundcloud"
     DEFAULT_GENRE = "pop"
-    PAUSE_BETWEEN_TRACKS = 90
+    PAUSE_BETWEEN_TRACKS = 0  # No pause between tracks
     STATUS_UPDATE_INTERVAL = 10
     STATUS_UPDATE_MIN_INTERVAL = 2
     RETRY_INTERVAL = 90
@@ -80,8 +80,23 @@ class State(BaseModel):
     last_error: Optional[str] = None
     votable_genres: List[str] = Field(
         default_factory=lambda: [
-            "pop", "rock", "hip hop", "electronic", "classical", "jazz", "blues", "country",
-            "metal", "reggae", "folk", "indie", "rap", "r&b", "soul", "funk", "disco"
+            "pop", "pop 80s", "pop 90s", "pop 2000s",
+            "rock", "rock 60s", "rock 70s", "rock 80s", "rock 90s",
+            "hip hop", "hip hop 90s", "hip hop 2000s",
+            "electronic", "electronic 90s", "electronic 2000s",
+            "classical", "classical 18th century", "classical 19th century",
+            "jazz", "jazz 50s", "jazz 60s",
+            "blues", "blues 50s", "blues 60s",
+            "country", "country 80s", "country 90s",
+            "metal", "metal 80s", "metal 90s",
+            "reggae", "reggae 70s", "reggae 80s",
+            "folk", "folk 60s", "folk 70s",
+            "indie", "indie 90s", "indie 2000s",
+            "rap", "rap 80s", "rap 90s", "rap 2000s",
+            "r&b", "r&b 90s", "r&b 2000s",
+            "soul", "soul 60s", "soul 70s",
+            "funk", "funk 70s", "funk 80s",
+            "disco", "disco 70s", "disco 80s"
         ]
     )
     retry_count: int = 0
@@ -275,15 +290,15 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
         except Exception as e:
             logger.error(f"Playlist refill failed on attempt {attempt + 1}: {e}", exc_info=True)
-            set_escaped_error(state, f"Ошибка при заполнении плейлиста: {str(e)}")
+            set_escaped_error(state, f"Ошибка при заполнении плейлиста: {e}")
             await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при заполнении плейлиста: {e}")
             state.retry_count += 1
             if attempt == Constants.MAX_RETRIES - 1:
-                logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
-                state.genre = Constants.DEFAULT_GENRE
-                state.radio_playlist.clear()
-                state.played_radio_urls.clear()
-            await asyncio.sleep(Constants.RETRY_INTERVAL)
+                    logger.info(f"Switching to default genre: {Constants.DEFAULT_GENRE}")
+                    state.genre = Constants.DEFAULT_GENRE
+                    state.radio_playlist.clear()
+                    state.played_radio_urls.clear()
+                await asyncio.sleep(Constants.RETRY_INTERVAL)
 
     logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts. Switching to SoundCloud and default genre.")
     state.source = "soundcloud"
@@ -518,17 +533,15 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             await save_state_from_botdata(context.bot_data)
 
             context.bot_data['skip_event'].clear()
-            sleep_duration = state.now_playing.duration if state.now_playing and state.now_playing.duration > 0 else Constants.TRACK_INTERVAL_SECONDS
+            sleep_duration = min(state.now_playing.duration if state.now_playing and state.now_playing.duration > 0 else Constants.TRACK_INTERVAL_SECONDS, Constants.TRACK_INTERVAL_SECONDS)
             logger.info(f"Waiting for {sleep_duration} seconds for track.")
             try:
                 await asyncio.wait_for(context.bot_data['skip_event'].wait(), timeout=sleep_duration)
             except asyncio.TimeoutError:
-                logger.debug(f"Track {state.now_playing.title if state.now_playing else 'unknown'} finished playing")
-            # Update status panel immediately after track finishes
-            state.now_playing = None  # Clear now_playing to show "Ожидание трека..."
+                pass
             await update_status_panel(context, force=True)
-            logger.info(f"Paused for {Constants.PAUSE_BETWEEN_TRACKS} seconds between tracks.")
             await asyncio.sleep(Constants.PAUSE_BETWEEN_TRACKS)
+            logger.info(f"Paused for {Constants.PAUSE_BETWEEN_TRACKS} seconds between tracks.")
             await update_status_panel(context, force=True)
         except asyncio.CancelledError:
             logger.debug("Radio loop cancelled")
@@ -701,11 +714,10 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.error(f"Unexpected Telegram error: {e}")
                 await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Ошибка при обновлении статуса: {e}")
         finally:
-            # Ensure last_error is cleared even on failure to prevent accumulation
-            if state.last_error:
-                logger.debug(f"Clearing last_error in finally block: {state.last_error}")
-                state.last_error = None
-                await save_state_from_botdata(context.bot_data)
+            # Clear last_error after every attempt
+            logger.debug(f"Clearing last_error in finally block: {state.last_error}")
+            state.last_error = None
+            await save_state_from_botdata(context.bot_data)
 
 # --- Commands ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
