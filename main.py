@@ -1201,6 +1201,7 @@ def main():
     app.add_handler(CommandHandler(["vote", "v"], vote_command))
     app.add_handler(CommandHandler(["refresh", "r"], refresh_command))
     app.add_handler(CommandHandler(["source", "src"], set_source_command))
+    app.add_handler(CommandHandler(["reset"], reset_command))
     app.add_handler(CommandHandler(["play", "p"], play_command))
     
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern=r"^play_track:"))
