@@ -518,7 +518,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         # Prepare status text
         status_lines = [
             "**Radio Groove AI**",
-            f"**Status**: {{'[ON]' if state.is_on else '[OFF]'}}",
+            f"**Status**: {'[ON]' if state.is_on else '[OFF]'}",
             f"**Genre**: {escape_markdown_v2(state.genre.title())}",
             f"**Source**: {escape_markdown_v2(state.source.title())}"
         ]
@@ -995,7 +995,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     menu_text = [
         "**Groove AI Radio**",
-        f"**Status**: {{'[ON]' if state.is_on else '[OFF]'}}",
+        f"**Status**: {'[ON]' if state.is_on else '[OFF]'}",
         f"**Genre**: {escape_markdown_v2(state.genre.title())}",
         f"**Source**: {escape_markdown_v2(state.source.title())}",
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'None')}",
