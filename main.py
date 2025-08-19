@@ -330,7 +330,7 @@ async def check_track_validity(url: str) -> Optional[dict]:
         logger.error(f"Track validity check failed for {url}: {e}")
         return None
 
-async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
+async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) -> int:
     state: State = context.bot_data['state']
     track_info = await check_track_validity(url)
     if not track_info:
@@ -338,14 +338,15 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Invalid track URL.")
         state.now_playing = None
         await update_status_panel(context, force=True)
-        return
+        return 0
     
-    if not (Constants.MIN_DURATION <= track_info["duration"] <= Constants.MAX_DURATION):
-        set_escaped_error(state, f"Duration out of range ({track_info['duration']}s)")
-        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Track duration out of range ({track_info['duration']}s).")
+    duration = track_info.get("duration", 0)
+    if not (Constants.MIN_DURATION <= duration <= Constants.MAX_DURATION):
+        set_escaped_error(state, f"Duration out of range ({duration}s)")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Track duration out of range ({duration}s).")
         state.now_playing = None
         await update_status_panel(context, force=True)
-        return
+        return 0
 
     DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
     if not os.access(DOWNLOAD_DIR, os.W_OK):
@@ -353,7 +354,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Download directory not writable.")
         state.now_playing = None
         await update_status_panel(context, force=True)
-        return
+        return 0
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -375,40 +376,41 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
 
     filepath = None
     try:
-        # First attempt with MP3
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-        filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
         
-        # If MP3 failed, try M4A
-        if not filepath.exists():
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'm4a',
-                'preferredquality': '192',
-            }]
+        filepath_mp3 = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
+        filepath_m4a = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
+
+        if filepath_mp3.exists():
+            filepath = filepath_mp3
+        elif filepath_m4a.exists():
+            filepath = filepath_m4a
+        else:
+            # Fallback to m4a if mp3 failed
+            ydl_opts['postprocessors'][0]['preferredcodec'] = 'm4a'
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
             filepath = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
-            
-        if not filepath.exists():
+
+        if not filepath or not filepath.exists():
             set_escaped_error(state, "Failed to download track")
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Failed to download track.")
             state.now_playing = None
             await update_status_panel(context, force=True)
-            return
+            return 0
 
         if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
             set_escaped_error(state, "Track exceeds max file size")
             await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track too large to send.")
             state.now_playing = None
             await update_status_panel(context, force=True)
-            filepath.unlink(missing_ok=True)
-            return
+            return 0
 
+        track_duration = int(info.get("duration", 0))
         state.now_playing = NowPlaying(
             title=info.get("title", "Unknown Track"),
-            duration=int(info.get("duration", 0)),
+            duration=track_duration,
             url=url
         )
         await update_status_panel(context, force=True)
@@ -422,16 +424,20 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str):
                 performer=info.get("uploader", "Unknown Artist")
             )
         logger.info(f"Sent track: {state.now_playing.title}")
+        return track_duration
         
     except asyncio.TimeoutError:
         set_escaped_error(state, "Track download timeout")
         await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Track download timed out.")
+        return 0
     except TelegramError as e:
         set_escaped_error(state, f"Telegram error: {e}")
         await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Telegram error: {e}")
+        return 0
     except Exception as e:
         set_escaped_error(state, f"Track processing error: {e}")
         await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Track processing error: {e}")
+        return 0
     finally:
         state.now_playing = None
         await update_status_panel(context, force=True)
@@ -473,7 +479,8 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             await save_state_from_botdata(context.bot_data)
             
             # Wait for the track duration plus the configured pause
-            sleep_time = track_duration + Constants.PAUSE_BETWEEN_TRACKS
+            # Ensure track_duration is a valid number before sleeping
+            sleep_time = (track_duration or 0) + Constants.PAUSE_BETWEEN_TRACKS
             
             logger.debug(f"Waiting for {sleep_time} seconds until next track")
             await asyncio.sleep(sleep_time)
