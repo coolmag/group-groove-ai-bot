@@ -46,6 +46,7 @@ class Constants:
     RETRY_INTERVAL = 30
     SEARCH_LIMIT = 50
     MAX_RETRIES = 3
+    REFILL_THRESHOLD = 10
 
 # --- Setup ---
 load_dotenv()
@@ -111,7 +112,7 @@ class State(BaseModel):
             "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
             "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
             "electropop", "trap"
-        ]))) 
+        ])))
     )
     retry_count: int = 0
 
@@ -126,6 +127,7 @@ class State(BaseModel):
 
 state_lock = Lock()
 status_lock = Lock()
+refill_lock = Lock()
 
 # --- State ---
 def load_state() -> State:
@@ -317,6 +319,19 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to {state.source}/{state.genre}.")
     await save_state_from_botdata(context.bot_data)
 
+async def _refill_playlist_if_needed(context: ContextTypes.DEFAULT_TYPE):
+    """Checks if the playlist is running low and refills it in the background."""
+    state: State = context.bot_data['state']
+    if len(state.radio_playlist) < Constants.REFILL_THRESHOLD:
+        if refill_lock.locked():
+            logger.info("Refill is already in progress.")
+            return
+        
+        async with refill_lock:
+            logger.info("Playlist running low, starting background refill...")
+            await refill_playlist(context)
+            logger.info("Background playlist refill complete.")
+
 # --- Download & send ---
 async def check_track_validity(url: str) -> Optional[dict]:
     ydl_opts = {
@@ -469,15 +484,14 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 logger.info("Radio is off, sleeping")
                 await asyncio.sleep(10)
                 continue
+
+            # Proactively refill playlist
+            asyncio.create_task(_refill_playlist_if_needed(context))
                 
             if not state.radio_playlist:
-                logger.info("Playlist empty, refilling")
-                await refill_playlist(context)
-                
-                if not state.radio_playlist:
-                    logger.warning("Still no tracks after refill")
-                    await asyncio.sleep(Constants.RETRY_INTERVAL)
-                    continue
+                logger.warning("Playlist is empty, waiting for refill...")
+                await asyncio.sleep(Constants.RETRY_INTERVAL)
+                continue
             
             url = state.radio_playlist.popleft()
             state.played_radio_urls.append(url)
@@ -517,8 +531,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 
         # Prepare status text
         status_lines = [
-            "**Radio Groove AI**",
-            f"**Status**: {'[ON]' if state.is_on else '[OFF]'}",
+            f"\U0001F3B5 *Radio Groove AI* \U0001F3B5",
+            f"**Status**: {'\U0001F7E2 ON' if state.is_on else '\U0001F534 OFF'}",
             f"**Genre**: {escape_markdown_v2(state.genre.title())}",
             f"**Source**: {escape_markdown_v2(state.source.title())}"
         ]
@@ -534,27 +548,27 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             status_lines.append("**Now Playing**: _Idle_")
             
         if state.active_poll_id:
-            status_lines.append(f"**Active Poll** (ends in ~{Constants.POLL_DURATION_SECONDS} sec)")
+            status_lines.append(f"\U0001F4DC **Active Poll** (ends in ~{Constants.POLL_DURATION_SECONDS} sec)")
             
         if state.last_error:
-            status_lines.append(f"[ERR] **Last Error**: {state.last_error}")
+            status_lines.append(f"\U000026A0\U0000FE0F **Last Error**: {state.last_error}")
             
         status_text = "\n".join(status_lines)
         
         # Prepare keyboard
         keyboard = []
         keyboard.append([
-            InlineKeyboardButton("Refresh", callback_data="radio:refresh"),
-            InlineKeyboardButton("Skip" if state.is_on else "Start", callback_data="radio:skip" if state.is_on else "radio:on")
+            InlineKeyboardButton("\U0001F504 Refresh", callback_data="radio:refresh"),
+            InlineKeyboardButton(f"{'\u23ED\ufe0f Skip' if state.is_on else '\u25B6\ufe0f Start'}", callback_data="radio:skip" if state.is_on else "radio:on")
         ])
         
         if state.is_on and not state.active_poll_id:
-            keyboard.append([InlineKeyboardButton("Vote", callback_data="vote:start")])
+            keyboard.append([InlineKeyboardButton("\U0001F4DC Vote", callback_data="vote:start")])
             
         if state.is_on:
-            keyboard.append([InlineKeyboardButton("Stop", callback_data="radio:off")])
+            keyboard.append([InlineKeyboardButton("\u23F9\ufe0f Stop", callback_data="radio:off")])
             
-        keyboard.append([InlineKeyboardButton("Menu", callback_data="cmd:menu")])
+        keyboard.append([InlineKeyboardButton("\U0001F4CB Menu", callback_data="cmd:menu")])
         
         try:
             # Delete the old message to prevent clutter
@@ -588,39 +602,47 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.error(f"Complete failure in status update: {final_e}")
 
 
-
 # --- Commands ---
+async def _start_radio_logic(context: ContextTypes.DEFAULT_TYPE):
+    """The core logic for starting the radio, designed to be run in the background."""
+    state: State = context.bot_data['state']
+    
+    # Ensure previous task is cancelled if it exists
+    if 'radio_loop_task' in context.bot_data and not context.bot_data['radio_loop_task'].done():
+        context.bot_data['radio_loop_task'].cancel()
+        try:
+            await context.bot_data['radio_loop_task']
+        except asyncio.CancelledError:
+            pass # This is expected
+
+    # Clear old playlist data
+    state.now_playing = None
+    state.radio_playlist.clear()
+    state.played_radio_urls.clear()
+    
+    # Start the main radio loop
+    context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
+    
+    # Initial playlist refill
+    await refill_playlist(context)
+    await update_status_panel(context, force=True)
+
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     
-    if turn_on and state.is_on:
-        await update.message.reply_text("Radio is already running!")
-        return
-    if not turn_on and not state.is_on:
-        await update.message.reply_text("Radio is already stopped!")
-        return
-        
-    state.is_on = turn_on
-    
     if turn_on:
-        # Start radio loop
-        state.now_playing = None
-        state.radio_playlist.clear()
-        state.played_radio_urls.clear()
-        
-        if 'radio_loop_task' in context.bot_data:
-            try:
-                context.bot_data['radio_loop_task'].cancel()
-                await context.bot_data['radio_loop_task']
-            except asyncio.CancelledError:
-                pass
-                
-        context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
-        await refill_playlist(context)
-        await update.message.reply_text("Radio started!")
+        if state.is_on:
+            await update.message.reply_text("Radio is already running!")
+            return
+        state.is_on = True
+        await update.message.reply_text("\U0001F680 Radio starting... Searching for music.")
+        asyncio.create_task(_start_radio_logic(context))
     else:
-        # Stop radio loop
+        if not state.is_on:
+            await update.message.reply_text("Radio is already stopped!")
+            return
+        state.is_on = False
         if 'radio_loop_task' in context.bot_data:
             context.bot_data['radio_loop_task'].cancel()
             try:
@@ -631,7 +653,7 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
             
         state.now_playing = None
         state.radio_playlist.clear()
-        await update.message.reply_text("Radio stopped!")
+        await update.message.reply_text("\U0001F517 Radio stopped!")
         
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
@@ -650,7 +672,7 @@ async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         del context.bot_data['radio_loop_task']
     
-    await update.message.reply_text("Bot stopping...")
+    await update.message.reply_text("\U0001F6D1 Bot stopping...")
     await save_state_from_botdata(context.bot_data)
     
     # Schedule shutdown
@@ -660,19 +682,19 @@ async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     state.now_playing = None
-    await update.message.reply_text("Skipping current track...")
+    await update.message.reply_text("\u23ED\ufe0f Skipping current track...")
     await update_status_panel(context, force=True)
     await save_state_from_botdata(context.bot_data)
 
 @admin_only
 async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_vote(context)
-    await update.message.reply_text("Starting genre vote...")
+    await update.message.reply_text("\U0001F4DC Starting genre vote...")
 
 @admin_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status_panel(context, force=True)
-    await update.message.reply_text("Status refreshed!")
+    await update.message.reply_text("\U0001F504 Status refreshed!")
 
 @admin_only
 async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -703,13 +725,13 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             CONFIG_FILE.unlink()
             await update.message.reply_text(
-                "State file (radio_config.json) deleted. "
+                "\u2705 State file (radio_config.json) deleted. "
                 "Restarting the bot to apply default settings..."
             )
             # Gracefully stop the application to allow Railway to restart it.
             asyncio.create_task(context.application.stop())
         except Exception as e:
-            await update.message.reply_text(f"Could not delete state file: {e}")
+            await update.message.reply_text(f"\u274C Could not delete state file: {e}")
     else:
         await update.message.reply_text("No state file to delete.")
 
@@ -720,7 +742,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     query = " ".join(context.args)
     state: State = context.bot_data['state']
-    message = await update.message.reply_text(f'Searching for "{query}"...')
+    message = await update.message.reply_text(f'\U0001F50D Searching for "{query}"...')
 
     try:
         # Determine search prefix based on current source
@@ -740,7 +762,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             info = await asyncio.to_thread(ydl.extract_info, query, download=False)
             
         if not info or 'entries' not in info or not info['entries']:
-            await message.edit_text("No tracks found.")
+            await message.edit_text("No tracks found. \U0001F614")
             return
             
         tracks = []
@@ -754,7 +776,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
         
         if not tracks:
-            await message.edit_text("No tracks found.")
+            await message.edit_text("No tracks found. \U0001F614")
             return
             
         # Create keyboard with track options
@@ -763,7 +785,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = track['title'][:30] + "..." if len(track['title']) > 30 else track['title']
             duration = format_duration(track['duration'])
             keyboard.append([InlineKeyboardButton(
-                f"Play {title} ({duration})",
+                f"\u25B6\ufe0f {title} ({duration})",
                 callback_data=f"play_track:{track['url']}"
             )])
             
@@ -784,7 +806,7 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
         
     url = query.data.split(":", 1)[1]
-    await query.edit_message_text("Downloading track...")
+    await query.edit_message_text("\u2B07\ufe0f Downloading track...")
     
     try:
         # Download and send the track
@@ -827,7 +849,7 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     performer=info.get('uploader', 'Unknown Artist')
                 )
                 
-        await query.edit_message_text("Track sent!")
+        await query.edit_message_text("\u2705 Track sent!")
         
     except Exception as e:
         logger.error(f"Track download failed: {e}")
@@ -843,11 +865,11 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     
     try:
         command, action = query.data.split(":", 1)
     except ValueError:
+        await query.answer() # Answer silently
         return
         
     state: State = context.bot_data['state']
@@ -858,23 +880,27 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
             
         if action == "refresh":
+            await query.answer()
             await update_status_panel(context, force=True)
-            await query.answer("Status refreshed!")
             
         elif action == "skip":
+            await query.answer("Skipping track...")
             state.now_playing = None
             await update_status_panel(context, force=True)
-            await query.answer("Skipping track...")
             
         elif action == "on":
+            if state.is_on:
+                await query.answer("Radio is already running!")
+                return
             state.is_on = True
-            if 'radio_loop_task' not in context.bot_data:
-                context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
-            await refill_playlist(context)
-            await update_status_panel(context, force=True)
-            await query.answer("Radio started!")
+            await query.answer("Radio starting...")
+            await context.bot.send_message(RADIO_CHAT_ID, "\U0001F680 Radio starting... Searching for music.")
+            asyncio.create_task(_start_radio_logic(context))
             
         elif action == "off":
+            if not state.is_on:
+                await query.answer("Radio is already stopped!")
+                return
             state.is_on = False
             if 'radio_loop_task' in context.bot_data:
                 context.bot_data['radio_loop_task'].cancel()
@@ -884,7 +910,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
                     pass
                 del context.bot_data['radio_loop_task']
             await update_status_panel(context, force=True)
-            await query.answer("Radio stopped!")
+            await query.answer("\U0001F517 Radio stopped!")
             
     elif command == "vote":
         if not await is_admin(query.from_user.id):
@@ -892,19 +918,18 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
             
         if action == "start":
+            await query.answer()
             await start_vote(context)
-            await query.answer("Vote started!")
             
     elif command == "cmd":
-        if action == "menu":
-            await show_menu(update, context)
-            await query.answer("Menu opened!")
+        await query.answer()
+        await show_menu(update, context)
 
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     
     if state.active_poll_id:
-        await context.bot.send_message(RADIO_CHAT_ID, "There's already an active poll!")
+        await context.bot.send_message(RADIO_CHAT_ID, "\U0001F4DC There's already an active poll!")
         return
         
     if len(state.votable_genres) < 3:
@@ -917,7 +942,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     try:
         message = await context.bot.send_poll(
             chat_id=RADIO_CHAT_ID,
-            question="Choose the next music genre:",
+            question="\U0001F3B5 Choose the next music genre:",
             options=[g.title() for g in options],
             is_anonymous=False,
             allows_multiple_answers=False,
@@ -929,7 +954,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         state.poll_options = options
         state.poll_votes = [0] * len(options)
         
-        await context.bot.send_message(RADIO_CHAT_ID, "Genre vote started! Vote above")
+        await context.bot.send_message(RADIO_CHAT_ID, "\U0001F4DC Genre vote started! Vote above \U0001F446")
         await save_state_from_botdata(context.bot_data)
         
     except Exception as e:
@@ -969,7 +994,7 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             RADIO_CHAT_ID,
-            f"New genre selected: *{{escape_markdown_v2(new_genre.title())}}*",
+            f"\U0001F3B5 New genre selected: *{escape_markdown_v2(new_genre.title())}*",
             parse_mode="MarkdownV2"
         )
         
@@ -994,13 +1019,13 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin_user = await is_admin(update.effective_user.id)
     
     menu_text = [
-        "**Groove AI Radio**",
-        f"**Status**: {'[ON]' if state.is_on else '[OFF]'}",
+        f"\U0001F3B5 *Groove AI Radio* \U0001F3B5",
+        f"**Status**: {'\U0001F7E2 ON' if state.is_on else '\U0001F534 OFF'}",
         f"**Genre**: {escape_markdown_v2(state.genre.title())}",
         f"**Source**: {escape_markdown_v2(state.source.title())}",
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'None')}",
         "",
-        "**Commands**:",
+        "\U0001F4BF *Commands*:",
         "/play <query> - Search and play a track",
         "/menu - Show this menu",
     ]
@@ -1008,7 +1033,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin_user:
         menu_text.extend([
             "",
-            "**Admin Commands**:",
+            "\U0001F451 *Admin Commands*:",
             "/ron - Start radio",
             "/roff - Stop radio",
             "/skip - Skip current track",
@@ -1019,18 +1044,18 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     
     keyboard = [
-        [InlineKeyboardButton("Play Track", callback_data="cmd:play")],
-        [InlineKeyboardButton("Menu", callback_data="cmd:menu")]
+        [InlineKeyboardButton("\U0001F3B5 Play Track", callback_data="cmd:play")],
+        [InlineKeyboardButton("\U0001F4CB Menu", callback_data="cmd:menu")]
     ]
     
     if is_admin_user:
         keyboard.insert(0, [
-            InlineKeyboardButton("Start", callback_data="radio:on"),
-            InlineKeyboardButton("Stop", callback_data="radio:off")
+            InlineKeyboardButton("\u25B6\ufe0f Start", callback_data="radio:on"),
+            InlineKeyboardButton("\u23F9\ufe0f Stop", callback_data="radio:off")
         ])
         keyboard.insert(1, [
-            InlineKeyboardButton("Skip", callback_data="radio:skip"),
-            InlineKeyboardButton("Vote", callback_data="vote:start")
+            InlineKeyboardButton("\u23ED\ufe0f Skip", callback_data="radio:skip"),
+            InlineKeyboardButton("\U0001F4DC Vote", callback_data="vote:start")
         ])
     
     full_text = "\n".join(menu_text)
@@ -1218,7 +1243,7 @@ def main():
     app.add_handler(CommandHandler(["play", "p"], play_command))
     
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern=r"^play_track:"))
-    app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern=r"^(radio|vote|cmd):\""))
+    app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern=r"^(radio|vote|cmd):\)"))
     
     app.add_handler(PollHandler(handle_poll))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
