@@ -161,14 +161,12 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + " " * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-     if not isinstance(text, str) or not text:
-         return ""
-     escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{',
-     '}', '.', '!']
-     for char in escape_chars:
-         # Эта строка ПРАВИЛЬНАЯ. Присутствует `\\`
-         text = text.replace(char, f'\\{char}')
-     return text
+    if not isinstance(text, str) or not text:
+        return ""
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None
@@ -1082,19 +1080,27 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
         if chat_member.status != "administrator":
             logger.error(f"Bot is not an administrator in chat {RADIO_CHAT_ID}. Current status: {chat_member.status}")
+            await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Bot is not an administrator. Please grant admin rights.")
             return False
 
         # Check for specific admin rights
         required_rights = {
             "can_send_messages": getattr(chat_member, 'can_send_messages', False),
             "can_send_audios": getattr(chat_member, 'can_send_audios', False),
-            "can_manage_messages": getattr(chat_member, 'can_manage_messages', False), # For updating status panel
+            "can_manage_messages": getattr(chat_member, 'can_manage_messages', False),
+            "can_send_polls": getattr(chat_member, 'can_send_polls', False),
         }
 
         missing_rights = [right for right, has_it in required_rights.items() if not has_it]
 
         if missing_rights:
+            error_msg = "⚠️ Bot lacks required admin permissions:\n"
+            for right in missing_rights:
+                error_msg += f"• `{right}`\n"
+            error_msg += "\nPlease grant these permissions and restart the bot."
+            
             logger.error(f"Bot is an admin but lacks required permissions in chat {RADIO_CHAT_ID}: {', '.join(missing_rights)}")
+            await context.bot.send_message(RADIO_CHAT_ID, error_msg, parse_mode="MarkdownV2")
             return False
 
         logger.info(f"Bot has all required permissions in chat {RADIO_CHAT_ID}.")
@@ -1102,9 +1108,11 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
     except TelegramError as e:
         logger.error(f"Telegram API error during permission check for chat {RADIO_CHAT_ID}: {e}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Telegram API error during permission check: {e}")
         return False
     except Exception as e:
         logger.error(f"Unexpected error during permission check for chat {RADIO_CHAT_ID}: {e}")
+        await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Unexpected error during permission check: {e}")
         return False
 
 async def post_init(application: Application):
@@ -1136,39 +1144,43 @@ async def post_init(application: Application):
         await application.bot.send_message(RADIO_CHAT_ID, "⚠️ FFmpeg not installed!")
         return
         
-    # Check permissions
+    # 1. Check Privacy Mode first - this is the most common and blocking issue.
+    try:
+        bot_info = await application.bot.get_me()
+        # Note: can_read_all_group_messages is False when privacy is ON. We want it to be True.
+        if getattr(bot_info, 'can_read_all_group_messages', True) is False:
+            logger.error("Privacy mode is enabled. Bot will not receive poll answers.")
+            await application.bot.send_message(
+                RADIO_CHAT_ID,
+                "⚠️ **Critical Error: Privacy Mode is enabled.**\n\n"
+                "The bot cannot receive poll answers or most messages from users.\n"
+                "Please disable it via @BotFather:\n"
+                "1. Open @BotFather\n"
+                "2. Select your bot (`@Aigrooves_bot`)\n"
+                "3. Go to `Bot Settings` -> `Group Privacy`\n"
+                "4. Click '***Turn off***'.\n\n"
+                "After turning it off, please **restart the bot** on the hosting.",
+                parse_mode="MarkdownV2"
+            )
+            return # Stop initialization if privacy is on
+    except Exception as e:
+        logger.error(f"Could not check privacy mode: {e}")
+        # Continue anyway, but this is a bad sign
+
+    # 2. If privacy is off, check for specific admin rights.
     if not await check_bot_permissions(application):
-        logger.error("Permission check failed!")
+        logger.error("Permission check failed! See chat for details.")
         state.last_error = "Bot lacks required permissions"
+        return # Stop initialization if permissions are missing
         
-        # Проверка на режим конфиденциальности
-        try:
-            bot_info = await application.bot.get_me()
-            privacy_mode = getattr(bot_info, 'can_read_all_group_messages', False)
-            
-            if privacy_mode:
-                await application.bot.send_message(
-                    RADIO_CHAT_ID,
-                    "⚠️ Privacy mode is enabled! Please disable it via @BotFather:\n"
-                    "1. Open @BotFather\n"
-                    "2. Select your bot\n"
-                    "3. Send /setprivacy\n"
-                    "4. Choose 'Disable'"
-                )
-            else:
-                await application.bot.send_message(
-                    RADIO_CHAT_ID,
-                    "⚠️ Bot lacks permissions in chat! Please make the bot an admin with:\n"
-                    "- Send messages\n"
-                    "- Send audio\n"
-                    "- Manage messages\n\n"
-                    "After fixing, restart the bot."
-                )
-        except Exception as e:
-            logger.error(f"Error sending permission message: {e}")
-            
-        return
-        
+    # Clear any stale poll from a previous run
+    if state.active_poll_id:
+        logger.warning("Active poll found in state on startup. Resetting due to possible bot restart.")
+        state.active_poll_id = None
+        state.poll_message_id = None
+        state.poll_options = []
+        state.poll_votes = []
+
     # Start radio if enabled
     if state.is_on:
         logger.info("Starting radio loop")
