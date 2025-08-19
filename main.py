@@ -469,17 +469,12 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 state.played_radio_urls.popleft()
             
             logger.info(f"Playing track: {url}")
-            await download_and_send_track(context, url)
+            track_duration = await download_and_send_track(context, url)
             await save_state_from_botdata(context.bot_data)
             
-            # Calculate sleep time based on track duration
-            sleep_time = 0
-            if state.now_playing and state.now_playing.duration > 0:
-                sleep_time = state.now_playing.duration
+            # Wait for the track duration plus the configured pause
+            sleep_time = track_duration + Constants.PAUSE_BETWEEN_TRACKS
             
-            # Add a small pause between tracks if configured
-            sleep_time += Constants.PAUSE_BETWEEN_TRACKS
-
             logger.debug(f"Waiting for {sleep_time} seconds until next track")
             await asyncio.sleep(sleep_time)
             
