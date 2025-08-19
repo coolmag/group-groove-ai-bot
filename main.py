@@ -1246,7 +1246,7 @@ def main():
     app.add_handler(CommandHandler(["play", "p"], play_command))
     
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern=r"^play_track:"))
-    app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern=r"^(radio|vote|cmd):\)"))
+    app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern=r"^(radio|vote|cmd):"))
     
     app.add_handler(PollHandler(handle_poll))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
