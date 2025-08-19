@@ -85,6 +85,7 @@ class State(BaseModel):
     last_error: Optional[str] = None
     votable_genres: List[str] = Field(
         default_factory=lambda: sorted(list(set([
+            # Old list
             "pop", "pop 80s", "pop 90s", "pop 2000s",
             "rock", "rock 60s", "rock 70s", "rock 80s", "rock 90s",
             "hip hop", "hip hop 90s", "hip hop 2000s",
@@ -101,7 +102,14 @@ class State(BaseModel):
             "r&b", "r&b 90s", "r&b 2000s",
             "soul", "soul 60s", "soul 70s",
             "funk", "funk 70s", "funk 80s",
-            "disco", "disco 70s", "disco 80s"
+            "disco", "disco 70s", "disco 80s",
+            # New list
+            "rock 'n' roll", "doo-wop", "folk rock",
+            "psychedelic rock", "hard rock", "glam rock",
+            "punk rock", "heavy metal", "hip-hop", "new wave",
+            "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
+            "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
+            "electropop", "trap"
         ])))
     )
     retry_count: int = 0
@@ -155,9 +163,10 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    # Escape all special characters for Telegram MarkdownV2
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([\\{re.escape(escape_chars)}])', r'\\\1', text)
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\{char}')
+    return text
 
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None
@@ -571,11 +580,12 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 # Fallback without markdown
                 await context.bot.send_message(
                     RADIO_CHAT_ID,
-                    re.sub(r'*|_|`', '', status_text),
+                    re.sub(r'[*_`]', '', status_text),
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             except Exception as final_e:
                 logger.error(f"Complete failure in status update: {final_e}")
+
 
 
 # --- Commands ---
