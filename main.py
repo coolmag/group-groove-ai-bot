@@ -165,7 +165,7 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in escape_chars:
-        text = text.replace(char, f'\{char}')
+        text = text.replace(char, f'\\{char}')
     return text
 
 def set_escaped_error(state: State, error: str):
@@ -270,7 +270,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
 
             filtered_tracks = [
                 t for t in tracks
-                if Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
+                if t.get("duration") and Constants.MIN_DURATION <= t["duration"] <= Constants.MAX_DURATION
                 and t["url"] not in state.played_radio_urls
             ]
             
