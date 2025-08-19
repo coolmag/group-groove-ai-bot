@@ -110,7 +110,7 @@ class State(BaseModel):
             "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
             "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
             "electropop", "trap"
-        ])))
+        ]))) 
     )
     retry_count: int = 0
 
@@ -517,7 +517,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         # Prepare status text
         status_lines = [
             "🎵 *Radio Groove AI* 🎵",
-            f"**Status**: {\'🟢 ON\' if state.is_on else \'🔴 OFF\'}",
+            f"**Status**: {"🟢 ON" if state.is_on else "🔴 OFF"}",
             f"**Genre**: {escape_markdown_v2(state.genre.title())}",
             f"**Source**: {escape_markdown_v2(state.source.title())}"
         ]
@@ -994,7 +994,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     menu_text = [
         "🎵 *Groove AI Radio* 🎵",
-        f"**Status**: {\'🟢 ON\' if state.is_on else \'🔴 OFF\'}",
+        f"**Status**: {"🟢 ON" if state.is_on else "🔴 OFF"}",
         f"**Genre**: {escape_markdown_v2(state.genre.title())}",
         f"**Source**: {escape_markdown_v2(state.source.title())}",
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'None')}",
@@ -1097,9 +1097,9 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
             error_msg = "⚠️ Bot lacks required admin permissions:\n"
             for right in missing_rights:
                 error_msg += f"• `{right}`\n"
-            error_msg += "\nPlease grant these permissions and restart the bot."
+            error_msg += "\nPlease grant these permissions and restart the bot\."
             
-            logger.error(f"Bot is an admin but lacks required permissions in chat {RADIO_CHAT_ID}: {", ".join(missing_rights)}")
+            logger.error(f"Bot is an admin but lacks required permissions in chat {RADIO_CHAT_ID}: {', '.join(missing_rights)}")
             await context.bot.send_message(RADIO_CHAT_ID, error_msg, parse_mode="MarkdownV2")
             return False
 
@@ -1222,11 +1222,7 @@ def main():
     DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
     
     # Create application
-    app = Application.builder() \
-        .token(BOT_TOKEN) \
-        .post_init(post_init) \
-        .post_shutdown(on_shutdown) \
-        .build()
+    app = Application.builder()         .token(BOT_TOKEN)         .post_init(post_init)         .post_shutdown(on_shutdown)         .build()
     
     # Register handlers
     app.add_handler(CommandHandler(["start", "menu", "m"], start_command))
