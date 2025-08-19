@@ -1,30 +1,29 @@
+# Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Устанавливаем переменные окружения
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
+# Set UTF-8 encoding to prevent character errors
+ENV LANG C.UTF-8
+ENV LC_ALL C.UTF-8
 
-# Устанавливаем зависимости
+# Set the working directory in the container
+WORKDIR /app
+
+# Install system dependencies, including ffmpeg and curl
+# We run apt-get update and install in one command to reduce image size
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Создаем пользователя бота
-RUN useradd -m -u 1001 radio_bot
-USER radio_bot
-WORKDIR /home/radio_bot/app
+# Copy the requirements file into the container
+COPY requirements.txt .
 
-# Копируем зависимости и код
-COPY --chown=radio_bot:radio_bot requirements.txt .
+# Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY --chown=radio_bot:radio_bot . .
+# Copy the rest of the application code into the container
+COPY . .
 
-# Создаем директорию для загрузок
-RUN mkdir -p downloads
-
-# Запуск бота
-CMD ["python", "main.py"]
+# Command to run the application
+CMD ["python3", "main.py"]
