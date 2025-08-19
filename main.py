@@ -54,7 +54,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7561017292:AAGGylvXSvXZv3AiiVfBYJ7v9Nxj24BVZKY"  # Новый токен
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id] or [482549032]
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", -1002892409779))
 CONFIG_FILE = Path("radio_config.json")
@@ -150,13 +150,13 @@ def format_duration(seconds: Optional[float]) -> str:
 
 def get_progress_bar(progress: float, width: int = 10) -> str:
     filled = int(width * progress)
-    return "█" * filled + "▁" * (width - filled)
+    return "█" * filled + " " * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    special_chars = r'([_*[\]()~`>#+-=|{}\.!])'
-    return re.sub(special_chars, r'\\\1', text)
+    special_chars = r'([_*[]()~`>#+-=|{}.!])'
+    return re.sub(special_chars, r'\\1', text)
 
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None
@@ -523,7 +523,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         if state.last_error:
             status_lines.append(f"⚠️ **Last Error**: {state.last_error}")
             
-        status_text = "\n".join(status_lines)
+        status_text = "n".join(status_lines)
         
         # Prepare keyboard
         keyboard = []
@@ -578,14 +578,14 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 # Fallback without markdown
                 await context.bot.send_message(
                     RADIO_CHAT_ID,
-                    re.sub(r'\*|\_|`', '', status_text),
+                    re.sub(r'*|_|`', '', status_text),
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             except Exception:
                 logger.error("Complete failure in status update")
 
 # --- Commands ---
-@admin_only
+ @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     
@@ -631,7 +631,7 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
 
-@admin_only
+ @admin_only
 async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     state.is_on = False
@@ -651,7 +651,7 @@ async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Schedule shutdown
     asyncio.create_task(context.application.stop())
 
-@admin_only
+ @admin_only
 async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     state.now_playing = None
@@ -659,17 +659,17 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status_panel(context, force=True)
     await save_state_from_botdata(context.bot_data)
 
-@admin_only
+ @admin_only
 async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_vote(context)
     await update.message.reply_text("🗳 Starting genre vote...")
 
-@admin_only
+ @admin_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status_panel(context, force=True)
     await update.message.reply_text("🔄 Status refreshed!")
 
-@admin_only
+ @admin_only
 async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     
@@ -1026,17 +1026,33 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🗳 Vote", callback_data="vote:start")
         ])
     
+    full_text = "\n".join(menu_text)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     try:
-        await update.message.reply_text(
-            "\n".join(menu_text),
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="MarkdownV2"
-        )
+        query = update.callback_query
+        if query:
+            # If called from a button, edit the message
+            await query.edit_message_text(
+                full_text,
+                reply_markup=reply_markup,
+                parse_mode="MarkdownV2"
+            )
+        elif update.message:
+            # If called from a command, reply to the message
+            await update.message.reply_text(
+                full_text,
+                reply_markup=reply_markup,
+                parse_mode="MarkdownV2"
+            )
     except Exception:
-        await update.message.reply_text(
-            re.sub(r'\*|\_|`', '', "\n".join(menu_text)),
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        # Fallback for any error, including Markdown issues
+        fallback_text = re.sub(r'[*_`]', '', full_text)
+        if 'query' in locals() and query:
+            await query.edit_message_text(fallback_text, reply_markup=reply_markup)
+        elif update.message:
+            await update.message.reply_text(fallback_text, reply_markup=reply_markup)
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update, context)
@@ -1046,44 +1062,37 @@ async def health_check(request):
     return web.Response(text="Bot is running", status=200)
 
 # --- Bot Lifecycle ---
-async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE):
+async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Checks if the bot has the required permissions in the radio chat."""
     try:
-        # Получаем информацию о боте в чате
-        chat_member = await context.bot.get_chat_member(RADIO_CHAT_ID, context.bot.id)
-        
-        # Для администраторов
-        if chat_member.status == "administrator":
-            # Проверяем наличие необходимых прав
-            required_permissions = [
-                'can_send_messages',
-                'can_send_audios',
-                'can_send_media_messages'
-            ]
-            
-            for perm in required_permissions:
-                if not getattr(chat_member, perm, False):
-                    logger.error(f"Bot lacks permission: {perm}")
-                    return False
-            return True
-            
-        # Для обычных участников
-        elif chat_member.status == "member":
-            # Проверяем общие разрешения чата
-            chat = await context.bot.get_chat(RADIO_CHAT_ID)
-            if chat.permissions:
-                return (
-                    chat.permissions.can_send_messages and
-                    chat.permissions.can_send_audios
-                )
+        bot_id = context.bot.id
+        chat_member = await context.bot.get_chat_member(RADIO_CHAT_ID, bot_id)
+
+        if chat_member.status != "administrator":
+            logger.error(f"Bot is not an administrator in chat {RADIO_CHAT_ID}. Current status: {chat_member.status}")
             return False
-            
-        # Недостаточные права
-        else:
-            logger.error(f"Insufficient rights: status={chat_member.status}")
+
+        # Check for specific admin rights
+        required_rights = {
+            "can_send_messages": getattr(chat_member, 'can_send_messages', False),
+            "can_send_audios": getattr(chat_member, 'can_send_audios', False),
+            "can_manage_messages": getattr(chat_member, 'can_manage_messages', False), # For updating status panel
+        }
+
+        missing_rights = [right for right, has_it in required_rights.items() if not has_it]
+
+        if missing_rights:
+            logger.error(f"Bot is an admin but lacks required permissions in chat {RADIO_CHAT_ID}: {', '.join(missing_rights)}")
             return False
-            
+
+        logger.info(f"Bot has all required permissions in chat {RADIO_CHAT_ID}.")
+        return True
+
+    except TelegramError as e:
+        logger.error(f"Telegram API error during permission check for chat {RADIO_CHAT_ID}: {e}")
+        return False
     except Exception as e:
-        logger.error(f"Permission check failed: {e}")
+        logger.error(f"Unexpected error during permission check for chat {RADIO_CHAT_ID}: {e}")
         return False
 
 async def post_init(application: Application):
@@ -1113,19 +1122,19 @@ async def post_init(application: Application):
             if privacy_mode:
                 await application.bot.send_message(
                     RADIO_CHAT_ID,
-                    "⚠️ Privacy mode is enabled! Please disable it via @BotFather:\n"
-                    "1. Open @BotFather\n"
-                    "2. Select your bot\n"
-                    "3. Send /setprivacy\n"
+                    "⚠️ Privacy mode is enabled! Please disable it via @BotFather:n"
+                    "1. Open @BotFathern"
+                    "2. Select your botn"
+                    "3. Send /setprivacyn"
                     "4. Choose 'Disable'"
                 )
             else:
                 await application.bot.send_message(
                     RADIO_CHAT_ID,
-                    "⚠️ Bot lacks permissions in chat! Please make the bot an admin with:\n"
-                    "- Send messages\n"
-                    "- Send audio\n"
-                    "- Manage messages\n\n"
+                    "⚠️ Bot lacks permissions in chat! Please make the bot an admin with:n"
+                    "- Send messagesn"
+                    "- Send audion"
+                    "- Manage messagesnn"
                     "After fixing, restart the bot."
                 )
         except Exception as e:
@@ -1174,11 +1183,7 @@ def main():
     DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
     
     # Create application
-    app = Application.builder() \
-        .token(BOT_TOKEN) \
-        .post_init(post_init) \
-        .post_shutdown(on_shutdown) \
-        .build()
+    app = Application.builder()         .token(BOT_TOKEN)         .post_init(post_init)         .post_shutdown(on_shutdown)         .build()
     
     # Register handlers
     app.add_handler(CommandHandler(["start", "menu", "m"], start_command))
@@ -1196,6 +1201,7 @@ def main():
     
     app.add_handler(PollHandler(handle_poll))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
+    app.add_error_handler(error_handler)
     
     # Create health check server
     async def run_server():
