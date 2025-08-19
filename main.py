@@ -110,7 +110,7 @@ class State(BaseModel):
             "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
             "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
             "electropop", "trap"
-        ]))))
+        ])))
     )
     retry_count: int = 0
 
@@ -161,14 +161,12 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + " " * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
-     if not isinstance(text, str) or not text:
-         return ""
-     escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{',
-     '}', '.', '!']
-     for char in escape_chars:
-         # ЭТО ПРАВИЛЬНАЯ СТРОКА
-         text = text.replace(char, f'\\{char}')
-     return text
+    if not isinstance(text, str) or not text:
+        return ""
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None
