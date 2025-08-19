@@ -12,6 +12,7 @@ import tempfile
 import uuid
 import requests
 import urllib.parse
+import aiohttp
 import yt_dlp as youtube_dl
 from collections import deque
 from datetime import datetime, timedelta
@@ -504,9 +505,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🔊 Установите громкость:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔈 50%", callback_data="vol_50"),
-                [InlineKeyboardButton("🔉 70%", callback_data="vol_70"),
-                [InlineKeyboardButton("🔊 100%", callback_data="vol_100"),
+                [InlineKeyboardButton("🔈 50%", callback_data="vol_50")],
+                [InlineKeyboardButton("🔉 70%", callback_data="vol_70")],
+                [InlineKeyboardButton("🔊 100%", callback_data="vol_100")],
                 [InlineKeyboardButton("◀️ Назад", callback_data="back")]
             ])
         )
