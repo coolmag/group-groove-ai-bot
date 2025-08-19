@@ -932,26 +932,6 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(RADIO_CHAT_ID, "🗳 Genre vote started! Vote above 👆")
         await save_state_from_botdata(context.bot_data)
         
-        # Schedule poll closing
-        async def close_poll():
-            await asyncio.sleep(Constants.POLL_DURATION_SECONDS + 5)
-            
-            try:
-                # Get updated poll results
-                poll = await context.bot.stop_poll(RADIO_CHAT_ID, state.poll_message_id)
-                await handle_poll(Update(poll=poll), context)
-            except BadRequest as e:
-                if "already been closed" in str(e):
-                    logger.info("Poll was already closed by Telegram, handling results.")
-                    # The poll handler will take care of the results
-                    pass # Silently ignore, as this is expected
-                else:
-                    logger.error(f"Failed to close poll: {e}")
-                    state.active_poll_id = None
-                    await context.bot.send_message(RADIO_CHAT_ID, "⚠️ Failed to process vote results.")
-            
-        asyncio.create_task(close_poll())
-        
     except Exception as e:
         logger.error(f"Failed to start vote: {e}")
         await context.bot.send_message(RADIO_CHAT_ID, f"⚠️ Failed to start vote: {e}")
