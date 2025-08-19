@@ -1078,6 +1078,7 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         bot_id = context.bot.id
         chat_member = await context.bot.get_chat_member(RADIO_CHAT_ID, bot_id)
+        logger.info(f"DEBUG: Received chat_member object: {chat_member}")
 
         if chat_member.status != "administrator":
             logger.error(f"Bot is not an administrator in chat {RADIO_CHAT_ID}. Current status: {chat_member.status}")
