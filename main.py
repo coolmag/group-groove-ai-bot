@@ -112,8 +112,7 @@ class State(BaseModel):
             "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
             "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
             "electropop", "trap"
-        ])))
-    )
+        ]))))
     retry_count: int = 0
 
     @field_serializer('radio_playlist', 'played_radio_urls')
@@ -530,9 +529,10 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             return
 
         # Prepare status text
+        status_icon = '\U0001F7E2 ON' if state.is_on else '\U0001F534 OFF'
         status_lines = [
             f"\U0001F3B5 *Radio Groove AI* \U0001F3B5",
-            f"**Status**: {'\U0001F7E2 ON' if state.is_on else '\U0001F534 OFF'}",
+            f"**Status**: {status_icon}",
             f"**Genre**: {escape_markdown_v2(state.genre.title())}",
             f"**Source**: {escape_markdown_v2(state.source.title())}"
         ]
@@ -556,10 +556,11 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         status_text = "\n".join(status_lines)
         
         # Prepare keyboard
+        start_skip_text = f'\u23ED\ufe0f Skip' if state.is_on else f'\u25B6\ufe0f Start'
         keyboard = []
         keyboard.append([
             InlineKeyboardButton("\U0001F504 Refresh", callback_data="radio:refresh"),
-            InlineKeyboardButton(f"{'\u23ED\ufe0f Skip' if state.is_on else '\u25B6\ufe0f Start'}", callback_data="radio:skip" if state.is_on else "radio:on")
+            InlineKeyboardButton(start_skip_text, callback_data="radio:skip" if state.is_on else "radio:on")
         ])
         
         if state.is_on and not state.active_poll_id:
@@ -636,7 +637,7 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("Radio is already running!")
             return
         state.is_on = True
-        await update.message.reply_text("\U0001F680 Radio starting... Searching for music.")
+        await update.message.reply_text(f"\U0001F680 Radio starting... Searching for music.")
         asyncio.create_task(_start_radio_logic(context))
     else:
         if not state.is_on:
@@ -1018,9 +1019,10 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     is_admin_user = await is_admin(update.effective_user.id)
     
+    status_icon = '\U0001F7E2 ON' if state.is_on else '\U0001F534 OFF'
     menu_text = [
         f"\U0001F3B5 *Groove AI Radio* \U0001F3B5",
-        f"**Status**: {'\U0001F7E2 ON' if state.is_on else '\U0001F534 OFF'}",
+        f"**Status**: {status_icon}",
         f"**Genre**: {escape_markdown_v2(state.genre.title())}",
         f"**Source**: {escape_markdown_v2(state.source.title())}",
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'None')}",
@@ -1043,6 +1045,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/stopbot - Stop the bot"
         ])
     
+    start_skip_text = f'\u23ED\ufe0f Skip' if state.is_on else f'\u25B6\ufe0f Start'
     keyboard = [
         [InlineKeyboardButton("\U0001F3B5 Play Track", callback_data="cmd:play")],
         [InlineKeyboardButton("\U0001F4CB Menu", callback_data="cmd:menu")]
@@ -1050,11 +1053,11 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if is_admin_user:
         keyboard.insert(0, [
-            InlineKeyboardButton("\u25B6\ufe0f Start", callback_data="radio:on"),
+            InlineKeyboardButton(start_skip_text, callback_data="radio:skip" if state.is_on else "radio:on"),
             InlineKeyboardButton("\u23F9\ufe0f Stop", callback_data="radio:off")
         ])
         keyboard.insert(1, [
-            InlineKeyboardButton("\u23ED\ufe0f Skip", callback_data="radio:skip"),
+            InlineKeyboardButton("\U0001F504 Refresh", callback_data="radio:refresh"),
             InlineKeyboardButton("\U0001F4DC Vote", callback_data="vote:start")
         ])
     
