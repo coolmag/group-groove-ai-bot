@@ -473,11 +473,14 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             await save_state_from_botdata(context.bot_data)
             
             # Calculate sleep time based on track duration
-            sleep_time = Constants.TRACK_INTERVAL_SECONDS
+            sleep_time = 0
             if state.now_playing and state.now_playing.duration > 0:
-                sleep_time = min(state.now_playing.duration, Constants.TRACK_INTERVAL_SECONDS)
+                sleep_time = state.now_playing.duration
             
-            logger.debug(f"Waiting for {sleep_time} seconds")
+            # Add a small pause between tracks if configured
+            sleep_time += Constants.PAUSE_BETWEEN_TRACKS
+
+            logger.debug(f"Waiting for {sleep_time} seconds until next track")
             await asyncio.sleep(sleep_time)
             
         except asyncio.CancelledError:
@@ -523,7 +526,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         if state.last_error:
             status_lines.append(f"⚠️ **Last Error**: {state.last_error}")
             
-        status_text = "n".join(status_lines)
+        status_text = "\n".join(status_lines)
         
         # Prepare keyboard
         keyboard = []
@@ -585,7 +588,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                 logger.error("Complete failure in status update")
 
 # --- Commands ---
- @admin_only
+@admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: State = context.bot_data['state']
     
@@ -631,7 +634,7 @@ async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
 
- @admin_only
+@admin_only
 async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     state.is_on = False
@@ -651,7 +654,7 @@ async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Schedule shutdown
     asyncio.create_task(context.application.stop())
 
- @admin_only
+@admin_only
 async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     state.now_playing = None
@@ -659,17 +662,17 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status_panel(context, force=True)
     await save_state_from_botdata(context.bot_data)
 
- @admin_only
+@admin_only
 async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_vote(context)
     await update.message.reply_text("🗳 Starting genre vote...")
 
- @admin_only
+@admin_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status_panel(context, force=True)
     await update.message.reply_text("🔄 Status refreshed!")
 
- @admin_only
+@admin_only
 async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     
@@ -1058,6 +1061,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update, context)
 
 # --- Health Check Endpoint ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log Errors caused by Updates."""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
 async def health_check(request):
     return web.Response(text="Bot is running", status=200)
 
@@ -1122,19 +1129,19 @@ async def post_init(application: Application):
             if privacy_mode:
                 await application.bot.send_message(
                     RADIO_CHAT_ID,
-                    "⚠️ Privacy mode is enabled! Please disable it via @BotFather:n"
-                    "1. Open @BotFathern"
-                    "2. Select your botn"
-                    "3. Send /setprivacyn"
+                    "⚠️ Privacy mode is enabled! Please disable it via @BotFather:\n"
+                    "1. Open @BotFather\n"
+                    "2. Select your bot\n"
+                    "3. Send /setprivacy\n"
                     "4. Choose 'Disable'"
                 )
             else:
                 await application.bot.send_message(
                     RADIO_CHAT_ID,
-                    "⚠️ Bot lacks permissions in chat! Please make the bot an admin with:n"
-                    "- Send messagesn"
-                    "- Send audion"
-                    "- Manage messagesnn"
+                    "⚠️ Bot lacks permissions in chat! Please make the bot an admin with:\n"
+                    "- Send messages\n"
+                    "- Send audio\n"
+                    "- Manage messages\n\n"
                     "After fixing, restart the bot."
                 )
         except Exception as e:
