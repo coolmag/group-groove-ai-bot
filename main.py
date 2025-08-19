@@ -5,12 +5,9 @@ import logging
 import json
 import shutil
 import sys
-import random
-import subprocess
 import time
 import tempfile
 import uuid
-import requests
 import urllib.parse
 import aiohttp
 import yt_dlp as youtube_dl
