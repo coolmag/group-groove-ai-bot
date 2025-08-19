@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Deque
 from collections import deque
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -155,8 +155,9 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    special_chars = r'([_*[]()~`>#+-=|{}.!])'
-    return re.sub(special_chars, r'\\1', text)
+    # Escape all special characters for Telegram MarkdownV2
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([\\{re.escape(escape_chars)}])', r'\\\1', text)
 
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None
@@ -546,28 +547,14 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         keyboard.append([InlineKeyboardButton("📋 Menu", callback_data="cmd:menu")])
         
         try:
+            # Delete the old message to prevent clutter
             if state.status_message_id:
-                # Try to edit existing message
                 try:
-                    await context.bot.edit_message_text(
-                        chat_id=RADIO_CHAT_ID,
-                        message_id=state.status_message_id,
-                        text=status_text,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                        parse_mode="MarkdownV2"
-                    )
-                    state.last_status_update = current_time
-                    return
-                except BadRequest as e:
-                    if "Message to edit not found" in str(e):
-                        state.status_message_id = None
-                    elif "Message is not modified" in str(e):
-                        state.last_status_update = current_time
-                        return
-                    else:
-                        raise
-                    
-            # Send new message if no existing one
+                    await context.bot.delete_message(RADIO_CHAT_ID, state.status_message_id)
+                except TelegramError as e:
+                    logger.warning(f"Could not delete old status message: {e}")
+            
+            # Send a new message
             msg = await context.bot.send_message(
                 chat_id=RADIO_CHAT_ID,
                 text=status_text,
@@ -579,6 +566,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             
         except Exception as e:
             logger.error(f"Status update failed: {e}")
+            state.status_message_id = None # Clear message ID on failure
             try:
                 # Fallback without markdown
                 await context.bot.send_message(
@@ -586,8 +574,9 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
                     re.sub(r'*|_|`', '', status_text),
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
-            except Exception:
-                logger.error("Complete failure in status update")
+            except Exception as final_e:
+                logger.error(f"Complete failure in status update: {final_e}")
+
 
 # --- Commands ---
 @admin_only
@@ -1112,6 +1101,21 @@ async def post_init(application: Application):
     # Load state
     application.bot_data['state'] = load_state()
     state: State = application.bot_data['state']
+    
+    # Set bot commands
+    logger.info("Setting bot commands...")
+    commands = [
+        BotCommand("play", "Найти и воспроизвести трек"),
+        BotCommand("menu", "Показать главное меню"),
+        BotCommand("ron", "Включить радио (админ)"),
+        BotCommand("roff", "Выключить радио (админ)"),
+        BotCommand("skip", "Пропустить трек (админ)"),
+        BotCommand("vote", "Голосование за жанр (админ)"),
+        BotCommand("source", "Сменить источник: /source youtube (админ)"),
+        BotCommand("refresh", "Обновить статус (админ)"),
+        BotCommand("reset", "Сбросить состояние бота (админ)"),
+    ]
+    await application.bot.set_my_commands(commands)
     
     # Check dependencies
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
