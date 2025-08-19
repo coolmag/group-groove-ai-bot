@@ -110,7 +110,7 @@ class State(BaseModel):
             "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
             "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
             "electropop", "trap"
-        ])))
+        ]))))
     )
     retry_count: int = 0
 
