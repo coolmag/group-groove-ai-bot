@@ -689,6 +689,23 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(f"Source switched to: {new_source.title()}")
     await save_state_from_botdata(context.bot_data)
 
+@admin_only
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deletes the config file to reset the bot's state."""
+    if CONFIG_FILE.exists():
+        try:
+            CONFIG_FILE.unlink()
+            await update.message.reply_text(
+                "✅ State file (radio_config.json) deleted. "
+                "Restarting the bot to apply default settings..."
+            )
+            # Gracefully stop the application to allow Railway to restart it.
+            asyncio.create_task(context.application.stop())
+        except Exception as e:
+            await update.message.reply_text(f"❌ Could not delete state file: {e}")
+    else:
+        await update.message.reply_text("No state file to delete.")
+
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Please specify a song title. Usage: /play <song title>")
