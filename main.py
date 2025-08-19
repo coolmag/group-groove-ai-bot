@@ -969,7 +969,7 @@ async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             RADIO_CHAT_ID,
-            f"New genre selected: *{escape_markdown_v2(new_genre.title())}*",
+            f"New genre selected: *{{escape_markdown_v2(new_genre.title())}}*",
             parse_mode="MarkdownV2"
         )
         
@@ -1074,44 +1074,23 @@ async def health_check(request):
 
 # --- Bot Lifecycle ---
 async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Checks if the bot has the required permissions in the radio chat."""
+    """Checks if the bot is an administrator in the radio chat."""
     try:
         bot_id = context.bot.id
         chat_member = await context.bot.get_chat_member(RADIO_CHAT_ID, bot_id)
         logger.info(f"DEBUG: Received chat_member object: {chat_member}")
 
-        if chat_member.status != "administrator":
+        if chat_member.status == "administrator":
+            logger.info("Bot is an administrator. Permission check passed.")
+            # Optional: Check for can_manage_messages for status panel cleanup
+            if not getattr(chat_member, 'can_manage_messages', False):
+                logger.warning("Bot is admin but lacks 'can_manage_messages'. Status panel deletion might fail.")
+            return True
+        else:
             logger.error(f"Bot is not an administrator in chat {RADIO_CHAT_ID}. Current status: {chat_member.status}")
-            await context.bot.send_message(RADIO_CHAT_ID, "[ERR] Bot is not an administrator. Please grant admin rights.")
+            await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Bot is not an administrator. Current status: {chat_member.status}. Please grant admin rights.")
             return False
 
-        # Check for specific admin rights
-        required_rights = {
-            "can_send_messages": getattr(chat_member, 'can_send_messages', False),
-            "can_send_audios": getattr(chat_member, 'can_send_audios', False),
-            "can_manage_messages": getattr(chat_member, 'can_manage_messages', False),
-            "can_send_polls": getattr(chat_member, 'can_send_polls', False),
-        }
-
-        missing_rights = [right for right, has_it in required_rights.items() if not has_it]
-
-        if missing_rights:
-            error_msg = "[ERR] Bot lacks required admin permissions:\n"
-            for right in missing_rights:
-                error_msg += f"• `{right}`\n"
-            error_msg += "\nPlease grant these permissions and restart the bot\."
-            
-            logger.error(f"Bot is an admin but lacks required permissions in chat {RADIO_CHAT_ID}: {', '.join(missing_rights)}")
-            await context.bot.send_message(RADIO_CHAT_ID, error_msg, parse_mode="MarkdownV2")
-            return False
-
-        logger.info(f"Bot has all required permissions in chat {RADIO_CHAT_ID}.")
-        return True
-
-    except TelegramError as e:
-        logger.error(f"Telegram API error during permission check for chat {RADIO_CHAT_ID}: {e}")
-        await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Telegram API error during permission check: {e}")
-        return False
     except Exception as e:
         logger.error(f"Unexpected error during permission check for chat {RADIO_CHAT_ID}: {e}")
         await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Unexpected error during permission check: {e}")
