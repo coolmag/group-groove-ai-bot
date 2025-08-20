@@ -232,7 +232,11 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
 
     total_votes = sum(state.poll_votes)
     if total_votes == 0:
-        await context.bot.send_message(job.data['chat_id'], "No votes received. Selecting a random genre\!")
+        await context.bot.send_message(
+            job.data['chat_id'],
+            "No votes received\\. Selecting a random genre\\!",  # Экранировали !
+            parse_mode="MarkdownV2"
+        )
         new_genre = random.choice(state.votable_genres)
         state.genre = new_genre.lower()
         state.radio_playlist.clear()
@@ -256,7 +260,7 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             job.data['chat_id'],
-            f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"🏁 Vote finished\\! New genre: *{escape_markdown_v2(new_genre)}*",  # Экранировали !
             parse_mode="MarkdownV2"
         )
         
