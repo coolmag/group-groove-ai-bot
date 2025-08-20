@@ -40,7 +40,7 @@ def admin_only(func):
 
 # --- UI ---
 async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
-    async with context.bot_data.get('status_lock'):
+    async with context.bot_data['status_lock']:
         state: State = context.bot_data['state']
         current_time = time.time()
         

@@ -145,11 +145,11 @@ async def _refill_playlist_if_needed(context: ContextTypes.DEFAULT_TYPE):
     """Checks if the playlist is running low and refills it in the background."""
     state: State = context.bot_data['state']
     if len(state.radio_playlist) < Constants.REFILL_THRESHOLD:
-        if context.bot_data.get('refill_lock', asyncio.Lock()).locked():
+        if context.bot_data['refill_lock'].locked():
             logger.info("Refill is already in progress.")
             return
         
-        async with context.bot_data.get('refill_lock'):
+        async with context.bot_data['refill_lock']:
             logger.info("Playlist running low, starting background refill...")
             await refill_playlist(context)
             logger.info("Background playlist refill complete.")
