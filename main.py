@@ -47,6 +47,11 @@ def load_state() -> State:
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
     logger.info("Initializing bot...")
+
+    # --- Setup bot_data ---
+    application.bot_data['status_lock'] = status_lock
+    application.bot_data['refill_lock'] = refill_lock
+    application.bot_data['state_lock'] = state_lock
     
     application.bot_data['state'] = load_state()
     state: State = application.bot_data['state']
@@ -141,14 +146,8 @@ def main():
         DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
         
         job_queue = JobQueue()
-        
-        bot_data = {
-            'status_lock': status_lock,
-            'refill_lock': refill_lock,
-            'state_lock': state_lock
-        }
 
-        app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).job_queue(job_queue).bot_data(bot_data).build()
+        app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).job_queue(job_queue).build()
         
         # --- Handlers ---
         app.add_handler(CommandHandler(["start", "menu", "m"], start_command))
