@@ -1,18 +1,21 @@
-# Sensitive information
-.env
-
-# Session files
-*.session
-
-# Configuration and state files
-radio_config.json
-
-# Downloaded media
-downloads/
-
-# Log files
-*.log
-
-# Python cache
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-selfcheck.json
+
+# Environment variables
+.env
+
+# Project specific
+downloads/
+radio_config.json
+*.log
+
+# IDEs
+.idea/
+.vscode/
