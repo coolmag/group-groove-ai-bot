@@ -22,7 +22,7 @@ class Constants:
     MIN_DURATION = 30
     PLAYED_URLS_MEMORY = 100
     DOWNLOAD_TIMEOUT = 30
-    DEFAULT_SOURCE = "soundcloud"
+    DEFAULT_SOURCE = "youtube"  # Изменено с soundcloud на youtube
     DEFAULT_GENRE = "pop"
     PAUSE_BETWEEN_TRACKS = 0
     STATUS_UPDATE_INTERVAL = 10
@@ -31,6 +31,8 @@ class Constants:
     SEARCH_LIMIT = 50
     MAX_RETRIES = 3
     REFILL_THRESHOLD = 10
+    YOUTUBE_DELAY_BETWEEN_REQUESTS = 2  # Задержка между запросами к YouTube
+    YOUTUBE_MAX_RETRIES = 3  # Максимальное количество попыток для YouTube
 
 # --- Environment Variables and Paths ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -92,6 +94,7 @@ class State(BaseModel):
         ])))
     )
     retry_count: int = 0
+    last_youtube_request: float = 0.0  # Время последнего запроса к YouTube
 
     @field_serializer('radio_playlist', 'played_radio_urls', 'poll_votes')
     def _serialize_deques(self, v, _info):
