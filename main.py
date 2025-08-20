@@ -110,7 +110,7 @@ class State(BaseModel):
             "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
             "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
             "electropop", "trap"
-        ]))))
+        ])))
     )
     retry_count: int = 0
 
@@ -166,8 +166,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\\[')
-    text = text.replace(']', '\\\]')
+    text = text.replace('[', '\\[')
+    text = text.replace(']', '\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
@@ -720,7 +720,7 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             job.data['chat_id'],
-            f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"\U0001F3C1 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
             parse_mode="MarkdownV2"
         )
         
@@ -1202,7 +1202,7 @@ def main():
     DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
     
     job_queue = JobQueue()
-    app = Application.builder()         .token(BOT_TOKEN)         .post_init(post_init)         .post_shutdown(on_shutdown)         .job_queue(job_queue)         .build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(on_shutdown).job_queue(job_queue).build()
     
     app.add_handler(CommandHandler(["start", "menu", "m"], start_command))
     app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)))
