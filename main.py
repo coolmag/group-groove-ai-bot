@@ -560,7 +560,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             status_lines.append("**Now Playing**: _Idle_")
             
         if state.active_poll_id:
-            status_lines.append(f"\U0001F4DC **Active Poll** \({{\\end{{escape_markdown_v2}}}}ends in ~{Constants.POLL_DURATION_SECONDS} sec\)")
+            status_lines.append(f"\U0001F4DC **Active Poll** (голосование идет)")
             
         if state.last_error:
             status_lines.append(f"\U000026A0\U0000FE0F **Last Error**: {state.last_error}")
@@ -738,7 +738,7 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             job.data['chat_id'],
-            f"🏁 Vote finished\! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"\U0001F3F0 Vote finished\! New genre: *{escape_markdown_v2(new_genre)}*",
             parse_mode="MarkdownV2"
         )
         
