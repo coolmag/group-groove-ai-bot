@@ -110,7 +110,7 @@ class State(BaseModel):
             "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
             "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
             "electropop", "trap"
-        ])))
+        ]))))
     )
     retry_count: int = 0
 
@@ -166,8 +166,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\[')
-    text = text.replace(']', '\\]')
+    text = text.replace('[', '\\\[')
+    text = text.replace(']', '\\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
@@ -271,10 +271,8 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(RADIO_CHAT_ID, f"[WARN] No tracks found on {state.source} for genre {state.genre}. Retrying ({attempt + 1}/{Constants.MAX_RETRIES}).")
                 state.retry_count += 1
                 
-                # Try alternative source on first failure
                 if state.source == "soundcloud" and attempt == 0:
                     state.source = "youtube"
-                # Reset to defaults on final failure
                 elif attempt == Constants.MAX_RETRIES - 1:
                     state.genre = Constants.DEFAULT_GENRE
                     state.source = Constants.DEFAULT_SOURCE
@@ -426,7 +424,6 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         elif filepath_m4a.exists():
             filepath = filepath_m4a
         else:
-            # Fallback to m4a if mp3 failed
             ydl_opts['postprocessors'][0]['preferredcodec'] = 'm4a'
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, url, download=True)
@@ -498,7 +495,6 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(10)
                 continue
 
-            # Proactively refill playlist
             asyncio.create_task(_refill_playlist_if_needed(context))
                 
             if not state.radio_playlist:
@@ -516,8 +512,6 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
             track_duration = await download_and_send_track(context, url)
             await save_state_from_botdata(context.bot_data)
             
-            # Wait for the track duration plus the configured pause
-            # Ensure track_duration is a valid number before sleeping
             sleep_time = (track_duration or 0) + Constants.PAUSE_BETWEEN_TRACKS
             
             logger.debug(f"Waiting for {sleep_time} seconds until next track")
@@ -538,11 +532,9 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         state: State = context.bot_data['state']
         current_time = time.time()
         
-        # Throttle updates
         if not force and current_time - state.last_status_update < Constants.STATUS_UPDATE_MIN_INTERVAL:
             return
 
-        # Prepare status text
         status_icon = '\U0001F7E2 ON' if state.is_on else '\U0001F534 OFF'
         status_lines = [
             f"\U0001F3B5 *Radio Groove AI* \U0001F3B5",
@@ -562,14 +554,13 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             status_lines.append("**Now Playing**: _Idle_")
             
         if state.active_poll_id:
-            status_lines.append(f"\U0001F4DC **Active Poll** \(ends in ~{Constants.POLL_DURATION_SECONDS} sec\)")
+            status_lines.append(f"\U0001F4DC **Active Poll** (ends in ~{Constants.POLL_DURATION_SECONDS} sec)")
             
         if state.last_error:
             status_lines.append(f"\U000026A0\U0000FE0F **Last Error**: {state.last_error}")
             
         status_text = "\n".join(status_lines)
         
-        # Prepare keyboard
         start_skip_text = f'\u23ED\ufe0f Skip' if state.is_on else f'\u25B6\ufe0f Start'
         keyboard = []
         keyboard.append([
@@ -586,14 +577,12 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
         keyboard.append([InlineKeyboardButton("\U0001F4CB Menu", callback_data="cmd:menu")])
         
         try:
-            # Delete the old message to prevent clutter
             if state.status_message_id:
                 try:
                     await context.bot.delete_message(RADIO_CHAT_ID, state.status_message_id)
                 except TelegramError as e:
                     logger.warning(f"Could not delete old status message: {e}")
             
-            # Send a new message
             msg = await context.bot.send_message(
                 chat_id=RADIO_CHAT_ID,
                 text=status_text,
@@ -605,9 +594,8 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             
         except Exception as e:
             logger.error(f"Status update failed: {e}")
-            state.status_message_id = None # Clear message ID on failure
+            state.status_message_id = None 
             try:
-                # Fallback without markdown
                 await context.bot.send_message(
                     RADIO_CHAT_ID,
                     re.sub(r'[*_`]', '', status_text),
@@ -622,23 +610,19 @@ async def _start_radio_logic(context: ContextTypes.DEFAULT_TYPE):
     """The core logic for starting the radio, designed to be run in the background."""
     state: State = context.bot_data['state']
     
-    # Ensure previous task is cancelled if it exists
     if 'radio_loop_task' in context.bot_data and not context.bot_data['radio_loop_task'].done():
         context.bot_data['radio_loop_task'].cancel()
         try:
             await context.bot_data['radio_loop_task']
         except asyncio.CancelledError:
-            pass # This is expected
+            pass 
 
-    # Clear old playlist data
     state.now_playing = None
     state.radio_playlist.clear()
     state.played_radio_urls.clear()
     
-    # Start the main radio loop
     context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
     
-    # Initial playlist refill
     await refill_playlist(context)
     await update_status_panel(context, force=True)
 
@@ -678,7 +662,6 @@ async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     state.is_on = False
     
-    # Cancel radio task
     if 'radio_loop_task' in context.bot_data:
         context.bot_data['radio_loop_task'].cancel()
         try:
@@ -690,7 +673,6 @@ async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\U0001F6D1 Bot stopping...")
     await save_state_from_botdata(context.bot_data)
     
-    # Schedule shutdown
     asyncio.create_task(context.application.stop())
 
 @admin_only
@@ -706,24 +688,18 @@ async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_vote(context)
 
 async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Called by a job to end the poll, tally votes, and change the genre.
-    """
     job = context.job
     state: State = context.bot_data['state']
 
-    # Ensure this job is for the currently active poll
     if not state.active_poll_id or state.poll_message_id != job.data['poll_message_id']:
         logger.warning("Tally job running for an outdated or invalid poll. Ignoring.")
         return
 
     try:
-        # Stop the poll and get the final results
         stopped_poll = await context.bot.stop_poll(job.data['chat_id'], job.data['poll_message_id'])
         logger.info(f"Stopped poll {stopped_poll.id} with results: {[o.voter_count for o in stopped_poll.options]}")
     except Exception as e:
         logger.error(f"Could not stop poll: {e}")
-        # Always clean up poll state, even on error
         state.active_poll_id = None
         state.poll_message_id = None
         state.poll_options = []
@@ -731,32 +707,26 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         await update_status_panel(context, force=True)
         return
     
-    # Find winning option
     max_votes = max(option.voter_count for option in stopped_poll.options)
     
-    # Check if anyone voted
     if max_votes == 0:
         await context.bot.send_message(job.data['chat_id'], "No votes received. Keeping current genre.")
     else:
         winning_options = [i for i, option in enumerate(stopped_poll.options) if option.voter_count == max_votes]
-        
-        # Select random winner if tie
         winner_idx = random.choice(winning_options)
         new_genre = state.poll_options[winner_idx]
-        state.genre = new_genre.lower() # Store genre in lowercase
+        state.genre = new_genre.lower()
         state.radio_playlist.clear()
         
-        # Announce the winner
         await context.bot.send_message(
             job.data['chat_id'],
-            f"\U0001F3C6 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
             parse_mode="MarkdownV2"
         )
         
         logger.info(f"Genre changed to '{new_genre}'. Refilling playlist.")
         await refill_playlist(context)
 
-    # Reset poll state
     state.active_poll_id = None
     state.poll_message_id = None
     state.poll_options = []
@@ -800,7 +770,6 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\u2705 State file (radio_config.json) deleted. "
                 "Restarting the bot to apply default settings..."
             )
-            # Gracefully stop the application to allow Railway to restart it.
             asyncio.create_task(context.application.stop())
         except Exception as e:
             await update.message.reply_text(f"\u274C Could not delete state file: {e}")
@@ -817,7 +786,6 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = await update.message.reply_text(f'\U0001F50D Searching for "{query}"...')
 
     try:
-        # Determine search prefix based on current source
         search_prefix = "scsearch10" if state.source == "soundcloud" else "ytsearch10"
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -851,9 +819,8 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.edit_text("No tracks found. \U0001F614")
             return
             
-        # Create keyboard with track options
         keyboard = []
-        for track in tracks[:5]:  # Show max 5 results
+        for track in tracks[:5]:
             title = track['title'][:30] + "..." if len(track['title']) > 30 else track['title']
             duration = format_duration(track['duration'])
             keyboard.append([InlineKeyboardButton(
@@ -881,7 +848,6 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("\u2B07\ufe0f Downloading track...")
     
     try:
-        # Download and send the track
         state: State = context.bot_data['state']
         track_info = await check_track_validity(url)
         
@@ -940,7 +906,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     try:
         command, action = query.data.split(":", 1)
     except ValueError:
-        await query.answer() # Answer silently
+        await query.answer()
         return
         
     state: State = context.bot_data['state']
@@ -1003,11 +969,10 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(RADIO_CHAT_ID, "\U0001F4DC There's already an active poll!")
         return
         
-    if len(state.votable_genres) < 10: # Ensure we have enough genres for the poll
+    if len(state.votable_genres) < 10:
         await context.bot.send_message(RADIO_CHAT_ID, "[WARN] Not enough genres available for voting.")
         return
         
-    # Select 4 random genres
     options = random.sample(state.votable_genres, 10)
     
     try:
@@ -1020,15 +985,13 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
             open_period=Constants.POLL_DURATION_SECONDS
         )
         
-        # Save poll state
         state.active_poll_id = message.poll.id
         state.poll_message_id = message.message_id
-        state.poll_options = [g.title() for g in options] # Store the exact options sent
+        state.poll_options = [g.title() for g in options]
         
-        # Schedule the tally job
         context.application.job_queue.run_once(
             tally_vote, 
-            Constants.POLL_DURATION_SECONDS + 2, # Add 2 seconds buffer
+            Constants.POLL_DURATION_SECONDS + 2,
             data={'poll_message_id': message.message_id, 'chat_id': RADIO_CHAT_ID},
             name=f"vote_{message.poll.id}"
         )
@@ -1093,21 +1056,18 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         if query:
-            # If called from a button, edit the message
             await query.edit_message_text(
                 full_text,
                 reply_markup=reply_markup,
                 parse_mode="MarkdownV2"
             )
         elif update.message:
-            # If called from a command, reply to the message
             await update.message.reply_text(
                 full_text,
                 reply_markup=reply_markup,
                 parse_mode="MarkdownV2"
             )
     except Exception:
-        # Fallback for any error, including Markdown issues
         fallback_text = re.sub(r'[*_`]', '', full_text)
         if 'query' in locals() and query:
             await query.edit_message_text(fallback_text, reply_markup=reply_markup)
@@ -1136,7 +1096,6 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
         if chat_member.status == "administrator":
             logger.info("Bot is an administrator. Permission check passed.")
-            # Optional: Check for can_manage_messages for status panel cleanup
             if not getattr(chat_member, 'can_manage_messages', False):
                 logger.warning("Bot is admin but lacks 'can_manage_messages'. Status panel deletion might fail.")
             return True
@@ -1153,11 +1112,9 @@ async def check_bot_permissions(context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def post_init(application: Application):
     logger.info("Initializing bot...")
     
-    # Load state
     application.bot_data['state'] = load_state()
     state: State = application.bot_data['state']
     
-    # Set bot commands
     logger.info("Setting bot commands...")
     commands = [
         BotCommand("play", "Найти и воспроизвести трек"),
@@ -1172,17 +1129,14 @@ async def post_init(application: Application):
     ]
     await application.bot.set_my_commands(commands)
     
-    # Check dependencies
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         logger.error("FFmpeg not found!")
         state.last_error = "FFmpeg or ffprobe not installed"
         await application.bot.send_message(RADIO_CHAT_ID, "[ERR] FFmpeg not installed!")
         return
         
-    # 1. Check Privacy Mode first - this is the most common and blocking issue.
     try:
         bot_info = await application.bot.get_me()
-        # Note: can_read_all_group_messages is False when privacy is ON. We want it to be True.
         if getattr(bot_info, 'can_read_all_group_messages', True) is False:
             logger.error("Privacy mode is enabled. Bot will not receive poll answers.")
             await application.bot.send_message(
@@ -1197,25 +1151,21 @@ async def post_init(application: Application):
                 "After turning it off, please **restart the bot** on the hosting.",
                 parse_mode="MarkdownV2"
             )
-            return # Stop initialization if privacy is on
+            return
     except Exception as e:
         logger.error(f"Could not check privacy mode: {e}")
-        # Continue anyway, but this is a bad sign
 
-    # 2. If privacy is off, check for specific admin rights.
     if not await check_bot_permissions(application):
         logger.error("Permission check failed! See chat for details.")
         state.last_error = "Bot lacks required permissions"
-        return # Stop initialization if permissions are missing
+        return
         
-    # Clear any stale poll from a previous run
     if state.active_poll_id:
         logger.warning("Active poll found in state on startup. Resetting due to possible bot restart.")
         state.active_poll_id = None
         state.poll_message_id = None
         state.poll_options = []
 
-    # Start radio if enabled
     if state.is_on:
         logger.info("Starting radio loop")
         application.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(application))
@@ -1226,14 +1176,12 @@ async def post_init(application: Application):
 async def on_shutdown(application: Application):
     logger.info("Shutting down bot...")
     
-    # Save state
     if 'state' in application.bot_data:
         try:
             CONFIG_FILE.write_text(application.bot_data['state'].model_dump_json(indent=4))
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
     
-    # Stop radio loop
     if 'radio_loop_task' in application.bot_data:
         application.bot_data['radio_loop_task'].cancel()
         try:
@@ -1244,7 +1192,6 @@ async def on_shutdown(application: Application):
     logger.info("Shutdown complete")
 
 def main():
-    # Validate environment
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN not set!")
     if not ADMIN_IDS:
@@ -1252,13 +1199,11 @@ def main():
     if not RADIO_CHAT_ID:
         raise ValueError("RADIO_CHAT_ID not set!")
     
-    # Ensure download directory exists
     DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
     
-    # Create application
-    app = Application.builder()         .token(BOT_TOKEN)         .post_init(post_init)         .post_shutdown(on_shutdown)         .build()
+    job_queue = JobQueue()
+    app = Application.builder()         .token(BOT_TOKEN)         .post_init(post_init)         .post_shutdown(on_shutdown)         .job_queue(job_queue)         .build()
     
-    # Register handlers
     app.add_handler(CommandHandler(["start", "menu", "m"], start_command))
     app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: radio_on_off_command(u, c, True)))
     app.add_handler(CommandHandler(["rof", "r_off", "stop", "t"], lambda u, c: radio_on_off_command(u, c, False)))
@@ -1275,7 +1220,6 @@ def main():
     
     app.add_error_handler(error_handler)
     
-    # Create health check server
     async def run_server():
         app_web = web.Application()
         app_web.router.add_get("/", health_check)
@@ -1285,7 +1229,6 @@ def main():
         await site.start()
         logger.info(f"Health check server running on port {PORT}")
     
-    # Run bot and health server
     loop = asyncio.get_event_loop()
     loop.create_task(run_server())
     logger.info("Starting bot...")
