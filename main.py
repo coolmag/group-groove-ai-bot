@@ -172,8 +172,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\\[')
-    text = text.replace(']', '\\\]')
+    text = text.replace('[', '\\[')
+    text = text.replace(']', '\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
@@ -726,7 +726,19 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
 
     total_votes = sum(state.poll_votes)
     if total_votes == 0:
-        await context.bot.send_message(job.data['chat_id'], "No votes received. Keeping current genre.")
+        await context.bot.send_message(job.data['chat_id'], "No votes received. Selecting a random genre!")
+        new_genre = random.choice(state.votable_genres)
+        state.genre = new_genre.lower()
+        state.radio_playlist.clear()
+        
+        await context.bot.send_message(
+            job.data['chat_id'],
+            f"🎶 Randomly selected genre: *{escape_markdown_v2(new_genre.title())}*",
+            parse_mode="MarkdownV2"
+        )
+        
+        logger.info(f"Genre randomly changed to '{new_genre}'. Refilling playlist.")
+        await refill_playlist(context)
     else:
         max_votes = max(state.poll_votes)
         winning_indices = [i for i, v in enumerate(state.poll_votes) if v == max_votes]
@@ -738,7 +750,7 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             job.data['chat_id'],
-            f"\U0001F3F0 Vote finished\! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
             parse_mode="MarkdownV2"
         )
         
