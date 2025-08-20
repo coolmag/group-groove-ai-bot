@@ -23,15 +23,31 @@ async def get_tracks_soundcloud(genre: str) -> List[dict]:
         'default_search': f"scsearch{Constants.SEARCH_LIMIT}:{genre}",
         'noplaylist': True,
         'quiet': True,
-        'extract_flat': 'in_playlist'
+        'extract_flat': 'in_playlist',
+        'ignoreerrors': True,  # Игнорировать ошибки при извлечении
+        'skip_unavailable_fragments': True,  # Пропускать недоступные фрагменты
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, f"scsearch{Constants.SEARCH_LIMIT}:{genre}", download=False)
-        tracks = [
-            {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
-            for e in info.get("entries", []) if e
-        ]
+        
+        # Фильтруем только доступные треки
+        tracks = []
+        for e in info.get("entries", []):
+            if e and e.get("url"):
+                # Проверяем доступность трека
+                try:
+                    track_info = await check_track_validity(e["url"])
+                    if track_info:
+                        tracks.append({
+                            "url": e["url"], 
+                            "title": e.get("title", "Unknown"), 
+                            "duration": e.get("duration", 0)
+                        })
+                except Exception:
+                    logger.warning(f"Skipping unavailable track: {e.get('url')}")
+                    continue
+        
         logger.info(f"Found {len(tracks)} SoundCloud tracks for '{genre}'")
         return tracks
     except Exception as e:
@@ -156,19 +172,34 @@ async def _refill_playlist_if_needed(context: ContextTypes.DEFAULT_TYPE):
             logger.info("Background playlist refill complete.")
 
 async def check_track_validity(url: str) -> Optional[dict]:
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'noplaylist': True,
-        'quiet': True,
-        'simulate': True
-    }
-    if "youtube.com" in url or "youtu.be" in url:
-        if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
-            ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+    # Для SoundCloud добавляем специальные опции
+    if "soundcloud.com" in url or "api.soundcloud.com" in url:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'quiet': True,
+            'simulate': True,
+            'ignoreerrors': True,
+            'skip_unavailable_fragments': True,
+        }
+    else:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'quiet': True,
+            'simulate': True
+        }
+        if "youtube.com" in url or "youtu.be" in url:
+            if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+                ydl_opts['cookiefile'] = YOUTUBE_COOKIES
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=False)
+        
+        if not info:
+            return None
+            
         return {
             "url": url,
             "title": info.get("title", "Unknown"),
@@ -185,7 +216,6 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         set_escaped_error(state, "Invalid track URL")
         await context.bot.send_message(RADIO_CHAT_ID, "[ERR] Invalid track URL.")
         state.now_playing = None
-        # await update_status_panel(context, force=True) # Handled in main loop
         return 0
     
     duration = track_info.get("duration", 0)
@@ -193,7 +223,6 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         set_escaped_error(state, f"Duration out of range ({duration}s)")
         await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Track duration out of range ({duration}s).")
         state.now_playing = None
-        # await update_status_panel(context, force=True) # Handled in main loop
         return 0
 
     DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
@@ -201,9 +230,9 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         set_escaped_error(state, "Download directory not writable")
         await context.bot.send_message(RADIO_CHAT_ID, "[ERR] Download directory not writable.")
         state.now_playing = None
-        # await update_status_panel(context, force=True) # Handled in main loop
         return 0
 
+    # Настройки для SoundCloud и YouTube
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
@@ -218,6 +247,14 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         'ffprobe_location': shutil.which("ffprobe")
     }
     
+    # Добавляем специальные настройки для SoundCloud
+    if "soundcloud.com" in url or "api.soundcloud.com" in url:
+        ydl_opts.update({
+            'ignoreerrors': True,
+            'skip_unavailable_fragments': True,
+            'extract_flat': False,
+        })
+    
     if "youtube.com" in url or "youtu.be" in url:
         if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
             ydl_opts['cookiefile'] = YOUTUBE_COOKIES
@@ -227,21 +264,23 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
         
+        # Обработка случая, когда трек недоступен
+        if not info:
+            logger.warning(f"Track not available: {url}")
+            return 0
+            
         filepath = Path(ydl.prepare_filename(info))
-
 
         if not filepath or not filepath.exists():
             set_escaped_error(state, "Failed to download track")
             await context.bot.send_message(RADIO_CHAT_ID, "[ERR] Failed to download track.")
             state.now_playing = None
-            # await update_status_panel(context, force=True) # Handled in main loop
             return 0
 
         if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
             set_escaped_error(state, "Track exceeds max file size")
             await context.bot.send_message(RADIO_CHAT_ID, "[ERR] Track too large to send.")
             state.now_playing = None
-            # await update_status_panel(context, force=True) # Handled in main loop
             return 0
 
         track_duration = int(info.get("duration", 0))
@@ -250,7 +289,6 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
             duration=track_duration,
             url=url
         )
-        # await update_status_panel(context, force=True) # Handled in main loop
         
         with open(filepath, 'rb') as f:
             await context.bot.send_audio(
@@ -277,7 +315,6 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         return 0
     finally:
         state.now_playing = None
-        # await update_status_panel(context, force=True) # Handled in main loop
         if filepath and filepath.exists():
             try:
                 filepath.unlink(missing_ok=True)
