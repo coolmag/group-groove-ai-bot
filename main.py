@@ -18,6 +18,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     CallbackQueryHandler,
+    PollAnswerHandler, # Re-add PollAnswerHandler
     JobQueue,
 )
 from telegram.error import BadRequest, TelegramError
@@ -79,6 +80,7 @@ class State(BaseModel):
     active_poll_id: Optional[str] = None
     poll_message_id: Optional[int] = None
     poll_options: List[str] = Field(default_factory=list)
+    poll_votes: List[int] = Field(default_factory=list) # Re-add poll_votes
     status_message_id: Optional[int] = None
     last_status_update: float = 0.0
     now_playing: Optional[NowPlaying] = None
@@ -114,14 +116,16 @@ class State(BaseModel):
     )
     retry_count: int = 0
 
-    @field_serializer('radio_playlist', 'played_radio_urls')
-    def _serialize_deques(self, v: Deque[str], _info):
+    @field_serializer('radio_playlist', 'played_radio_urls', 'poll_votes')
+    def _serialize_deques(self, v, _info):
         return list(v)
 
-    @field_validator('radio_playlist', 'played_radio_urls', mode='before')
+    @field_validator('radio_playlist', 'played_radio_urls', 'poll_votes', mode='before')
     @classmethod
     def _lists_to_deques(cls, v):
-        return deque(v) if isinstance(v, list) else deque()
+        if isinstance(v, list):
+            return deque(v) if 'votes' not in _info.field_name else v
+        return deque() if 'votes' not in _info.field_name else []
 
 state_lock = Lock()
 status_lock = Lock()
@@ -166,8 +170,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\[')
-    text = text.replace(']', '\\]')
+    text = text.replace('[', '\\\[')
+    text = text.replace(']', '\\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
@@ -554,7 +558,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             status_lines.append("**Now Playing**: _Idle_")
             
         if state.active_poll_id:
-            status_lines.append(f"\U0001F4DC **Active Poll** (ends in ~{Constants.POLL_DURATION_SECONDS} sec)")
+            status_lines.append(f"\U0001F4DC **Active Poll** \({{ends in ~{Constants.POLL_DURATION_SECONDS} sec}})")
             
         if state.last_error:
             status_lines.append(f"\U000026A0\U0000FE0F **Last Error**: {state.last_error}")
@@ -720,7 +724,7 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             job.data['chat_id'],
-            f"\U0001F3C1 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
             parse_mode="MarkdownV2"
         )
         
