@@ -116,8 +116,10 @@ class State(BaseModel):
     )
     retry_count: int = 0
 
-    @field_serializer('radio_playlist', 'played_radio_urls')
-    def _serialize_deques(self, v: Deque[str], _info):
+    @field_serializer('radio_playlist', 'played_radio_urls', 'poll_votes')
+    def _serialize_deques(self, v, _info):
+        if isinstance(v, list):
+            return v
         return list(v)
 
     @field_validator('radio_playlist', 'played_radio_urls', 'poll_votes', mode='before')
@@ -170,8 +172,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\[')
-    text = text.replace(']', '\\]')
+    text = text.replace('[', '\\\[')
+    text = text.replace(']', '\\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
@@ -558,7 +560,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             status_lines.append("**Now Playing**: _Idle_")
             
         if state.active_poll_id:
-            status_lines.append(f"\U0001F4DC **Active Poll** (ends in ~{Constants.POLL_DURATION_SECONDS} sec)")
+            status_lines.append(f"\U0001F4DC **Active Poll** \({{\\end{{escape_markdown_v2}}}}ends in ~{Constants.POLL_DURATION_SECONDS} sec\)")
             
         if state.last_error:
             status_lines.append(f"\U000026A0\U0000FE0F **Last Error**: {state.last_error}")
@@ -698,7 +700,6 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if answer.poll_id != state.active_poll_id:
         return
         
-    # Note: option_ids is a list of chosen indices. In a non-anonymous poll, it's one element.
     if answer.option_ids:
         chosen_option = answer.option_ids[0]
         if 0 <= chosen_option < len(state.poll_votes):
@@ -714,22 +715,21 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Tally job running for an outdated or invalid poll. Ignoring.")
         return
 
-    # Stop the poll manually to be sure, but handle the error if it's already closed.
     try:
         await context.bot.stop_poll(job.data['chat_id'], job.data['poll_message_id'])
+        logger.info("Poll stopped visually.")
     except TelegramError as e:
         if "poll has already been closed" in str(e):
             logger.info("Poll was already closed by Telegram, proceeding with tally.")
         else:
             logger.error(f"Could not stop poll: {e}")
-            # Don't return, still try to tally with the votes we have.
 
-    max_votes = sum(state.poll_votes)
-    if max_votes == 0:
+    total_votes = sum(state.poll_votes)
+    if total_votes == 0:
         await context.bot.send_message(job.data['chat_id'], "No votes received. Keeping current genre.")
     else:
-        max_votes_count = max(state.poll_votes)
-        winning_indices = [i for i, v in enumerate(state.poll_votes) if v == max_votes_count]
+        max_votes = max(state.poll_votes)
+        winning_indices = [i for i, v in enumerate(state.poll_votes) if v == max_votes]
         winner_idx = random.choice(winning_indices)
         new_genre = state.poll_options[winner_idx]
         
@@ -738,7 +738,7 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             job.data['chat_id'],
-            f"\U0001F3B5 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"🏁 Vote finished\! New genre: *{escape_markdown_v2(new_genre)}*",
             parse_mode="MarkdownV2"
         )
         
