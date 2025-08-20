@@ -18,7 +18,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     CallbackQueryHandler,
-    PollAnswerHandler, # Re-add PollAnswerHandler
+    PollAnswerHandler,
     JobQueue,
 )
 from telegram.error import BadRequest, TelegramError
@@ -80,7 +80,7 @@ class State(BaseModel):
     active_poll_id: Optional[str] = None
     poll_message_id: Optional[int] = None
     poll_options: List[str] = Field(default_factory=list)
-    poll_votes: List[int] = Field(default_factory=list) # Re-add poll_votes
+    poll_votes: List[int] = Field(default_factory=list)
     status_message_id: Optional[int] = None
     last_status_update: float = 0.0
     now_playing: Optional[NowPlaying] = None
@@ -116,16 +116,16 @@ class State(BaseModel):
     )
     retry_count: int = 0
 
-    @field_serializer('radio_playlist', 'played_radio_urls', 'poll_votes')
-    def _serialize_deques(self, v, _info):
+    @field_serializer('radio_playlist', 'played_radio_urls')
+    def _serialize_deques(self, v: Deque[str], _info):
         return list(v)
 
     @field_validator('radio_playlist', 'played_radio_urls', 'poll_votes', mode='before')
     @classmethod
-    def _lists_to_deques(cls, v):
+    def _lists_to_deques(cls, v, info):
         if isinstance(v, list):
-            return deque(v) if 'votes' not in _info.field_name else v
-        return deque() if 'votes' not in _info.field_name else []
+            return deque(v) if 'votes' not in info.field_name else v
+        return deque() if 'votes' not in info.field_name else []
 
 state_lock = Lock()
 status_lock = Lock()
@@ -170,8 +170,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\\[')
-    text = text.replace(']', '\\\]')
+    text = text.replace('[', '\\[')
+    text = text.replace(']', '\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
@@ -558,7 +558,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             status_lines.append("**Now Playing**: _Idle_")
             
         if state.active_poll_id:
-            status_lines.append(f"\U0001F4DC **Active Poll** \({{ends in ~{Constants.POLL_DURATION_SECONDS} sec}})")
+            status_lines.append(f"\U0001F4DC **Active Poll** (ends in ~{Constants.POLL_DURATION_SECONDS} sec)")
             
         if state.last_error:
             status_lines.append(f"\U000026A0\U0000FE0F **Last Error**: {state.last_error}")
@@ -691,6 +691,21 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_vote(context)
 
+async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state: State = context.bot_data['state']
+    answer = update.poll_answer
+    
+    if answer.poll_id != state.active_poll_id:
+        return
+        
+    # Note: option_ids is a list of chosen indices. In a non-anonymous poll, it's one element.
+    if answer.option_ids:
+        chosen_option = answer.option_ids[0]
+        if 0 <= chosen_option < len(state.poll_votes):
+            state.poll_votes[chosen_option] += 1
+            logger.info(f"Vote received for option {chosen_option}. New counts: {state.poll_votes}")
+            await save_state_from_botdata(context.bot_data)
+
 async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     state: State = context.bot_data['state']
@@ -699,32 +714,31 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Tally job running for an outdated or invalid poll. Ignoring.")
         return
 
+    # Stop the poll manually to be sure, but handle the error if it's already closed.
     try:
-        stopped_poll = await context.bot.stop_poll(job.data['chat_id'], job.data['poll_message_id'])
-        logger.info(f"Stopped poll {stopped_poll.id} with results: {[o.voter_count for o in stopped_poll.options]}")
-    except Exception as e:
-        logger.error(f"Could not stop poll: {e}")
-        state.active_poll_id = None
-        state.poll_message_id = None
-        state.poll_options = []
-        await save_state_from_botdata(context.bot_data)
-        await update_status_panel(context, force=True)
-        return
-    
-    max_votes = max(option.voter_count for option in stopped_poll.options)
-    
+        await context.bot.stop_poll(job.data['chat_id'], job.data['poll_message_id'])
+    except TelegramError as e:
+        if "poll has already been closed" in str(e):
+            logger.info("Poll was already closed by Telegram, proceeding with tally.")
+        else:
+            logger.error(f"Could not stop poll: {e}")
+            # Don't return, still try to tally with the votes we have.
+
+    max_votes = sum(state.poll_votes)
     if max_votes == 0:
         await context.bot.send_message(job.data['chat_id'], "No votes received. Keeping current genre.")
     else:
-        winning_options = [i for i, option in enumerate(stopped_poll.options) if option.voter_count == max_votes]
-        winner_idx = random.choice(winning_options)
+        max_votes_count = max(state.poll_votes)
+        winning_indices = [i for i, v in enumerate(state.poll_votes) if v == max_votes_count]
+        winner_idx = random.choice(winning_indices)
         new_genre = state.poll_options[winner_idx]
+        
         state.genre = new_genre.lower()
         state.radio_playlist.clear()
         
         await context.bot.send_message(
             job.data['chat_id'],
-            f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+            f"\U0001F3B5 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
             parse_mode="MarkdownV2"
         )
         
@@ -734,6 +748,7 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
     state.active_poll_id = None
     state.poll_message_id = None
     state.poll_options = []
+    state.poll_votes = []
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
 
@@ -992,6 +1007,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         state.active_poll_id = message.poll.id
         state.poll_message_id = message.message_id
         state.poll_options = [g.title() for g in options]
+        state.poll_votes = [0] * len(options)
         
         context.application.job_queue.run_once(
             tally_vote, 
@@ -1222,6 +1238,7 @@ def main():
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern=r"^play_track:"))
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern=r"^(radio|vote|cmd):" ))
     
+    app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_error_handler(error_handler)
     
     async def run_server():
