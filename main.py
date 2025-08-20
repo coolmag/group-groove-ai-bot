@@ -1029,22 +1029,22 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'None')}",
         "",
         f"\U0001F4BF *Commands*:",
-        /play <query> - Search and play a track
-        /menu - Show this menu
+        "/play \\<query\\> \\- Search and play a track",
+        "/menu \\- Show this menu",
     ]
     
     if is_admin_user:
         menu_text.extend([
             "",
             f"\U0001F451 *Admin Commands*:",
-            /ron - Start radio
-            /roff - Stop radio
-            "/skip - Skip current track",
-            /vote - Start genre vote
-            "/source <sc|yt> - Change source",
-            "/refresh - Update status",
-            "/stopbot - Stop the bot"
-        ]
+            "/ron \\- Start radio",
+            "/roff \\- Stop radio",
+            "/skip \\- Skip current track",
+            "/vote \\- Start genre vote",
+            "/source \\<sc|yt\\> \\- Change source",
+            "/refresh \\- Update status",
+            "/stopbot \\- Stop the bot",
+        ])
     
     start_skip_text = f'\u23ED\ufe0f Skip' if state.is_on else f'\u25B6\ufe0f Start'
     keyboard = [
