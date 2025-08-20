@@ -31,7 +31,7 @@ from asyncio import Lock
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
     TRACK_INTERVAL_SECONDS = 60
-    POLL_DURATION_SECONDS = 60
+    POLL_DURATION_SECONDS = 10
     POLL_CHECK_TIMEOUT = 10
     MAX_FILE_SIZE = 50_000_000
     MAX_DURATION = 300
@@ -168,8 +168,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\[')
-    text = text.replace(']', '\\]')
+    text = text.replace('[', '\\\[')
+    text = text.replace(']', '\\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
