@@ -18,8 +18,6 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     CallbackQueryHandler,
-    PollHandler,
-    PollAnswerHandler,
 )
 from telegram.error import BadRequest, TelegramError
 from dotenv import load_dotenv
@@ -80,7 +78,6 @@ class State(BaseModel):
     active_poll_id: Optional[str] = None
     poll_message_id: Optional[int] = None
     poll_options: List[str] = Field(default_factory=list)
-    poll_votes: List[int] = Field(default_factory=list)
     status_message_id: Optional[int] = None
     last_status_update: float = 0.0
     now_playing: Optional[NowPlaying] = None
@@ -168,8 +165,8 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     text = text.replace('_', '\\_')
     text = text.replace('*', '\\*')
-    text = text.replace('[', '\\\[')
-    text = text.replace(']', '\\\]')
+    text = text.replace('[', '\\[')
+    text = text.replace(']', '\\]')
     text = text.replace('(', '\\(')
     text = text.replace(')', '\\)')
     text = text.replace('~', '\\~')
@@ -942,6 +939,64 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
         await show_menu(update, context)
 
+async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Called by a job to end the poll, tally votes, and change the genre.
+    """
+    job = context.job
+    state: State = context.bot_data['state']
+
+    # Ensure this job is for the currently active poll
+    if not state.active_poll_id or state.poll_message_id != job.data['poll_message_id']:
+        logger.warning("Tally job running for an outdated or invalid poll. Ignoring.")
+        return
+
+    try:
+        # Stop the poll and get the final results
+        stopped_poll = await context.bot.stop_poll(job.data['chat_id'], job.data['poll_message_id'])
+        logger.info(f"Stopped poll {stopped_poll.id} with results: {[o.voter_count for o in stopped_poll.options]}")
+    except Exception as e:
+        logger.error(f"Could not stop poll: {e}")
+        # Fallback or retry could be implemented here if needed
+        return
+    finally:
+        # Always clean up poll state
+        state.active_poll_id = None
+        state.poll_message_id = None
+
+    # Find winning option
+    max_votes = max(option.voter_count for option in stopped_poll.options)
+    
+    # Check if anyone voted
+    if max_votes == 0:
+        await context.bot.send_message(job.data['chat_id'], "No votes received. Keeping current genre.")
+        state.poll_options = []
+        await save_state_from_botdata(context.bot_data)
+        await update_status_panel(context, force=True)
+        return
+
+    winning_options = [i for i, option in enumerate(stopped_poll.options) if option.voter_count == max_votes]
+    
+    # Select random winner if tie
+    winner_idx = random.choice(winning_options)
+    new_genre = state.poll_options[winner_idx]
+    state.genre = new_genre.lower() # Store genre in lowercase
+    state.radio_playlist.clear()
+    
+    # Announce the winner
+    await context.bot.send_message(
+        job.data['chat_id'],
+        f"\U0001F3C6 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+        parse_mode="MarkdownV2"
+    )
+    
+    # Clean up state and refill playlist
+    state.poll_options = []
+    logger.info(f"Genre changed to '{new_genre}'. Refilling playlist.")
+    await refill_playlist(context)
+    await save_state_from_botdata(context.bot_data)
+    await update_status_panel(context, force=True)
+
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
     
@@ -949,7 +1004,7 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(RADIO_CHAT_ID, "\U0001F4DC There's already an active poll!")
         return
         
-    if len(state.votable_genres) < 3:
+    if len(state.votable_genres) < 4: # Ensure we have enough genres for the poll
         await context.bot.send_message(RADIO_CHAT_ID, "[WARN] Not enough genres available for voting.")
         return
         
@@ -966,70 +1021,25 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
             open_period=Constants.POLL_DURATION_SECONDS
         )
         
+        # Save poll state
         state.active_poll_id = message.poll.id
         state.poll_message_id = message.message_id
-        state.poll_options = options
-        state.poll_votes = [0] * len(options)
+        state.poll_options = [g.title() for g in options] # Store the exact options sent
         
-        await context.bot.send_message(RADIO_CHAT_ID, "\U0001F4DC Genre vote started! Vote above \U0001F446")
+        # Schedule the tally job
+        context.application.job_queue.run_once(
+            tally_vote, 
+            Constants.POLL_DURATION_SECONDS, 
+            data={'poll_message_id': message.message_id, 'chat_id': RADIO_CHAT_ID},
+            name=f"vote_{message.poll.id}"
+        )
+        
+        logger.info(f"Started poll {message.poll.id}, job scheduled for {Constants.POLL_DURATION_SECONDS} seconds.")
         await save_state_from_botdata(context.bot_data)
         
     except Exception as e:
         logger.error(f"Failed to start vote: {e}")
         await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Failed to start vote: {e}")
-
-async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state: State = context.bot_data['state']
-    answer = update.poll_answer
-    
-    if answer.poll_id != state.active_poll_id:
-        return
-        
-    if answer.option_ids and 0 <= answer.option_ids[0] < len(state.poll_votes):
-        state.poll_votes[answer.option_ids[0]] += 1
-        await save_state_from_botdata(context.bot_data)
-
-async def handle_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state: State = context.bot_data['state']
-    poll = update.poll
-    
-    if poll.id != state.active_poll_id or not poll.is_closed:
-        return
-        
-    # Find winning option
-    max_votes = max(option.voter_count for option in poll.options)
-    winning_options = [i for i, option in enumerate(poll.options) if option.voter_count == max_votes]
-    
-    if not winning_options:
-        await context.bot.send_message(RADIO_CHAT_ID, "No votes received. Keeping current genre.")
-    else:
-        # Select random winner if tie
-        winner_idx = random.choice(winning_options)
-        new_genre = state.poll_options[winner_idx]
-        state.genre = new_genre
-        state.radio_playlist.clear()
-        
-        await context.bot.send_message(
-            RADIO_CHAT_ID,
-            f"\U0001F3B5 New genre selected: *{escape_markdown_v2(new_genre.title())}*",
-            parse_mode="MarkdownV2"
-        )
-        
-        # Refill playlist with new genre
-        await refill_playlist(context)
-        
-        # Restart radio if not running
-        if not state.is_on:
-            state.is_on = True
-            context.bot_data['radio_loop_task'] = asyncio.create_task(radio_loop(context))
-    
-    # Reset poll state
-    state.active_poll_id = None
-    state.poll_message_id = None
-    state.poll_options = []
-    state.poll_votes = []
-    await save_state_from_botdata(context.bot_data)
-    await update_status_panel(context, force=True)
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
@@ -1204,7 +1214,6 @@ async def post_init(application: Application):
         state.active_poll_id = None
         state.poll_message_id = None
         state.poll_options = []
-        state.poll_votes = []
 
     # Start radio if enabled
     if state.is_on:
@@ -1264,8 +1273,6 @@ def main():
     app.add_handler(CallbackQueryHandler(play_button_callback, pattern=r"^play_track:"))
     app.add_handler(CallbackQueryHandler(radio_buttons_callback, pattern=r"^(radio|vote|cmd):"))
     
-    app.add_handler(PollHandler(handle_poll))
-    app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_error_handler(error_handler)
     
     # Create health check server
