@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import shutil
+import time
 from typing import List, Optional
 from pathlib import Path
 
@@ -16,67 +17,130 @@ from utils import set_escaped_error, escape_markdown_v2, save_state_from_botdata
 
 logger = logging.getLogger(__name__)
 
-
-async def get_tracks_soundcloud(genre: str) -> List[dict]:
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'default_search': f"scsearch{Constants.SEARCH_LIMIT}:{genre}",
-        'noplaylist': True,
-        'quiet': True,
-        'extract_flat': 'in_playlist',
-        'ignoreerrors': True,  # Игнорировать ошибки при извлечении
-        'skip_unavailable_fragments': True,  # Пропускать недоступные фрагменты
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, f"scsearch{Constants.SEARCH_LIMIT}:{genre}", download=False)
-        
-        # Фильтруем только доступные треки
-        tracks = []
-        for e in info.get("entries", []):
-            if e and e.get("url"):
-                # Проверяем доступность трека
-                try:
-                    track_info = await check_track_validity(e["url"])
-                    if track_info:
-                        tracks.append({
-                            "url": e["url"], 
-                            "title": e.get("title", "Unknown"), 
-                            "duration": e.get("duration", 0)
-                        })
-                except Exception:
-                    logger.warning(f"Skipping unavailable track: {e.get('url')}")
-                    continue
-        
-        logger.info(f"Found {len(tracks)} SoundCloud tracks for '{genre}'")
-        return tracks
-    except Exception as e:
-        logger.error(f"SoundCloud search failed for '{genre}': {e}")
-        return []
+# Глобальная переменная для отслеживания последнего запроса к YouTube
+last_youtube_request = 0
 
 async def get_tracks_youtube(genre: str) -> List[dict]:
+    global last_youtube_request
+    
+    # Добавляем задержку между запросами чтобы избежать блокировок
+    current_time = time.time()
+    if current_time - last_youtube_request < 2:  # 2 секунды между запросами
+        await asyncio.sleep(2 - (current_time - last_youtube_request))
+    
+    last_youtube_request = time.time()
+    
     ydl_opts = {
         'format': 'bestaudio/best',
-        'default_search': f"ytsearch{Constants.SEARCH_LIMIT}:{genre}",
+        'default_search': f"ytsearch{Constants.SEARCH_LIMIT}:{genre} music",
         'noplaylist': True,
         'quiet': True,
-        'extract_flat': 'in_playlist'
+        'extract_flat': True,
+        'ignoreerrors': True,
+        'no_warnings': True,
+        'socket_timeout': 30,
+        'retries': 3,
+        'fragment_retries': 3,
+        'skip_unavailable_fragments': True,
+        'extractor_args': {
+            'youtube': {
+                'skip': ['dash', 'hls'],
+                'player_client': ['android', 'web']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Accept-Encoding': 'gzip,deflate',
+            'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
+            'Connection': 'keep-alive',
+        }
     }
+    
     if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
         ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+        logger.info("Using YouTube cookies for authentication")
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, f"ytsearch{Constants.SEARCH_LIMIT}:{genre}", download=False)
-        tracks = [
-            {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
-            for e in info.get("entries", []) if e
-        ]
+            # Используем более специфический запрос для музыки
+            query = f"{genre} music official audio"
+            info = await asyncio.to_thread(ydl.extract_info, query, download=False)
+        
+        if not info or 'entries' not in info:
+            logger.warning(f"No results found for YouTube query: {query}")
+            return []
+            
+        tracks = []
+        for e in info.get("entries", []):
+            if e and e.get("url") and e.get("duration", 0) > 30:  # Фильтруем короткие видео
+                # Проверяем, что это музыкальный контент
+                title = e.get("title", "").lower()
+                if any(x in title for x in ['official', 'audio', 'lyric', 'music', 'song']):
+                    tracks.append({
+                        "url": e["url"], 
+                        "title": e.get("title", "Unknown"), 
+                        "duration": e.get("duration", 0)
+                    })
+                # Также добавляем длинные видео, которые могут быть музыкальными
+                elif e.get("duration", 0) > 120:
+                    tracks.append({
+                        "url": e["url"], 
+                        "title": e.get("title", "Unknown"), 
+                        "duration": e.get("duration", 0)
+                    })
+        
         logger.info(f"Found {len(tracks)} YouTube tracks for '{genre}'")
         return tracks
+        
     except Exception as e:
         logger.error(f"YouTube search failed for '{genre}': {e}")
-        return []
+        # При ошибке пробуем альтернативный подход
+        return await get_tracks_youtube_fallback(genre)
 
+async def get_tracks_youtube_fallback(genre: str) -> List[dict]:
+    """Альтернативный метод поиска на YouTube через другие запросы"""
+    try:
+        # Попробуем разные варианты запросов
+        queries = [
+            f"{genre} music",
+            f"{genre} songs",
+            f"{genre} official audio",
+            f"{genre} full album"
+        ]
+        
+        for query in queries:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'default_search': f"ytsearch10:{query}",
+                'noplaylist': True,
+                'quiet': True,
+                'extract_flat': True,
+                'ignoreerrors': True,
+            }
+            
+            if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+                ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+                
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.to_thread(ydl.extract_info, query, download=False)
+                
+            if info and 'entries' in info and info['entries']:
+                tracks = [
+                    {"url": e["url"], "title": e.get("title", "Unknown"), "duration": e.get("duration", 0)}
+                    for e in info.get("entries", []) if e and e.get("url")
+                ]
+                if tracks:
+                    logger.info(f"Found {len(tracks)} YouTube tracks using fallback for '{genre}'")
+                    return tracks
+                    
+            await asyncio.sleep(1)  # Задержка между запросами
+            
+    except Exception as e:
+        logger.error(f"YouTube fallback search also failed for '{genre}': {e}")
+    
+    return []
 
 async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
     state: State = context.bot_data['state']
@@ -86,26 +150,29 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
         state.played_radio_urls.clear()
         logger.debug("Cleared played URLs to manage memory")
 
-    async def attempt_refill(source: str, genre: str) -> List[dict]:
-        return await get_tracks_soundcloud(genre) if source == "soundcloud" else await get_tracks_youtube(genre)
-
-    original_genre, original_source = state.genre, state.source
+    # Всегда используем YouTube как основной источник
+    original_genre = state.genre
     for attempt in range(Constants.MAX_RETRIES):
         try:
-            tracks = await attempt_refill(state.source, state.genre)
+            tracks = await get_tracks_youtube(state.genre)
             if not tracks:
-                logger.warning(f"No tracks found on {state.source} for genre {state.genre}, attempt {attempt + 1}")
-                set_escaped_error(state, f"No tracks found on {state.source} for genre {state.genre}")
-                await context.bot.send_message(RADIO_CHAT_ID, f"[WARN] No tracks found on {state.source} for genre {state.genre}. Retrying ({attempt + 1}/{Constants.MAX_RETRIES}).")
-                state.retry_count += 1
+                logger.warning(f"No tracks found on YouTube for genre {state.genre}, attempt {attempt + 1}")
+                set_escaped_error(state, f"No tracks found on YouTube for genre {state.genre}")
                 
-                if state.source == "soundcloud" and attempt == 0:
-                    state.source = "youtube"
-                elif attempt == Constants.MAX_RETRIES - 1:
-                    state.genre = Constants.DEFAULT_GENRE
-                    state.source = Constants.DEFAULT_SOURCE
-                    state.radio_playlist.clear()
-                    state.played_radio_urls.clear()
+                # Пробуем альтернативные жанры
+                alternative_genres = [
+                    'pop', 'rock', 'electronic', 'hip hop', 'jazz', 
+                    'classical', 'lofi', 'chill', 'ambient'
+                ]
+                
+                if state.genre not in alternative_genres:
+                    state.genre = random.choice(alternative_genres)
+                    logger.info(f"Trying alternative genre: {state.genre}")
+                    await context.bot.send_message(
+                        RADIO_CHAT_ID, 
+                        f"🔀 No tracks found for '{original_genre}'. Trying '{state.genre}' instead."
+                    )
+                    continue
                 
                 await asyncio.sleep(Constants.RETRY_INTERVAL)
                 continue
@@ -117,17 +184,12 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             ]
             
             if not filtered_tracks:
-                logger.warning(f"No valid tracks after filtering on {state.source}")
-                set_escaped_error(state, f"No valid tracks after filtering on {state.source}")
-                await context.bot.send_message(RADIO_CHAT_ID, f"[WARN] No valid tracks after filtering on {state.source}. Retrying ({attempt + 1}/{Constants.MAX_RETRIES}).")
-                state.retry_count += 1
+                logger.warning(f"No valid tracks after filtering on YouTube")
+                set_escaped_error(state, f"No valid tracks after filtering on YouTube")
                 state.played_radio_urls.clear()
                 
-                if state.source == "soundcloud" and attempt == 0:
-                    state.source = "youtube"
-                elif attempt == Constants.MAX_RETRIES - 1:
+                if attempt == Constants.MAX_RETRIES - 1:
                     state.genre = Constants.DEFAULT_GENRE
-                    state.source = Constants.DEFAULT_SOURCE
                     state.radio_playlist.clear()
                     state.played_radio_urls.clear()
                 
@@ -138,8 +200,7 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             random.shuffle(urls)
             state.radio_playlist.extend(urls)
             state.retry_count = 0
-            state.genre = original_genre
-            state.source = original_source
+            state.genre = original_genre  # Восстанавливаем оригинальный жанр
             logger.info(f"Added {len(urls)} tracks to playlist")
             await save_state_from_botdata(context.bot_data)
             return
@@ -152,12 +213,12 @@ async def refill_playlist(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(Constants.RETRY_INTERVAL)
 
     logger.error(f"Failed to refill playlist after {Constants.MAX_RETRIES} attempts")
-    state.source = Constants.DEFAULT_SOURCE
     state.genre = Constants.DEFAULT_GENRE
-    set_escaped_error(state, f"Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to {state.source}/{state.genre}.")
-    await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to {state.source}/{state.genre}.")
+    set_escaped_error(state, f"Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to default genre.")
+    await context.bot.send_message(RADIO_CHAT_ID, f"[ERR] Failed to find tracks after {Constants.MAX_RETRIES} attempts. Switched to default genre.")
     await save_state_from_botdata(context.bot_data)
 
+# Остальные функции остаются без изменений, но убедитесь, что они используют YouTube
 async def _refill_playlist_if_needed(context: ContextTypes.DEFAULT_TYPE):
     """Checks if the playlist is running low and refills it in the background."""
     state: State = context.bot_data['state']
@@ -172,26 +233,20 @@ async def _refill_playlist_if_needed(context: ContextTypes.DEFAULT_TYPE):
             logger.info("Background playlist refill complete.")
 
 async def check_track_validity(url: str) -> Optional[dict]:
-    # Для SoundCloud добавляем специальные опции
-    if "soundcloud.com" in url or "api.soundcloud.com" in url:
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-            'simulate': True,
-            'ignoreerrors': True,
-            'skip_unavailable_fragments': True,
-        }
-    else:
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-            'simulate': True
-        }
-        if "youtube.com" in url or "youtu.be" in url:
-            if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
-                ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+    # Для YouTube добавляем специальные опции
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'quiet': True,
+        'simulate': True,
+        'ignoreerrors': True,
+        'socket_timeout': 30,
+        'retries': 3,
+    }
+    
+    if "youtube.com" in url or "youtu.be" in url:
+        if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
+            ydl_opts['cookiefile'] = YOUTUBE_COOKIES
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -211,6 +266,10 @@ async def check_track_validity(url: str) -> Optional[dict]:
 
 async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) -> int:
     state: State = context.bot_data['state']
+    
+    # Добавляем задержку между загрузками
+    await asyncio.sleep(1)
+    
     track_info = await check_track_validity(url)
     if not track_info:
         set_escaped_error(state, "Invalid track URL")
@@ -232,7 +291,7 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         state.now_playing = None
         return 0
 
-    # Настройки для SoundCloud и YouTube
+    # Настройки для YouTube
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
@@ -244,16 +303,13 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
             'preferredquality': '192',
         }],
         'ffmpeg_location': shutil.which("ffmpeg"),
-        'ffprobe_location': shutil.which("ffprobe")
+        'ffprobe_location': shutil.which("ffprobe"),
+        'ignoreerrors': True,
+        'retries': 3,
+        'fragment_retries': 3,
+        'skip_unavailable_fragments': True,
+        'socket_timeout': 30,
     }
-    
-    # Добавляем специальные настройки для SoundCloud
-    if "soundcloud.com" in url or "api.soundcloud.com" in url:
-        ydl_opts.update({
-            'ignoreerrors': True,
-            'skip_unavailable_fragments': True,
-            'extract_flat': False,
-        })
     
     if "youtube.com" in url or "youtu.be" in url:
         if YOUTUBE_COOKIES and os.path.exists(YOUTUBE_COOKIES):
@@ -272,10 +328,18 @@ async def download_and_send_track(context: ContextTypes.DEFAULT_TYPE, url: str) 
         filepath = Path(ydl.prepare_filename(info))
 
         if not filepath or not filepath.exists():
-            set_escaped_error(state, "Failed to download track")
-            await context.bot.send_message(RADIO_CHAT_ID, "[ERR] Failed to download track.")
-            state.now_playing = None
-            return 0
+            # Попробуем найти файл с другим расширением
+            possible_extensions = ['.mp3', '.m4a', '.webm']
+            for ext in possible_extensions:
+                alt_path = filepath.with_suffix(ext)
+                if alt_path.exists():
+                    filepath = alt_path
+                    break
+            else:
+                set_escaped_error(state, "Failed to download track")
+                await context.bot.send_message(RADIO_CHAT_ID, "[ERR] Failed to download track.")
+                state.now_playing = None
+                return 0
 
         if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
             set_escaped_error(state, "Track exceeds max file size")
