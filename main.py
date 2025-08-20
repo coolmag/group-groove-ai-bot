@@ -165,9 +165,11 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    # Escape all special characters for MarkdownV2
-    escape_chars = r'[_*`\[\]()~>#+\-=|"{}].'
-    return re.sub(escape_chars, r'\\g<0>', text)
+    # Escape all special characters for MarkdownV2.
+    # The pattern captures one of the special characters in group 1.
+    escape_chars = r'([_*`\[\]()~>#+\-=|"{}].)'
+    # The replacement prepends a literal backslash '\\' to the captured character '\1'.
+    return re.sub(escape_chars, r'\\\1', text)
 
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None
@@ -1027,22 +1029,22 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**Now Playing**: {escape_markdown_v2(state.now_playing.title if state.now_playing else 'None')}",
         "",
         f"\U0001F4BF *Commands*:",
-        "/play <query> - Search and play a track",
-        "/menu - Show this menu",
+        /play <query> - Search and play a track
+        /menu - Show this menu
     ]
     
     if is_admin_user:
         menu_text.extend([
             "",
             f"\U0001F451 *Admin Commands*:",
-            "/ron - Start radio",
-            "/roff - Stop radio",
+            /ron - Start radio
+            /roff - Stop radio
             "/skip - Skip current track",
-            "/vote - Start genre vote",
+            /vote - Start genre vote
             "/source <sc|yt> - Change source",
             "/refresh - Update status",
             "/stopbot - Stop the bot"
-        ])
+        ]
     
     start_skip_text = f'\u23ED\ufe0f Skip' if state.is_on else f'\u25B6\ufe0f Start'
     keyboard = [
