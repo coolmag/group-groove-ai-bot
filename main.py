@@ -64,7 +64,7 @@ async def post_init(application: Application):
         BotCommand("roff", "Выключить радио (админ)"),
         BotCommand("skip", "Пропустить трек (админ)"),
         BotCommand("vote", "Голосование за жанр (админ)"),
-        BotCommand("source", "Сменить источник: /source youtube (админ)"),
+        BotCommand("source", "Сменить источник: /source <yt|sc|vk> (админ)"),
         BotCommand("refresh", "Обновить статус (админ)"),
         BotCommand("reset", "Сбросить состояние бота (админ)"),
     ]
@@ -105,7 +105,7 @@ async def post_init(application: Application):
         state.poll_options = []
 
     application.job_queue.run_repeating(
-        vote_command, 
+        scheduled_vote_command, 
         interval=Constants.VOTING_INTERVAL_SECONDS, 
         first=10, 
         name="hourly_vote_job"

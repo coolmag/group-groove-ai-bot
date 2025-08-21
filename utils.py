@@ -19,27 +19,12 @@ def get_progress_bar(progress: float, width: int = 10) -> str:
     return "█" * filled + " " * (width - filled)
 
 def escape_markdown_v2(text: str) -> str:
+    """Escapes a string for use in Telegram MarkdownV2."""
     if not isinstance(text, str) or not text:
         return ""
-    text = text.replace('_', '\_')
-    text = text.replace('*', '\*')
-    text = text.replace('[', '\[')
-    text = text.replace(']', '\]')
-    text = text.replace('(', '\(')
-    text = text.replace(')', '\)')
-    text = text.replace('~', '\~')
-    text = text.replace('`', '\`')
-    text = text.replace('>', '\>')
-    text = text.replace('#', '\#')
-    text = text.replace('+', '\+')
-    text = text.replace('-', '\-')
-    text = text.replace('=', '\=')
-    text = text.replace('|', '\|')
-    text = text.replace('{', '\{')
-    text = text.replace('}', '\}')
-    text = text.replace('.', '\.')
-    text = text.replace('!', '\!')
-    return text
+    escape_chars = r'_[]()~`>#+-=|{}.!'
+    import re
+    return re.sub(f'([\\{re.escape(escape_chars)}])', r'\\\\1', text)
 
 def set_escaped_error(state: State, error: str):
     state.last_error = escape_markdown_v2(error) if error else None

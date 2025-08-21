@@ -39,6 +39,7 @@ RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", -1002892409779))
 CONFIG_FILE = Path("radio_config.json")
 DOWNLOAD_DIR = Path("downloads")
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")
+VK_COOKIES = os.getenv("VK_COOKIES", "./vk_cookies.txt")
 PORT = int(os.getenv("PORT", 8080))
 
 # --- Models ---

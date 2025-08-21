@@ -1,21 +1,19 @@
-# Python
+# Environment variables and credentials
+.env
+*.session
+*cookies.txt
+radio_config.json
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.Python
-env/
-venv/
-pip-selfcheck.json
 
-# Environment variables
-.env
-
-# Project specific
-downloads/
-radio_config.json
-*.log
-
-# IDEs
+# IDE and OS specific files
 .idea/
 .vscode/
+.DS_Store
+
+# Downloaded media files
+downloads/

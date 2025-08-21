@@ -20,22 +20,7 @@ from radio import radio_loop, refill_playlist, check_track_validity
 logger = logging.getLogger(__name__)
 
 
-# --- Admin ---
-async def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
 
-def admin_only(func):
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user_id = update.effective_user.id if update.effective_user else None
-        if not user_id or not await is_admin(user_id):
-            state: State = context.bot_data['state']
-            set_escaped_error(state, "Unauthorized access attempt")
-            if update.message:
-                await update.message.reply_text("This command is for admins only.")
-            return
-        return await func(update, context, *args, **kwargs)
-    return wrapper
 
 
 # --- UI ---
@@ -196,6 +181,17 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_state_from_botdata(context.bot_data)
 
 @admin_only
+async def scheduled_vote_command(context: ContextTypes.DEFAULT_TYPE):
+    """Callback job to start a scheduled genre poll."""
+    state: State = context.bot_data.get('state')
+    if not state or not state.is_on:
+        logger.info("Scheduled vote job skipped: radio is not running or state not found.")
+        return
+
+    logger.info(f"Running scheduled vote in chat {RADIO_CHAT_ID}")
+    await start_vote(context)
+
+@admin_only
 async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_vote(context)
 
@@ -280,14 +276,24 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     state: State = context.bot_data['state']
     
     if not context.args:
-        await update.message.reply_text("Usage: /source soundcloud|youtube")
+        await update.message.reply_text("Usage: /source <soundcloud|youtube|vk>")
         return
         
-    new_source = context.args[0].lower()
-    if new_source not in ["soundcloud", "youtube"]:
-        await update.message.reply_text("Invalid source. Use 'soundcloud' or 'youtube'")
+    source_alias = context.args[0].lower()
+    if source_alias in ["youtube", "yt"]:
+        new_source = "youtube"
+    elif source_alias in ["soundcloud", "sc"]:
+        new_source = "soundcloud"
+    elif source_alias in ["vk", "vkontakte"]:
+        new_source = "vk"
+    else:
+        await update.message.reply_text("Invalid source. Use 'sc', 'yt', or 'vk'")
         return
         
+    if state.source == new_source:
+        await update.message.reply_text(f"Source is already set to {new_source.title()}")
+        return
+
     state.source = new_source
     state.radio_playlist.clear()
     state.now_playing = None
@@ -382,26 +388,17 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
         
     url = query.data.split(":", 1)[1]
-    await query.edit_message_text("\u2B07\ufe0f Downloading track...")
+    await query.edit_message_text(f"\u2B07\ufe0f Downloading and sending track...")
     
+    filepath = None
     try:
-        state: State = context.bot_data['state']
-        track_info = await check_track_validity(url)
-        
-        if not track_info:
-            await query.edit_message_text("[ERR] Invalid track URL")
-            return
-            
         DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
+            'noplaylist': True,
             'quiet': True,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }]
+            'ignoreerrors': True,
         }
         
         if "youtube.com" in url or "youtu.be" in url:
@@ -410,32 +407,44 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-            filepath = Path(ydl.prepare_filename(info)).with_suffix('.mp3')
-            
-            if not filepath.exists():
-                filepath = Path(ydl.prepare_filename(info)).with_suffix('.m4a')
-                
-            with open(filepath, 'rb') as f:
-                await context.bot.send_audio(
-                    chat_id=query.message.chat_id,
-                    audio=f,
-                    title=info.get('title', 'Unknown Track'),
-                    duration=info.get('duration', 0),
-                    performer=info.get('uploader', 'Unknown Artist')
-                )
+
+        if not info:
+            raise ValueError("yt-dlp did not return any info.")
+
+        original_ext = info.get('ext')
+        if not original_ext:
+            raise FileNotFoundError("Could not determine file extension.")
+
+        filepath = DOWNLOAD_DIR / f"{info['id']}.{original_ext}"
+
+        if not filepath.exists() or filepath.stat().st_size == 0:
+            raise FileNotFoundError(f"Downloaded file is missing or empty: {filepath}")
+
+        if filepath.stat().st_size > Constants.MAX_FILE_SIZE:
+            await query.edit_message_text(f"[ERR] Track is too large to send (>{Constants.MAX_FILE_SIZE // 1_000_000}MB).")
+            return
+
+        with open(filepath, 'rb') as f:
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=f,
+                title=info.get('title', 'Unknown Track'),
+                duration=info.get('duration', 0),
+                performer=info.get("uploader", "Unknown Artist")
+            )
                 
         await query.edit_message_text("\u2705 Track sent!")
         
     except Exception as e:
-        logger.error(f"Track download failed: {e}")
+        logger.error(f"Track download failed for /play: {e}")
         await query.edit_message_text(f"[ERR] Failed to download track: {e}")
         
     finally:
-        if 'filepath' in locals() and filepath.exists():
+        if filepath and filepath.exists():
             try:
                 filepath.unlink()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete track from /play: {e}")
 
 async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
