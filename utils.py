@@ -35,6 +35,18 @@ def admin_only(func):
 
 
 # --- State ---
+def load_state() -> State:
+    """Loads the bot's state from the config file."""
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding='utf-8'))
+            return State.model_validate(data)
+        except Exception as e:
+            logger.error(f"Failed to load config: {e}")
+            return State()
+    logger.info("No config file found, using default state")
+    return State()
+
 async def save_state_from_botdata(bot_data: dict):
     """Saves the bot's state to a file."""
     async with state_lock:
