@@ -22,6 +22,10 @@ COPY requirements.txt .
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Force rebuild by adding a changing label
+LABEL last_build_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+
 # Copy the application code into the container
 COPY *.py .
 COPY requirements.txt .
