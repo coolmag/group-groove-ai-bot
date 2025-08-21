@@ -99,26 +99,59 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(menu_text), parse_mode="MarkdownV2")
 
 # --- Radio Control ---
-@admin_only
-async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
+# --- Voting ---
+async def start_vote(context: ContextTypes.DEFAULT_TYPE):
+    """Starts a poll to vote for the next radio genre."""
     state: config.State = context.bot_data['state']
-    if turn_on == state.is_on:
-        await update.message.reply_text(f"Radio is already {'running' if turn_on else 'stopped'}!")
+    
+    if state.active_poll_id:
+        logger.info("Vote requested, but one is already active.")
         return
 
-    state.is_on = turn_on
-    if turn_on:
-        await update.message.reply_text("🚀 Radio starting... Searching for music.")
-        context.bot_data['radio_loop_task'] = asyncio.create_task(radio.radio_loop(context))
-    else:
-        if 'radio_loop_task' in context.bot_data and not context.bot_data['radio_loop_task'].done():
-            context.bot_data['radio_loop_task'].cancel()
-        state.now_playing = None
-        state.radio_playlist.clear()
-        await update.message.reply_text("⏹️ Radio stopped!")
+    if len(state.votable_genres) < 10:
+        logger.warning("Not enough genres to start a vote.")
+        return
+        
+    options = random.sample(state.votable_genres, 10)
     
-    await save_state_from_botdata(context.bot_data)
-    await update_status_panel(context, force=True)
+    try:
+        message = await context.bot.send_poll(
+            chat_id=config.RADIO_CHAT_ID,
+            question="🗳️ Choose the next music genre:",
+            options=[g.title() for g in options],
+            is_anonymous=False,
+            allows_multiple_answers=False,
+            open_period=config.Constants.POLL_DURATION_SECONDS
+        )
+        
+        state.active_poll_id = message.poll.id
+        state.poll_message_id = message.message_id
+        state.poll_options = [g.title() for g in options]
+        state.poll_votes = [0] * len(options)
+        
+        context.job_queue.run_once(
+            tally_vote, 
+            config.Constants.POLL_DURATION_SECONDS + 2,
+            data={'poll_message_id': message.message_id, 'chat_id': config.RADIO_CHAT_ID},
+            name=f"vote_{message.poll.id}"
+        )
+        
+        logger.info(f"Started poll {message.poll.id}")
+        await save_state_from_botdata(context.bot_data)
+        await update_status_panel(context, force=True)
+        
+    except Exception as e:
+        logger.error(f"Failed to start vote: {e}")
+        set_escaped_error(state, "Failed to start poll.")
+
+@admin_only
+async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for the /vote command."""
+    await update.message.reply_text("Starting a new genre vote...")
+    await start_vote(context)
+
+@admin_only
+async def scheduled_vote_command(context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
