@@ -26,7 +26,7 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             return
         status_icon = '🟢 ON' if state.is_on else '🔴 OFF'
         status_lines = [
-            f"🎵 *Groove AI Radio v2.1-final* 🎵",
+            f"🎵 *{escape_markdown_v2('Groove AI Radio v2.1-final')}* 🎵",  # Escaped title
             f"**Status**: {status_icon}",
             f"**Genre**: {escape_markdown_v2(state.genre.title())}",
             f"**Source**: {escape_markdown_v2(state.source.title())}"
@@ -41,17 +41,35 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
             status_lines.append(f"🗳️ **Active Poll**")
         if state.last_error:
             status_lines.append(f"⚠️ **Last Error**: {state.last_error}")
-        keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="radio:refresh"), InlineKeyboardButton('⏭️ Skip' if state.is_on else '▶️ Start', callback_data="radio:skip" if state.is_on else "radio:on")], [InlineKeyboardButton("🗳️ Vote", callback_data="vote:start"), InlineKeyboardButton("⏹️ Stop", callback_data="radio:off")], [InlineKeyboardButton("📖 Menu", callback_data="cmd:menu")] ]
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="radio:refresh"),
+                InlineKeyboardButton('⏭️ Skip' if state.is_on else '▶️ Start', callback_data="radio:skip" if state.is_on else "radio:on")
+            ],
+            [InlineKeyboardButton("🗳️ Vote", callback_data="vote:start"), InlineKeyboardButton("⏹️ Stop", callback_data="radio:off")],
+            [InlineKeyboardButton("📖 Menu", callback_data="cmd:menu")]
+        ]
         try:
             if state.status_message_id:
-                await context.bot.edit_message_text(chat_id=config.RADIO_CHAT_ID, message_id=state.status_message_id, text="\n".join(status_lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+                await context.bot.edit_message_text(
+                    chat_id=config.RADIO_CHAT_ID,
+                    message_id=state.status_message_id,
+                    text="\n".join(status_lines),
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="MarkdownV2"
+                )
             else:
                 raise TelegramError("No status message to edit")
         except TelegramError:
             try:
                 if state.status_message_id:
                     await context.bot.delete_message(config.RADIO_CHAT_ID, state.status_message_id)
-                msg = await context.bot.send_message(chat_id=config.RADIO_CHAT_ID, text="\n".join(status_lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+                msg = await context.bot.send_message(
+                    chat_id=config.RADIO_CHAT_ID,
+                    text="\n".join(status_lines),
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="MarkdownV2"
+                )
                 state.status_message_id = msg.message_id
             except Exception as e:
                 logger.error(f"Status update failed: {e}")
@@ -60,39 +78,31 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin_user = await is_admin(update.effective_user.id)
     menu_text = [
-        f"🎵 *Groove AI Radio v2.2* 🎵",
+        f"🎵 *{escape_markdown_v2('Groove AI Radio v2.1-final')}* 🎵",
         "",
         f"💿 *Commands*:",
-        escape_markdown_v2("/play, /p <query> - Найти и проиграть трек"),
-        escape_markdown_v2("/menu, /m - Показать это меню"),
+        f"`/play, /p <query>` - {escape_markdown_v2('Найти и проиграть трек')}",
+        f"`/menu, /m` - {escape_markdown_v2('Показать это меню')}"
     ]
-    
     reply_keyboard_markup = ReplyKeyboardRemove()
-
     if is_admin_user:
         menu_text.extend([
             "",
             f"👑 *Admin Commands*:",
-            escape_markdown_v2("/ron, /r_on - Включить радио"),
-            escape_markdown_v2("/roff, /r_off, /stop, /t - Выключить радио"),
-            escape_markdown_v2("/skip, /s - Пропустить трек"),
-            escape_markdown_v2("/vote, /v - Голосование за жанр"),
-            escape_markdown_v2("/source, /src <source> - Сменить источник (yt, sc, vk, ar)"),
-            escape_markdown_v2("/refresh, /r - Обновить статус панель"),
-            escape_markdown_v2("/keyboard - Показать/скрыть клавиатуру"),
-            escape_markdown_v2("/stopbot - Остановить бота"),
+            f"`/ron, /r_on` - {escape_markdown_v2('Включить радио')}",
+            f"`/roff, /r_off, /stop, /t` - {escape_markdown_v2('Выключить радио')}",
+            f"`/skip, /s` - {escape_markdown_v2('Пропустить трек')}",
+            f"`/vote, /v` - {escape_markdown_v2('Голосование за жанр')}",
+            f"`/source, /src <source>` - {escape_markdown_v2('Сменить источник (yt, sc, vk, ar)')}",
+            f"`/refresh, /r` - {escape_markdown_v2('Обновить статус панель')}",
+            f"`/keyboard` - {escape_markdown_v2('Показать/скрыть клавиатуру')}",
+            f"`/stopbot` - {escape_markdown_v2('Остановить бота')}"
         ])
-        admin_keyboard = [
-            ['/ron', '/roff', '/skip'],
-            ['/src yt', '/src sc', '/src vk'],
-            ['/vote', '/refresh']
-        ]
         reply_keyboard_markup = ReplyKeyboardMarkup(
-            admin_keyboard,
+            [['/ron', '/roff', '/skip'], ['/src yt', '/src sc', '/src vk'], ['/vote', '/refresh']],
             resize_keyboard=True,
             input_field_placeholder="Admin Commands"
         )
-
     await update.message.reply_text(
         "\n".join(menu_text),
         reply_markup=reply_keyboard_markup,
@@ -152,12 +162,23 @@ async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     if state.active_poll_id:
         return
     options = random.sample(state.votable_genres, 10)
-    message = await context.bot.send_poll(chat_id=config.RADIO_CHAT_ID, question="🗳️ Choose the next music genre:", options=[g.title() for g in options], is_anonymous=False, open_period=config.Constants.POLL_DURATION_SECONDS)
+    message = await context.bot.send_poll(
+        chat_id=config.RADIO_CHAT_ID,
+        question="🗳️ Choose the next music genre:",
+        options=[g.title() for g in options],
+        is_anonymous=False,
+        open_period=config.Constants.POLL_DURATION_SECONDS
+    )
     state.active_poll_id = message.poll.id
     state.poll_message_id = message.message_id
     state.poll_options = [g.title() for g in options]
     state.poll_votes = [0] * len(options)
-    context.job_queue.run_once(tally_vote, config.Constants.POLL_DURATION_SECONDS + 2, data={'poll_message_id': message.message_id, 'chat_id': config.RADIO_CHAT_ID}, name=f"vote_{message.poll.id}")
+    context.job_queue.run_once(
+        tally_vote,
+        config.Constants.POLL_DURATION_SECONDS + 2,
+        data={'poll_message_id': message.message_id, 'chat_id': config.RADIO_CHAT_ID},
+        name=f"vote_{message.poll.id}"
+    )
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
 
@@ -190,7 +211,11 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         if state.genre != new_genre.lower():
             state.genre = new_genre.lower()
             state.radio_playlist.clear()
-            await context.bot.send_message(job.data['chat_id'], f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*", parse_mode="MarkdownV2")
+            await context.bot.send_message(
+                job.data['chat_id'],
+                f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*",
+                parse_mode="MarkdownV2"
+            )
             asyncio.create_task(radio.refill_playlist(context))
     state.active_poll_id = None
     await save_state_from_botdata(context.bot_data)
@@ -222,7 +247,13 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     try:
         with open(track_info["filepath"], 'rb') as f:
-            await context.bot.send_audio(chat_id=query.message.chat_id, audio=f, title=track_info['title'], duration=track_info['duration'], performer=track_info['performer'])
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=f,
+                title=track_info['title'],
+                duration=track_info['duration'],
+                performer=track_info['performer']
+            )
         await query.delete_message()
     finally:
         if os.path.exists(track_info["filepath"]):
