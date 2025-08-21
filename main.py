@@ -55,12 +55,17 @@ async def post_init(application: Application):
         logger.info("Radio was on at startup, resuming...")
         application.bot_data['radio_loop_task'] = asyncio.create_task(radio.radio_loop(application))
     
-    # async def job_callback(context: ContextTypes.DEFAULT_TYPE):
-    #     """Wrapper for the scheduled job to ensure context is passed correctly."""
-    #     logger.info(f"Job callback called. Context type: {type(context)}")
-    #     await handlers.scheduled_vote_command(context)
+    async def job_callback(context: ContextTypes.DEFAULT_TYPE):
+        """Wrapper for the scheduled job to ensure context is passed correctly."""
+        await handlers.scheduled_vote_command(context)
 
-    # application.job_queue.run_repeating(job_callback, interval=config.Constants.VOTING_INTERVAL_SECONDS, first=10, name="hourly_vote_job")
+    application.job_queue.run_repeating(
+        callback=job_callback, 
+        interval=config.Constants.VOTING_INTERVAL_SECONDS, 
+        first=10, 
+        name="hourly_vote_job"
+    )
+    logger.info(f"Scheduled hourly vote job. First run in 10 seconds.")
     logger.info("Bot initialized successfully")
 
 async def on_shutdown(application: Application):
