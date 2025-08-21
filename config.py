@@ -31,6 +31,7 @@ class Constants:
     SEARCH_LIMIT = 50
     MAX_RETRIES = 3
     REFILL_THRESHOLD = 10
+    SUPPORTED_SOURCES = ["youtube", "soundcloud", "vk", "archive"]
 
 # --- Environment Variables and Paths ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
