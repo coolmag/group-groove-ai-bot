@@ -195,6 +195,12 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
 
+@admin_only
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forces a refresh of the status panel."""
+    await update.message.reply_text("Updating status panel...")
+    await update_status_panel(context, force=True)
+
 # --- User Commands ---
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source = None
