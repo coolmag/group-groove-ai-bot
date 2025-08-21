@@ -60,7 +60,7 @@ async def post_init(application: Application):
         logger.info(f"Job callback called. Context type: {type(context)}")
         await handlers.scheduled_vote_command(context)
 
-    application.job_queue.run_repeating(scheduled_vote_wrapper, interval=config.Constants.VOTING_INTERVAL_SECONDS, first=10, name="hourly_vote_job")
+    application.job_queue.run_repeating(job_callback, interval=config.Constants.VOTING_INTERVAL_SECONDS, first=10, name="hourly_vote_job")
     logger.info("Bot initialized successfully")
 
 async def on_shutdown(application: Application):
