@@ -32,16 +32,14 @@ class MusicSourceManager:
             logger.warning(f"Cookie data for {source_name} is missing.")
             return None
         
-        # Check if the data is a path to an existing file first
-        if os.path.exists(cookie_data):
-            return cookie_data
-
-        # If not a path, treat as raw data and write to a temp file
+        # For Railway, we assume data is raw. We write it to a temp file.
         try:
             temp_dir = Path("/tmp")
             temp_dir.mkdir(exist_ok=True)
             cookie_file = temp_dir / f"{source_name}_cookies.txt"
-            cookie_file.write_text(cookie_data)
+            # Clean up potential formatting issues from env var
+            cleaned_data = "\n".join([line.strip() for line in cookie_data.strip().split('\n')])
+            cookie_file.write_text(cleaned_data)
             logger.info(f"Successfully wrote {source_name} cookies to temporary file: {cookie_file}")
             return str(cookie_file)
         except Exception as e:
