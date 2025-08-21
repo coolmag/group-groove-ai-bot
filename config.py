@@ -14,34 +14,34 @@ load_dotenv()
 # --- Constants ---
 class Constants:
     VOTING_INTERVAL_SECONDS = 3600
-    TRACK_INTERVAL_SECONDS = 60
-    POLL_DURATION_SECONDS = 10
-    POLL_CHECK_TIMEOUT = 10
-    MAX_FILE_SIZE = 50_000_000
-    MAX_DURATION = 300
-    MIN_DURATION = 30
-    PLAYED_URLS_MEMORY = 100
-    DOWNLOAD_TIMEOUT = 30
-    DEFAULT_SOURCE = "soundcloud"
-    DEFAULT_GENRE = "pop"
-    PAUSE_BETWEEN_TRACKS = 0
-    STATUS_UPDATE_INTERVAL = 10
-    STATUS_UPDATE_MIN_INTERVAL = 2
-    RETRY_INTERVAL = 30
-    SEARCH_LIMIT = 50
+    POLL_DURATION_SECONDS = 600 # 10 minutes
+    MAX_FILE_SIZE = 48_000_000 # Telegram limit is 50MB, being safe
+    MAX_DURATION = 7200 # 2 hours
+    MIN_DURATION = 10 # 10 seconds
+    PLAYED_URLS_MEMORY = 200
+    DOWNLOAD_TIMEOUT = 60
+    DEFAULT_SOURCE = "youtube"
+    DEFAULT_GENRE = "lo-fi hip hop"
+    PAUSE_BETWEEN_TRACKS = 2
+    STATUS_UPDATE_MIN_INTERVAL = 5
+    RETRY_INTERVAL = 5
+    SEARCH_LIMIT = 10
     MAX_RETRIES = 3
-    REFILL_THRESHOLD = 10
+    REFILL_THRESHOLD = 5
     SUPPORTED_SOURCES = ["youtube", "soundcloud", "vk", "archive"]
 
 # --- Environment Variables and Paths ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id] or [482549032]
-RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", -1002892409779))
+ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id]
+RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID"))
 CONFIG_FILE = Path("radio_config.json")
 DOWNLOAD_DIR = Path("downloads")
-YOUTUBE_COOKIES_DATA = os.getenv("YOUTUBE_COOKIES_DATA")
-VK_COOKIES_DATA = os.getenv("VK_COOKIES_DATA")
 PORT = int(os.getenv("PORT", 8080))
+
+# For cloud deployments, cookie data is passed as env var content
+# For local, it can be a file path
+VK_COOKIES_DATA = os.getenv("VK_COOKIES_DATA")
+YOUTUBE_COOKIES_DATA = os.getenv("YOUTUBE_COOKIES_DATA")
 
 # --- Models ---
 class NowPlaying(BaseModel):
@@ -52,7 +52,7 @@ class NowPlaying(BaseModel):
 
 class State(BaseModel):
     is_on: bool = False
-    genre: str = "lo-fi hip hop"
+    genre: str = Constants.DEFAULT_GENRE
     source: str = Constants.DEFAULT_SOURCE
     radio_playlist: Deque[str] = Field(default_factory=deque)
     played_radio_urls: Deque[str] = Field(default_factory=deque)
@@ -66,44 +66,21 @@ class State(BaseModel):
     last_error: Optional[str] = None
     votable_genres: List[str] = Field(
         default_factory=lambda: sorted(list(set([
-            # Old list
-            "pop", "pop 80s", "pop 90s", "pop 2000s",
-            "rock", "rock 60s", "rock 70s", "rock 80s", "rock 90s",
-            "hip hop", "hip hop 90s", "hip hop 2000s",
-            "electronic", "electronic 90s", "electronic 2000s",
-            "classical", "classical 18th century", "classical 19th century",
-            "jazz", "jazz 50s", "jazz 60s",
-            "blues", "blues 50s", "blues 60s",
-            "country", "country 80s", "country 90s",
-            "metal", "metal 80s", "metal 90s",
-            "reggae", "reggae 70s", "reggae 80s",
-            "folk", "folk 60s", "folk 70s",
-            "indie", "indie 90s", "indie 2000s",
-            "rap", "rap 80s", "rap 90s", "rap 2000s",
-            "r&b", "r&b 90s", "r&b 2000s",
-            "soul", "soul 60s", "soul 70s",
-            "funk", "funk 70s", "funk 80s",
-            "disco", "disco 70s", "disco 80s",
-            # New list
-            "rock 'n' roll", "doo-wop", "folk rock",
-            "psychedelic rock", "hard rock", "glam rock",
-            "punk rock", "heavy metal", "hip-hop", "new wave",
-            "synthpop", "house", "techno", "grunge", "britpop", "industrial rock",
-            "gangsta rap", "trip-hop", "pop punk", "emo", "crunk", "dubstep",
-            "electropop", "trap"
+            "pop", "80s pop", "90s pop", "2000s pop",
+            "rock", "60s rock", "70s rock", "80s rock", "90s rock",
+            "hip hop", "90s hip hop", "2000s hip hop",
+            "electronic", "90s electronic", "2000s electronic",
+            "classical", "jazz", "blues", "country", "metal",
+            "reggae", "folk", "indie", "rap", "r&b", "soul", "funk", "disco",
+            "lo-fi hip hop", "synthwave", "cyberpunk", "ambient"
         ])))
     )
-    retry_count: int = 0
 
-    @field_serializer('radio_playlist', 'played_radio_urls', 'poll_votes')
-    def _serialize_deques(self, v, _info):
-        if isinstance(v, list):
-            return v
+    @field_serializer('radio_playlist', 'played_radio_urls')
+    def serialize_deques(self, v, _info):
         return list(v)
 
-    @field_validator('radio_playlist', 'played_radio_urls', 'poll_votes', mode='before')
+    @field_validator('radio_playlist', 'played_radio_urls', mode='before')
     @classmethod
-    def _lists_to_deques(cls, v, info):
-        if isinstance(v, list):
-            return deque(v) if 'votes' not in info.field_name else v
-        return deque() if 'votes' not in info.field_name else []
+    def deques_validate(cls, v):
+        return deque(v)

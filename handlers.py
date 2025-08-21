@@ -2,11 +2,8 @@
 import asyncio
 import logging
 import random
-import re
-import time
-from typing import Optional
+import os
 
-from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
@@ -22,120 +19,63 @@ logger = logging.getLogger(__name__)
 
 # --- UI & Menu ---
 async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
-    async with context.bot_data.get('status_lock', asyncio.Lock()):
+    async with context.bot_data.get('status_lock'):
         state: config.State = context.bot_data['state']
-        current_time = time.time()
-        
-        if not force and current_time - state.last_status_update < config.Constants.STATUS_UPDATE_MIN_INTERVAL:
+        if not force and (time.time() - state.last_status_update) < config.Constants.STATUS_UPDATE_MIN_INTERVAL:
             return
-
         status_icon = '🟢 ON' if state.is_on else '🔴 OFF'
-        status_lines = [
-            f"🎵 *Groove AI Radio* 🎵",
-            f"**Status**: {status_icon}",
-            f"**Genre**: {escape_markdown_v2(state.genre.title())}",
-            f"**Source**: {escape_markdown_v2(state.source.title())}"
-        ]
-        
+        status_lines = [f"🎵 *Groove AI Radio v2.1* 🎵", f"**Status**: {status_icon}", f"**Genre**: {escape_markdown_v2(state.genre.title())}", f"**Source**: {escape_markdown_v2(state.source.title())}"]
         if state.now_playing:
-            progress = min((current_time - state.now_playing.start_time) / state.now_playing.duration, 1.0)
-            progress_bar = get_progress_bar(progress)
+            progress = min((time.time() - state.now_playing.start_time) / state.now_playing.duration, 1.0)
             status_lines.append(f"**Now Playing**: {escape_markdown_v2(state.now_playing.title)}")
-            status_lines.append(f"**Progress**: {progress_bar} {int(progress * 100)}%")
+            status_lines.append(f"**Progress**: {get_progress_bar(progress)} {int(progress * 100)}%")
         else:
             status_lines.append("**Now Playing**: _Idle_")
-            
         if state.active_poll_id:
-            status_lines.append(f"🗳️ **Active Poll** {escape_markdown_v2('(голосование идет)')}")
-            
+            status_lines.append(f"🗳️ **Active Poll**")
         if state.last_error:
             status_lines.append(f"⚠️ **Last Error**: {state.last_error}")
-            
-        status_text = "\n".join(status_lines)
-        
-        start_skip_text = '⏭️ Skip' if state.is_on else '▶️ Start'
-        keyboard = [
-            [InlineKeyboardButton("🔄 Refresh", callback_data="radio:refresh"), InlineKeyboardButton(start_skip_text, callback_data="radio:skip" if state.is_on else "radio:on")],
-            [InlineKeyboardButton("🗳️ Vote", callback_data="vote:start"), InlineKeyboardButton("⏹️ Stop", callback_data="radio:off")],
-            [InlineKeyboardButton("📖 Menu", callback_data="cmd:menu")]
-        ]
-        
+        keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="radio:refresh"), InlineKeyboardButton('⏭️ Skip' if state.is_on else '▶️ Start', callback_data="radio:skip" if state.is_on else "radio:on")], [InlineKeyboardButton("🗳️ Vote", callback_data="vote:start"), InlineKeyboardButton("⏹️ Stop", callback_data="radio:off")], [InlineKeyboardButton("📖 Menu", callback_data="cmd:menu")] ]
         try:
             if state.status_message_id:
-                await context.bot.edit_message_text(chat_id=config.RADIO_CHAT_ID, message_id=state.status_message_id, text=status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+                await context.bot.edit_message_text(chat_id=config.RADIO_CHAT_ID, message_id=state.status_message_id, text="\n".join(status_lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
             else:
                 raise TelegramError("No status message to edit")
         except TelegramError:
             try:
                 if state.status_message_id:
                     await context.bot.delete_message(config.RADIO_CHAT_ID, state.status_message_id)
-                msg = await context.bot.send_message(chat_id=config.RADIO_CHAT_ID, text=status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+                msg = await context.bot.send_message(chat_id=config.RADIO_CHAT_ID, text="\n".join(status_lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
                 state.status_message_id = msg.message_id
-            except Exception as final_e:
-                logger.error(f"Complete failure in status update: {final_e}")
-        state.last_status_update = current_time
+            except Exception as e:
+                logger.error(f"Status update failed: {e}")
+        state.last_status_update = time.time()
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin_user = await is_admin(update.effective_user.id)
-    menu_text = [
-        f"🎵 *Groove AI Radio* 🎵",
-        "",
-        f"💿 *Commands*:",
-        "`/play, /p <query>` - Найти и проиграть трек",
-        "`/menu, /m` - Показать это меню",
-    ]
-    
+    menu_text = [f"🎵 *Groove AI Radio v2.1* 🎵", "", f"💿 *Commands*:", "`/play, /p <query>` - Найти и проиграть трек", "`/menu, /m` - Показать это меню"]
     reply_keyboard_markup = ReplyKeyboardRemove()
-
     if is_admin_user:
-        menu_text.extend([
-            "",
-            f"👑 *Admin Commands*:",
-            "`/ron, /r_on` - Включить радио",
-            "`/roff, /r_off, /stop, /t` - Выключить радио",
-            "`/skip, /s` - Пропустить трек",
-            "`/vote, /v` - Голосование за жанр",
-            "`/source, /src <source>` - Сменить источник (yt, sc, vk, ar)",
-            "`/refresh, /r` - Обновить статус панель",
-            "`/keyboard` - Показать/скрыть клавиатуру",
-            "`/stopbot` - Остановить бота (админ)",
-        ])
-        admin_keyboard = [
-            ['/ron', '/roff', '/skip'],
-            ['/src yt', '/src sc', '/src vk'],
-            ['/vote', '/refresh']
-        ]
-        reply_keyboard_markup = ReplyKeyboardMarkup(
-            admin_keyboard,
-            resize_keyboard=True,
-            input_field_placeholder="Admin Commands"
-        )
-
-    await update.message.reply_text(
-        "\n".join(menu_text),
-        reply_markup=reply_keyboard_markup,
-        parse_mode="MarkdownV2"
-    )
+        menu_text.extend(["", f"👑 *Admin Commands*:", "`/ron, /r_on` - Включить радио", "`/roff, /r_off, /stop, /t` - Выключить радио", "`/skip, /s` - Пропустить трек", "`/vote, /v` - Голосование за жанр", "`/source, /src <source>` - Сменить источник (yt, sc, vk, ar)", "`/refresh, /r` - Обновить статус панель", "`/keyboard` - Показать/скрыть клавиатуру", "`/stopbot` - Остановить бота"])
+        reply_keyboard_markup = ReplyKeyboardMarkup([['/ron', '/roff', '/skip'], ['/src yt', '/src sc', '/src vk'], ['/vote', '/refresh']], resize_keyboard=True, input_field_placeholder="Admin Commands")
+    await update.message.reply_text("\n".join(menu_text), reply_markup=reply_keyboard_markup, parse_mode="MarkdownV2")
 
 # --- Radio Control ---
 @admin_only
 async def radio_on_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE, turn_on: bool):
     state: config.State = context.bot_data['state']
     if turn_on == state.is_on:
-        await update.message.reply_text(f"Radio is already {'running' if turn_on else 'stopped'}!")
+        await update.message.reply_text(f"Radio is already {'on' if turn_on else 'off'}.")
         return
-
     state.is_on = turn_on
     if turn_on:
-        await update.message.reply_text("🚀 Radio starting... Searching for music.")
+        await update.message.reply_text("🚀 Radio starting...")
         context.bot_data['radio_loop_task'] = asyncio.create_task(radio.radio_loop(context))
     else:
         if 'radio_loop_task' in context.bot_data and not context.bot_data['radio_loop_task'].done():
             context.bot_data['radio_loop_task'].cancel()
         state.now_playing = None
-        state.radio_playlist.clear()
-        await update.message.reply_text("⏹️ Radio stopped!")
-    
+        await update.message.reply_text("⏹️ Radio stopped.")
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
 
@@ -145,29 +85,24 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not state.is_on:
         await update.message.reply_text("Radio is not running.")
         return
-    state.now_playing = None # The loop will detect this and skip
-    await update.message.reply_text("⏭️ Skipping current track...")
+    state.now_playing = None
+    await update.message.reply_text("⏭️ Skipping...")
 
 @admin_only
 async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: config.State = context.bot_data['state']
     source_alias = context.args[0].lower() if context.args else ""
-    
     source_map = {"yt": "youtube", "sc": "soundcloud", "vk": "vk", "ar": "archive"}
     new_source = next((v for k, v in source_map.items() if source_alias in [k, v]), None)
-
     if not new_source:
-        await update.message.reply_text(f"Invalid source. Supported: {list(source_map.values())}")
+        await update.message.reply_text(f"Invalid source. Supported: {list(source_map.keys())}")
         return
-        
     if state.source == new_source:
-        await update.message.reply_text(f"Source is already set to {new_source.title()}")
+        await update.message.reply_text(f"Source is already {new_source.title()}.")
         return
-
     state.source = new_source
     state.radio_playlist.clear()
-    state.now_playing = None
-    await update.message.reply_text(f"Source switched to: {new_source.title()}. Refilling playlist...")
+    await update.message.reply_text(f"Source switched to: {new_source.title()}.")
     await radio.refill_playlist(context)
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
@@ -176,54 +111,31 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start_vote(context: ContextTypes.DEFAULT_TYPE):
     state: config.State = context.bot_data['state']
     if state.active_poll_id:
-        logger.info("Vote requested, but one is already active.")
-        return
-    if len(state.votable_genres) < 10:
-        logger.warning("Not enough genres to start a vote.")
         return
     options = random.sample(state.votable_genres, 10)
-    try:
-        message = await context.bot.send_poll(
-            chat_id=config.RADIO_CHAT_ID,
-            question="🗳️ Choose the next music genre:",
-            options=[g.title() for g in options],
-            is_anonymous=False,
-            allows_multiple_answers=False,
-            open_period=config.Constants.POLL_DURATION_SECONDS
-        )
-        state.active_poll_id = message.poll.id
-        state.poll_message_id = message.message_id
-        state.poll_options = [g.title() for g in options]
-        state.poll_votes = [0] * len(options)
-        context.job_queue.run_once(tally_vote, config.Constants.POLL_DURATION_SECONDS + 2, data={'poll_message_id': message.message_id, 'chat_id': config.RADIO_CHAT_ID}, name=f"vote_{message.poll.id}")
-        logger.info(f"Started poll {message.poll.id}")
-        await save_state_from_botdata(context.bot_data)
-        await update_status_panel(context, force=True)
-    except Exception as e:
-        logger.error(f"Failed to start vote: {e}")
-        set_escaped_error(state, "Failed to start poll.")
+    message = await context.bot.send_poll(chat_id=config.RADIO_CHAT_ID, question="🗳️ Choose the next music genre:", options=[g.title() for g in options], is_anonymous=False, open_period=config.Constants.POLL_DURATION_SECONDS)
+    state.active_poll_id = message.poll.id
+    state.poll_message_id = message.message_id
+    state.poll_options = [g.title() for g in options]
+    state.poll_votes = [0] * len(options)
+    context.job_queue.run_once(tally_vote, config.Constants.POLL_DURATION_SECONDS + 2, data={'poll_message_id': message.message_id, 'chat_id': config.RADIO_CHAT_ID}, name=f"vote_{message.poll.id}")
+    await save_state_from_botdata(context.bot_data)
+    await update_status_panel(context, force=True)
 
 @admin_only
 async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Starting a new genre vote...")
     await start_vote(context)
 
 @admin_only
 async def scheduled_vote_command(context: ContextTypes.DEFAULT_TYPE):
-    state: config.State = context.bot_data.get('state')
-    if not state or not state.is_on:
-        return
-    await start_vote(context)
+    if context.bot_data['state'].is_on:
+        await start_vote(context)
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: config.State = context.bot_data['state']
     answer = update.poll_answer
-    if answer.poll_id != state.active_poll_id:
-        return
-    if answer.option_ids:
-        chosen_option_index = answer.option_ids[0]
-        if 0 <= chosen_option_index < len(state.poll_votes):
-            state.poll_votes[chosen_option_index] += 1
+    if answer.poll_id == state.active_poll_id and answer.option_ids:
+        state.poll_votes[answer.option_ids[0]] += 1
 
 async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -232,20 +144,15 @@ async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await context.bot.stop_poll(job.data['chat_id'], job.data['poll_message_id'])
-    except TelegramError as e:
-        if "poll has already been closed" not in str(e):
-            logger.error(f"Could not stop poll: {e}")
+    except TelegramError:
+        pass
     if sum(state.poll_votes) > 0:
-        max_votes = max(state.poll_votes)
-        winning_indices = [i for i, v in enumerate(state.poll_votes) if v == max_votes]
-        new_genre = state.poll_options[random.choice(winning_indices)].lower()
-        if state.genre != new_genre:
-            state.genre = new_genre
+        new_genre = state.poll_options[max(range(len(state.poll_votes)), key=state.poll_votes.__getitem__)]
+        if state.genre != new_genre.lower():
+            state.genre = new_genre.lower()
             state.radio_playlist.clear()
-            await context.bot.send_message(job.data['chat_id'], f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre.title())}*", parse_mode="MarkdownV2")
+            await context.bot.send_message(job.data['chat_id'], f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre)}*", parse_mode="MarkdownV2")
             asyncio.create_task(radio.refill_playlist(context))
-    else:
-        await context.bot.send_message(job.data['chat_id'], "No votes received. Keeping current genre.")
     state.active_poll_id = None
     await save_state_from_botdata(context.bot_data)
     await update_status_panel(context, force=True)
@@ -269,7 +176,7 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     url = query.data.split(":", 1)[1]
-    await query.edit_message_text(f"Downloading and sending track...")
+    await query.edit_message_text(f"Downloading track...")
     track_info = await radio.music_source_manager.download_track(url)
     if not track_info:
         await query.edit_message_text("[ERR] Failed to download track.")
@@ -287,9 +194,9 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     command, action = query.data.split(":", 1)
+    user_id = query.from_user.id
     if command == "radio":
-        if not await is_admin(query.from_user.id):
-            await query.answer("Admin only command.", show_alert=True)
+        if not await is_admin(user_id):
             return
         if action == "refresh":
             await update_status_panel(context, force=True)
@@ -300,8 +207,7 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
         elif action == "off":
             await radio_on_off_command(update, context, False)
     elif command == "vote" and action == "start":
-        if not await is_admin(query.from_user.id):
-            await query.answer("Admin only command.", show_alert=True)
+        if not await is_admin(user_id):
             return
         await start_vote(context)
     elif command == "cmd" and action == "menu":
@@ -309,7 +215,6 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 @admin_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Updating status panel...")
     await update_status_panel(context, force=True)
 
 @admin_only
@@ -323,8 +228,6 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config.CONFIG_FILE.unlink()
         await update.message.reply_text("State file deleted. Restarting...")
         asyncio.create_task(context.application.stop())
-    else:
-        await update.message.reply_text("No state file to delete.")
 
 @admin_only
 async def admin_keyboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
