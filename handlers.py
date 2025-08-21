@@ -246,6 +246,46 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if os.path.exists(track_info["filepath"]):
             os.remove(track_info["filepath"])
 
+async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    command, action = query.data.split(":", 1)
+    state: config.State = context.bot_data['state']
+    
+    if command == "radio":
+        if not await is_admin(query.from_user.id):
+            await query.answer("Admin only command.", show_alert=True)
+            return
+            
+        if action == "refresh":
+            await update_status_panel(context, force=True)
+        elif action == "skip":
+            if state.is_on:
+                state.now_playing = None
+        elif action == "on":
+            if not state.is_on:
+                state.is_on = True
+                asyncio.create_task(radio.radio_loop(context))
+        elif action == "off":
+            if state.is_on:
+                state.is_on = False
+                if 'radio_loop_task' in context.bot_data and not context.bot_data['radio_loop_task'].done():
+                    context.bot_data['radio_loop_task'].cancel()
+                state.now_playing = None
+        await update_status_panel(context, force=True)
+            
+    elif command == "vote":
+        if not await is_admin(query.from_user.id):
+            await query.answer("Admin only command.", show_alert=True)
+            return
+        if action == "start":
+            await start_vote(context)
+            
+    elif command == "cmd":
+        if action == "menu":
+            await show_menu(query, context)
+
 # --- Admin & System ---
 @admin_only
 async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
