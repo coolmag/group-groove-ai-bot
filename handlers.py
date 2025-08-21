@@ -267,6 +267,11 @@ async def admin_keyboard_command(update: Update, context: ContextTypes.DEFAULT_T
     reply_markup = ReplyKeyboardMarkup(admin_keyboard, resize_keyboard=True, input_field_placeholder="Admin Commands")
     await update.message.reply_text("Admin keyboard enabled.", reply_markup=reply_markup)
 
+@admin_only
+async def remove_keyboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Removes the reply keyboard."""
+    await update.message.reply_text("Admin keyboard removed.", reply_markup=ReplyKeyboardRemove())
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update, context)
 
