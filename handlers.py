@@ -386,8 +386,13 @@ async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         }
         
         if "youtube.com" in url or "youtu.be" in url:
-            if config.YOUTUBE_COOKIES and os.path.exists(config.YOUTUBE_COOKIES):
-                ydl_opts['cookiefile'] = config.YOUTUBE_COOKIES
+            cookie_path = radio._get_cookie_file_from_data(config.YOUTUBE_COOKIES_DATA, "youtube")
+            if cookie_path:
+                ydl_opts['cookiefile'] = cookie_path
+        elif "vk.com" in url:
+            cookie_path = radio._get_cookie_file_from_data(config.VK_COOKIES_DATA, "vk")
+            if cookie_path:
+                ydl_opts['cookiefile'] = cookie_path
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)

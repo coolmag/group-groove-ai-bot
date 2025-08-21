@@ -19,6 +19,7 @@ import utils
 import radio
 import handlers
 import locks
+from utils import load_state, save_state_from_botdata
 
 # --- Setup ---
 logging.basicConfig(

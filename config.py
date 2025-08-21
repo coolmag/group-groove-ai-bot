@@ -38,8 +38,8 @@ ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",")
 RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", -1002892409779))
 CONFIG_FILE = Path("radio_config.json")
 DOWNLOAD_DIR = Path("downloads")
-YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")
-VK_COOKIES = os.getenv("VK_COOKIES", "./vk_cookies.txt")
+YOUTUBE_COOKIES_DATA = os.getenv("YOUTUBE_COOKIES_DATA")
+VK_COOKIES_DATA = os.getenv("VK_COOKIES_DATA")
 PORT = int(os.getenv("PORT", 8080))
 
 # --- Models ---
