@@ -83,7 +83,7 @@ async def post_init(application: Application):
         state.poll_options = []
 
     application.job_queue.run_repeating(
-        handlers.scheduled_vote_command, 
+        callback=handlers.scheduled_vote_command, 
         interval=config.Constants.VOTING_INTERVAL_SECONDS, 
         first=10, 
         name="hourly_vote_job"
@@ -138,6 +138,8 @@ def main():
         app.add_handler(CommandHandler(["source", "src"], handlers.set_source_command))
         app.add_handler(CommandHandler(["reset"], handlers.reset_command))
         app.add_handler(CommandHandler(["play", "p"], handlers.play_command))
+        app.add_handler(CommandHandler("keyboard", handlers.admin_keyboard_command))
+        app.add_handler(CommandHandler("nokeyboard", handlers.remove_keyboard_command))
         app.add_handler(CallbackQueryHandler(handlers.play_button_callback, pattern=r"^play_track:"))
         app.add_handler(CallbackQueryHandler(handlers.radio_buttons_callback, pattern=r"^(radio|vote|cmd):" ))
         app.add_handler(PollAnswerHandler(handlers.handle_poll_answer))
