@@ -32,15 +32,20 @@ class MusicSourceManager:
             logger.warning(f"Cookie data for {source_name} is missing.")
             return None
         
-        # For Railway, we assume data is raw. We write it to a temp file.
         try:
+            # This is a robust way to handle multiline env vars
+            # It cleans up whitespace and ensures it's a valid string
+            cleaned_data = "\n".join(line.strip() for line in cookie_data.strip().splitlines() if line.strip())
+            
+            # Basic validation
+            if not cleaned_data.strip().startswith("# Netscape HTTP Cookie File"):
+                logger.error(f"Cookie data for {source_name} does not start with the correct header.")
+                return None
+
             temp_dir = Path("/tmp")
             temp_dir.mkdir(exist_ok=True)
             cookie_file = temp_dir / f"{source_name}_cookies.txt"
-            # Clean up potential formatting issues from env var
-            cleaned_data = "\n".join([line.strip() for line in cookie_data.strip().split('\n')])
             cookie_file.write_text(cleaned_data)
-            logger.info(f"Successfully wrote {source_name} cookies to temporary file: {cookie_file}")
             return str(cookie_file)
         except Exception as e:
             logger.error(f"Failed to write temporary cookie file for {source_name}: {e}")
@@ -78,8 +83,8 @@ class MusicSourceManager:
     async def _search_vk(self, query: str) -> List[dict]:
         cookie_path = self._get_cookie_file_from_data(config.VK_COOKIES_DATA, "vk")
         if not cookie_path:
-            logger.error("VK source selected but no VK_COOKIES_DATA was provided or writable.")
             return []
+        # Correct syntax for vk search is to pass it directly to extract_info
         search_query = f"vksearch{config.Constants.SEARCH_LIMIT}:{query}"
         ydl_opts = {
             'cookiefile': cookie_path,
