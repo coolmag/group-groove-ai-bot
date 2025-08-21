@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 import os
+import time
 from pathlib import Path
-from typing import List, Deque
+from typing import List, Optional, Deque
 from collections import deque
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from typing import Optional
-import time
 
 # --- Setup ---
 load_dotenv()
