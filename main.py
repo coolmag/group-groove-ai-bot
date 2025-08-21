@@ -197,6 +197,31 @@ class MusicBot:
 
 
 def main():
+    # --- Startup Validation ---
+    logger.info("--- Running Environment Variable Check ---")
+    required_vars = ["BOT_TOKEN", "ADMIN_IDS", "RADIO_CHAT_ID"]
+    all_vars_ok = True
+    for var in required_vars:
+        if not getattr(config, var):
+            logger.error(f"FATAL: Environment variable {var} is not set!")
+            all_vars_ok = False
+    
+    if config.VK_COOKIES_DATA:
+        logger.info("VK_COOKIES_DATA is present.")
+    else:
+        logger.warning("VK_COOKIES_DATA is missing. VK source will not work.")
+
+    if config.YOUTUBE_COOKIES_DATA:
+        logger.info("YOUTUBE_COOKIES_DATA is present.")
+    else:
+        logger.warning("YOUTUBE_COOKIES_DATA is missing. YouTube source may be restricted.")
+    
+    if not all_vars_ok:
+        logger.fatal("Bot cannot start due to missing required environment variables.")
+        return # Stop execution if required vars are missing
+
+    logger.info("--- Environment Variable Check Passed ---")
+
     try:
         if not config.BOT_TOKEN:
             raise ValueError("BOT_TOKEN is not set!")
