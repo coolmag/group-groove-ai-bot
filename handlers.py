@@ -152,6 +152,14 @@ async def vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def scheduled_vote_command(context: ContextTypes.DEFAULT_TYPE):
+    """Callback job to start a scheduled genre poll."""
+    state: config.State = context.bot_data.get('state')
+    if not state or not state.is_on:
+        logger.info("Scheduled vote job skipped: radio is not running or state not found.")
+        return
+
+    logger.info(f"Running scheduled vote in chat {config.RADIO_CHAT_ID}")
+    await start_vote(context)
 
 @admin_only
 async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
