@@ -81,20 +81,20 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎵 *Groove AI Radio* 🎵",
         "",
         f"💿 *Commands*:",
-        "`/play, /p <query>` - Найти и проиграть трек",
-        "`/menu, /m` - Показать это меню",
+        escape_markdown_v2("/play, /p <query> - Найти и проиграть трек"),
+        escape_markdown_v2("/menu, /m - Показать это меню"),
     ]
     if is_admin_user:
         menu_text.extend([
             "",
             f"👑 *Admin Commands*:",
-            "`/ron, /r_on` - Включить радио",
-            "`/roff, /r_off, /stop, /t` - Выключить радио",
-            "`/skip, /s` - Пропустить трек",
-            "`/vote, /v` - Голосование за жанр",
-            "`/source, /src <source>` - Сменить источник (yt, sc, vk, ar)",
-            "`/refresh, /r` - Обновить статус панель",
-            "`/keyboard` - Показать/скрыть клавиатуру",
+            escape_markdown_v2("/ron, /r_on - Включить радио"),
+            escape_markdown_v2("/roff, /r_off, /stop, /t - Выключить радио"),
+            escape_markdown_v2("/skip, /s - Пропустить трек"),
+            escape_markdown_v2("/vote, /v - Голосование за жанр"),
+            escape_markdown_v2("/source, /src <source> - Сменить источник (yt, sc, vk, ar)"),
+            escape_markdown_v2("/refresh, /r - Обновить статус панель"),
+            escape_markdown_v2("/keyboard - Показать/скрыть клавиатуру"),
         ])
     await update.message.reply_text("\n".join(menu_text), parse_mode="MarkdownV2")
 

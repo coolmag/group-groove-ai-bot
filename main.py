@@ -82,8 +82,12 @@ async def post_init(application: Application):
         state.poll_message_id = None
         state.poll_options = []
 
+    async def job_callback(context: ContextTypes.DEFAULT_TYPE):
+        """Wrapper for the scheduled job to ensure context is passed correctly."""
+        await handlers.scheduled_vote_command(context)
+
     application.job_queue.run_repeating(
-        callback=handlers.scheduled_vote_command, 
+        callback=job_callback, 
         interval=config.Constants.VOTING_INTERVAL_SECONDS, 
         first=10, 
         name="hourly_vote_job"
