@@ -46,8 +46,8 @@ class MusicBot:
 
     def register_handlers(self):
         self.app.add_handler(CommandHandler(["start", "menu", "m"], handlers.start_command))
-        self.app.add_handler(CommandHandler(["ron", "r_on"], handlers.radio_on_command))
-        self.app.add_handler(CommandHandler(["roff", "r_off", "stop", "t"], handlers.radio_off_command))
+        self.app.add_handler(CommandHandler(["ron", "r_on"], lambda u, c: self.radio_on_off_command(u, c, turn_on=True)))
+        self.app.add_handler(CommandHandler(["roff", "r_off", "stop", "t"], lambda u, c: self.radio_on_off_command(u, c, turn_on=False)))
         self.app.add_handler(CommandHandler("stopbot", handlers.stop_bot_command))
         self.app.add_handler(CommandHandler(["skip", "s"], handlers.skip_command))
         self.app.add_handler(CommandHandler(["vote", "v"], handlers.vote_command))
