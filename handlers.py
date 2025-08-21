@@ -161,6 +161,61 @@ async def scheduled_vote_command(context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Running scheduled vote in chat {config.RADIO_CHAT_ID}")
     await start_vote(context)
 
+async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles a user's vote in a poll."""
+    state: config.State = context.bot_data['state']
+    answer = update.poll_answer
+    
+    if answer.poll_id != state.active_poll_id:
+        return
+
+    if answer.option_ids:
+        chosen_option_index = answer.option_ids[0]
+        if 0 <= chosen_option_index < len(state.poll_votes):
+            state.poll_votes[chosen_option_index] += 1
+            logger.info(f"Vote received for option {chosen_option_index}. New counts: {state.poll_votes}")
+
+async def tally_vote(context: ContextTypes.DEFAULT_TYPE):
+    """Called by the job queue to end the poll and determine the winner."""
+    job = context.job
+    state: config.State = context.bot_data['state']
+
+    if not state.active_poll_id or state.poll_message_id != job.data['poll_message_id']:
+        logger.warning("Tally job running for an outdated or invalid poll. Ignoring.")
+        return
+
+    try:
+        await context.bot.stop_poll(job.data['chat_id'], job.data['poll_message_id'])
+    except TelegramError as e:
+        if "poll has already been closed" not in str(e):
+            logger.error(f"Could not stop poll: {e}")
+
+    if sum(state.poll_votes) > 0:
+        max_votes = max(state.poll_votes)
+        winning_indices = [i for i, v in enumerate(state.poll_votes) if v == max_votes]
+        winner_idx = random.choice(winning_indices)
+        new_genre_title = state.poll_options[winner_idx]
+        new_genre = new_genre_title.lower()
+        
+        if state.genre != new_genre:
+            state.genre = new_genre
+            state.radio_playlist.clear()
+            await context.bot.send_message(job.data['chat_id'], f"🏁 Vote finished! New genre: *{escape_markdown_v2(new_genre_title)}*", parse_mode="MarkdownV2")
+            logger.info(f"Genre changed to '{new_genre}'. Refilling playlist.")
+            asyncio.create_task(radio.refill_playlist(context))
+        else:
+            await context.bot.send_message(job.data['chat_id'], "Vote finished. Genre remains the same.")
+    else:
+        await context.bot.send_message(job.data['chat_id'], "No votes received. Keeping the current genre.")
+
+    # Reset poll state
+    state.active_poll_id = None
+    state.poll_message_id = None
+    state.poll_options = []
+    state.poll_votes = []
+    await save_state_from_botdata(context.bot_data)
+    await update_status_panel(context, force=True)
+
 @admin_only
 async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state: config.State = context.bot_data['state']
