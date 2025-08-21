@@ -177,7 +177,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.edit_text("No tracks found. 😔")
         return
         
-    keyboard = [InlineKeyboardButton(f"▶️ {t['title'][:40]}... ({format_duration(t['duration'])})", callback_data=f"play_track:{t['url']}")] for t in tracks[:5]]
+    keyboard = [[InlineKeyboardButton(f"▶️ {t['title'][:40]}... ({format_duration(t['duration'])})", callback_data=f"play_track:{t['url']}")] for t in tracks[:5]]
     await message.edit_text("Select a track to play:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def play_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
