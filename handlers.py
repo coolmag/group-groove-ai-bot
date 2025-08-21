@@ -357,7 +357,13 @@ async def radio_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             
     elif command == "cmd":
         if action == "menu":
-            await show_menu(query, context)
+            await show_menu(query.message, context) # Use query.message for consistency
+
+@admin_only
+async def stop_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stops the bot gracefully."""
+    await update.message.reply_text("Bot is shutting down...")
+    asyncio.create_task(context.application.stop())
 
 # --- Admin & System ---
 @admin_only
