@@ -27,7 +27,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # --- Bot Lifecycle ---
 async def post_init(application: Application):
     logger.info("Initializing bot...")
@@ -60,7 +59,12 @@ async def post_init(application: Application):
         logger.info(f"Job callback called. Context type: {type(context)}")
         await handlers.scheduled_vote_command(context)
 
-    application.job_queue.run_repeating(job_callback, interval=config.Constants.VOTING_INTERVAL_SECONDS, first=10, name="hourly_vote_job")
+    application.job_queue.run_repeating(
+        job_callback,
+        interval=config.Constants.VOTING_INTERVAL_SECONDS,
+        first=10,
+        name="hourly_vote_job"
+    )
     logger.info("Bot initialized successfully")
 
 async def on_shutdown(application: Application):
@@ -91,7 +95,7 @@ def main():
         app.add_handler(CommandHandler(["play", "p"], handlers.play_command))
         app.add_handler(CommandHandler(["keyboard", "kb"], handlers.admin_keyboard_command))
         app.add_handler(CallbackQueryHandler(handlers.play_button_callback, pattern=r"^play_track:"))
-        app.add_handler(CallbackQueryHandler(handlers.radio_buttons_callback, pattern=r"^(radio|vote|cmd):" ))
+        app.add_handler(CallbackQueryHandler(handlers.radio_buttons_callback, pattern=r"^(radio|vote|cmd):"))
         app.add_handler(PollAnswerHandler(handlers.handle_poll_answer))
         app.add_error_handler(handlers.error_handler)
         
