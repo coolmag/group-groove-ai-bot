@@ -12,6 +12,7 @@ import config
 from locks import state_lock
 
 logger = logging.getLogger(__name__)
+logger.info("utils.py version: v2.2-debug")
 
 # --- Admin ---
 async def is_admin(user_id: int) -> bool:

@@ -16,6 +16,7 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+logger.info("handlers.py version: v2.2-debug")
 
 # --- UI & Menu ---
 async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
@@ -53,12 +54,45 @@ async def update_status_panel(context: ContextTypes.DEFAULT_TYPE, force: bool = 
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin_user = await is_admin(update.effective_user.id)
-    menu_text = [f"🎵 *Groove AI Radio v2.1* 🎵", "", f"💿 *Commands*:", "`/play, /p <query>` - Найти и проиграть трек", "`/menu, /m` - Показать это меню"]
+    menu_text = [
+        f"🎵 *Groove AI Radio v2.2-debug* 🎵",
+        "",
+        f"💿 *Commands*:",
+        "`/play, /p <query>` - Найти и проиграть трек",
+        "`/menu, /m` - Показать это меню",
+    ]
     reply_keyboard_markup = ReplyKeyboardRemove()
     if is_admin_user:
-        menu_text.extend(["", f"👑 *Admin Commands*:", "`/ron, /r_on` - Включить радио", "`/roff, /r_off, /stop, /t` - Выключить радио", "`/skip, /s` - Пропустить трек", "`/vote, /v` - Голосование за жанр", "`/source, /src <source>` - Сменить источник (yt, sc, vk, ar)", "`/refresh, /r` - Обновить статус панель", "`/keyboard` - Показать/скрыть клавиатуру", "`/stopbot` - Остановить бота"])
-        reply_keyboard_markup = ReplyKeyboardMarkup([['/ron', '/roff', '/skip'], ['/src yt', '/src sc', '/src vk'], ['/vote', '/refresh']], resize_keyboard=True, input_field_placeholder="Admin Commands")
-    await update.message.reply_text("\n".join(menu_text), reply_markup=reply_keyboard_markup, parse_mode="MarkdownV2")
+        menu_text.extend([
+            "",
+            f"👑 *Admin Commands*:",
+            "`/ron, /r_on` - Включить радио",
+            "`/roff, /r_off, /stop, /t` - Выключить радио",
+            "`/skip, /s` - Пропустить трек",
+            "`/vote, /v` - Голосование за жанр",
+            "`/source, /src <source>` - Сменить источник (yt, sc, vk, ar)",
+            "`/refresh, /r` - Обновить статус панель",
+            "`/keyboard` - Показать/скрыть клавиатуру",
+            "`/stopbot` - Остановить бота",
+        ])
+        admin_keyboard = [
+            ['/ron', '/roff', '/skip'],
+            ['/src yt', '/src sc', '/src vk'],
+            ['/vote', '/refresh']
+        ]
+        reply_keyboard_markup = ReplyKeyboardMarkup(
+            admin_keyboard,
+            resize_keyboard=True,
+            input_field_placeholder="Admin Commands"
+        )
+    logger.info(f"--- DEBUG: Preparing to send menu. Full text below ---")
+    logger.info("\n".join(menu_text))
+    logger.info(f"--- END DEBUG ---")
+    await update.message.reply_text(
+        "\n".join(menu_text),
+        reply_markup=reply_keyboard_markup,
+        parse_mode="MarkdownV2"
+    )
 
 # --- Radio Control ---
 @admin_only

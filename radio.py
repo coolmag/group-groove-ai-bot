@@ -15,6 +15,7 @@ import config
 from utils import set_escaped_error, save_state_from_botdata
 
 logger = logging.getLogger(__name__)
+logger.info("radio.py version: v2.2-debug")
 
 class MusicSourceManager:
     def __init__(self):
