@@ -15,9 +15,10 @@ import config
 from utils import set_escaped_error, save_state_from_botdata
 
 logger = logging.getLogger(__name__)
-logger.info("radio.py version: v2.2-debug")
 
 class MusicSourceManager:
+    """A class to manage all music search and download operations from various sources."""
+
     def __init__(self):
         self._source_map = {
             "youtube": self._search_youtube,
@@ -28,14 +29,20 @@ class MusicSourceManager:
 
     def _get_cookie_file_from_data(self, cookie_data: Optional[str], source_name: str) -> Optional[str]:
         if not cookie_data:
+            logger.warning(f"Cookie data for {source_name} is missing.")
             return None
+        
+        # Check if the data is a path to an existing file first
         if os.path.exists(cookie_data):
-            return cookie_data # It's a file path
+            return cookie_data
+
+        # If not a path, treat as raw data and write to a temp file
         try:
             temp_dir = Path("/tmp")
             temp_dir.mkdir(exist_ok=True)
             cookie_file = temp_dir / f"{source_name}_cookies.txt"
             cookie_file.write_text(cookie_data)
+            logger.info(f"Successfully wrote {source_name} cookies to temporary file: {cookie_file}")
             return str(cookie_file)
         except Exception as e:
             logger.error(f"Failed to write temporary cookie file for {source_name}: {e}")
@@ -44,7 +51,6 @@ class MusicSourceManager:
     async def _execute_yt_dlp_search(self, query: str, ydl_opts: dict) -> List[dict]:
         base_opts = {
             'format': 'bestaudio/best',
-            'noplaylist': True,
             'quiet': True,
             'extract_flat': 'in_playlist',
             'ignoreerrors': True,
@@ -61,24 +67,26 @@ class MusicSourceManager:
             return []
 
     async def _search_youtube(self, query: str) -> List[dict]:
-        search_query = f"{query} official audio"
+        search_query = f"ytsearch{config.Constants.SEARCH_LIMIT}:{query}"
         ydl_opts = {
-            'default_search': f"ytsearch{config.Constants.SEARCH_LIMIT}",
             'cookiefile': self._get_cookie_file_from_data(config.YOUTUBE_COOKIES_DATA, "youtube")
         }
         return await self._execute_yt_dlp_search(search_query, ydl_opts)
 
     async def _search_soundcloud(self, query: str) -> List[dict]:
-        ydl_opts = {'default_search': f"scsearch{config.Constants.SEARCH_LIMIT}"}
-        return await self._execute_yt_dlp_search(query, ydl_opts)
+        search_query = f"scsearch{config.Constants.SEARCH_LIMIT}:{query}"
+        return await self._execute_yt_dlp_search(search_query, {})
 
     async def _search_vk(self, query: str) -> List[dict]:
         cookie_path = self._get_cookie_file_from_data(config.VK_COOKIES_DATA, "vk")
         if not cookie_path:
             logger.error("VK source selected but no VK_COOKIES_DATA was provided or writable.")
             return []
-        ydl_opts = {'default_search': f"vksearch{config.Constants.SEARCH_LIMIT}", 'cookiefile': cookie_path}
-        return await self._execute_yt_dlp_search(query, ydl_opts)
+        search_query = f"vksearch{config.Constants.SEARCH_LIMIT}:{query}"
+        ydl_opts = {
+            'cookiefile': cookie_path,
+        }
+        return await self._execute_yt_dlp_search(search_query, ydl_opts)
 
     async def _search_archive(self, query: str) -> List[dict]:
         search_url = f"https://archive.org/advancedsearch.php?q={quote(query)} AND mediatype:(audio)&fl[]=identifier,title,duration&sort[]=downloads desc&rows=10&output=json"
@@ -168,7 +176,7 @@ async def radio_loop(context: ContextTypes.DEFAULT_TYPE):
         if track_info:
             try:
                 state.now_playing = config.NowPlaying(title=track_info["title"], duration=track_info["duration"], url=url)
-                await update_status_panel(context, force=True)
+                await radio.update_status_panel(context, force=True)
                 with open(track_info["filepath"], 'rb') as audio_file:
                     await context.bot.send_audio(chat_id=config.RADIO_CHAT_ID, audio=audio_file, title=track_info["title"], duration=track_info["duration"], performer=track_info["performer"])
                 sleep_duration = track_info["duration"] + config.Constants.PAUSE_BETWEEN_TRACKS
