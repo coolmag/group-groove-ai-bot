@@ -1,20 +1,24 @@
-# Используем официальный образ Python
 FROM python:3.11-slim
 
-# Устанавливаем рабочую директорию
+# Устанавливаем системные зависимости включая FFmpeg
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Устанавливаем зависимости, чтобы избежать переустановки при каждом изменении кода
-RUN pip install --no-cache-dir --upgrade pip
-
-# Копируем только файл с зависимостями
+# Копируем зависимости
 COPY requirements.txt .
 
-# Устанавливаем зависимости
-RUN pip install --no-cache-dir -r requirements.txt
+# Устанавливаем Python зависимости
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь остальной код проекта
+# Копируем код
 COPY . .
 
-# Указываем команду для запуска приложения
-CMD ["python", "main.py"]
+# Создаем директорию для загрузок
+RUN mkdir -p downloads && chmod 777 downloads
+
+# Запускаем приложение
+CMD ["python", "-u", "main.py"]
