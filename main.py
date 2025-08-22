@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.error import BadRequest, Forbidden
 
 # Импортируем наши модули
-from config import BOT_TOKEN, ADMIN_USER_ID, BotState, MESSAGES
+from config import BOT_TOKEN, BotState, MESSAGES
 from radio import AudioDownloadManager
 from utils import is_admin, get_menu_keyboard, format_status_message
 from locks import state_lock, radio_lock
@@ -152,6 +152,8 @@ class MusicBot:
             'source_switch': self.source_switch,
         }
         if command in commands:
+            # We need to pass the original update to the command handlers
+            # so they can properly check for admin rights and reply.
             await commands[command](update, context)
 
     async def update_radio(self, context: ContextTypes.DEFAULT_TYPE):
@@ -175,23 +177,25 @@ class MusicBot:
                 async with state_lock:
                     self.state.radio_status.current_track = track_info
                 
-                for chat_id in self.state.active_chats:
+                for chat_id in list(self.state.active_chats.keys()):
                     try:
-                        await context.bot.send_audio(
-                            chat_id=chat_id,
-                            audio=open(audio_path, 'rb'),
-                            title=track_info.title,
-                            performer=track_info.artist,
-                            duration=track_info.duration,
-                            caption=f"📻 Радио: {genre.capitalize()}"
-                        )
+                        with open(audio_path, 'rb') as audio_file:
+                            await context.bot.send_audio(
+                                chat_id=chat_id,
+                                audio=audio_file,
+                                title=track_info.title,
+                                performer=track_info.artist,
+                                duration=track_info.duration,
+                                caption=f"📻 Радио: {genre.capitalize()}"
+                            )
                     except Exception as e:
                         logger.error(f"Failed to send radio track to {chat_id}: {e}")
-                    finally:
-                        if os.path.exists(audio_path):
-                            os.remove(audio_path)
-                            logger.info(f"File deleted: {audio_path}")
                 
+                # Delete the file ONLY after the loop is finished
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                    logger.info(f"File deleted: {audio_path}")
+
                 async with state_lock:
                     self.state.radio_status.last_played_time = current_time
             else:
@@ -201,7 +205,7 @@ class MusicBot:
         keyboard = await get_menu_keyboard()
         message_text = format_status_message(self.state)
         
-        chats_to_update = [chat_id] if chat_id else self.state.active_chats.keys()
+        chats_to_update = [chat_id] if chat_id else list(self.state.active_chats.keys())
 
         for cid in chats_to_update:
             chat_data = self.state.active_chats.get(cid)
