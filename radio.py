@@ -35,8 +35,8 @@ else:
 class AudioDownloadManager:
     def __init__(self):
         self.base_ydl_opts = {
-            # Более гибкий формат, который предпочитает m4a, но скачает и другое лучшее аудио
-            'format': 'm4a/bestaudio/best',
+            # Самый надежный способ скачать только аудио
+            'format': 'bestaudio/best',
             'outtmpl': os.path.join(DOWNLOADS_DIR, '%(id)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
@@ -46,6 +46,8 @@ class AudioDownloadManager:
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
+            # Эта опция может помочь избежать некоторых проблем с форматами
+            'compat_options': {'check-formats': 'warn'}
         }
 
     def get_random_genre(self) -> str:
