@@ -7,9 +7,14 @@ from typing import List, Dict, Optional
 # Загрузка переменных окружения
 load_dotenv()
 
-# Основные токены и ID
+# --- Основные ID и токены ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
+
+# Читаем переменную ADMIN_IDS, ожидая строку с ID через запятую
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "0")
+# Превращаем строку в список чисел
+ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip()]
+
 
 # Конфигурация для yt-dlp
 DOWNLOADS_DIR = "downloads"

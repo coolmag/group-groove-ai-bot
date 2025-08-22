@@ -2,14 +2,14 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from config import ADMIN_USER_ID, BotState
+from config import ADMIN_IDS, BotState
 
 logger = logging.getLogger(__name__)
 
 # --- Проверка прав ---
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Проверяет, является ли пользователь администратором."""
-    return update.effective_user.id == ADMIN_USER_ID
+    return update.effective_user.id in ADMIN_IDS
 
 # --- Форматирование сообщений ---
 def format_track_info(track) -> str:
