@@ -1,15 +1,14 @@
 import os
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
+from telegram import Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
 from telegram.error import BadRequest, Forbidden
-from typing import Optional
 
 # Импортируем наши модули
-from config import BOT_TOKEN, ADMIN_USER_ID, BotState, MESSAGES, GENRES, Source
+from config import BOT_TOKEN, ADMIN_USER_ID, BotState, MESSAGES
 from radio import AudioDownloadManager
-from utils import is_admin, get_menu_keyboard, format_track_info, format_status_message
+from utils import is_admin, get_menu_keyboard, format_status_message
 from locks import state_lock, radio_lock
 
 # Настройка логирования
@@ -17,10 +16,11 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 class MusicBot:
-    def __init__(self, app: ApplicationBuilder):
+    def __init__(self, app: Application):
         self.app = app
         self.job_queue: JobQueue = self.app.job_queue
         self.downloader = AudioDownloadManager()
@@ -38,7 +38,6 @@ class MusicBot:
             CommandHandler("start", self.start),
             CommandHandler("menu", self.show_menu),
             CommandHandler("play", self.play_song),
-            CommandHandler("stop", self.stop_bot),
             CommandHandler("ron", self.radio_on),
             CommandHandler("roff", self.radio_off),
             CommandHandler("next", self.next_track),
@@ -52,23 +51,22 @@ class MusicBot:
         await self.show_menu(update, context)
 
     async def show_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
         chat_id = update.effective_chat.id
 
         async with state_lock:
             if chat_id not in self.state.active_chats:
-                self.state.active_chats[chat_id] = BotState.ChatData()
-                logger.info(f"New chat added: {chat_id}")
-
-        keyboard = await get_menu_keyboard(user_id)
-        message_text = format_status_message(self.state)
+                # Создаем новую запись о чате и сохраняем ID сообщения со статусом
+                sent_message = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Инициализация...", # Временный текст
+                    parse_mode='HTML'
+                )
+                self.state.active_chats[chat_id] = BotState.ChatData(status_message_id=sent_message.message_id)
+                logger.info(f"New chat added: {chat_id}, status message_id: {sent_message.message_id}")
         
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=message_text,
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
+        # Теперь обновляем это сообщение
+        await self.update_status_message(context, chat_id)
+
 
     async def play_song(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
@@ -106,6 +104,7 @@ class MusicBot:
         async with state_lock:
             self.state.radio_status.is_on = True
         await context.bot.send_message(update.effective_chat.id, MESSAGES['radio_on'])
+        await self.update_status_message(context, update.effective_chat.id)
 
     async def radio_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(update, context):
@@ -115,14 +114,15 @@ class MusicBot:
         async with state_lock:
             self.state.radio_status.is_on = False
         await context.bot.send_message(update.effective_chat.id, MESSAGES['radio_off'])
+        await self.update_status_message(context, update.effective_chat.id)
 
     async def next_track(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(update, context):
             await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
             return
         
-        async with radio_lock: # Блокируем, чтобы избежать гонки с автоматическим радио
-            self.state.radio_status.last_played_time = 0 # Сбрасываем таймер, чтобы следующий трек сыграл немедленно
+        async with radio_lock:
+            self.state.radio_status.last_played_time = 0
         await context.bot.send_message(update.effective_chat.id, MESSAGES['next_track'])
 
     async def source_switch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,25 +131,28 @@ class MusicBot:
             return
         
         async with state_lock:
-            current_source_index = list(Source).index(self.state.source)
-            next_source_index = (current_source_index + 1) % len(Source)
-            self.state.source = list(Source)[next_source_index]
+            current_source_index = list(self.state.source.__class__).index(self.state.source)
+            next_source_index = (current_source_index + 1) % len(self.state.source.__class__)
+            self.state.source = list(self.state.source.__class__)[next_source_index]
             message = MESSAGES['source_switched'].format(source=self.state.source.value)
         
         await context.bot.send_message(update.effective_chat.id, message)
-
-    async def stop_bot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await is_admin(update, context):
-            await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
-            return
-        
-        await context.bot.send_message(update.effective_chat.id, "Бот останавливается...")
-        asyncio.create_task(self.app.stop())
+        await self.update_status_message(context, update.effective_chat.id)
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        # Здесь можно будет обрабатывать нажатия на инлайн-кнопки, если они появятся
+        command = query.data
+
+        # Сопоставляем callback_data с методами
+        commands = {
+            'radio_on': self.radio_on,
+            'radio_off': self.radio_off,
+            'next_track': self.next_track,
+            'source_switch': self.source_switch,
+        }
+        if command in commands:
+            await commands[command](update, context)
 
     async def update_radio(self, context: ContextTypes.DEFAULT_TYPE):
         async with radio_lock:
@@ -194,41 +197,42 @@ class MusicBot:
             else:
                 logger.warning(f"Radio could not find a track for genre: {genre}")
 
-    async def update_status_message(self, context: ContextTypes.DEFAULT_TYPE):
-        keyboard = await get_menu_keyboard(ADMIN_USER_ID) # Предполагаем, что меню для админа
+    async def update_status_message(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
+        keyboard = await get_menu_keyboard()
         message_text = format_status_message(self.state)
+        
+        chats_to_update = [chat_id] if chat_id else self.state.active_chats.keys()
 
-        for chat_id, chat_data in self.state.active_chats.items():
-            if chat_data.status_message_id:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=chat_data.status_message_id,
-                        text=message_text,
-                        reply_markup=keyboard,
-                        parse_mode='HTML'
-                    )
-                except BadRequest:
-                    logger.warning(f"Failed to update status for chat {chat_id}: message not found or not modified.")
-                except Forbidden:
-                    logger.warning(f"Bot is blocked in chat {chat_id}. Can't update status.")
-                    # Здесь можно добавить логику по удалению чата из active_chats
-                except Exception as e:
-                    logger.error(f"Unexpected error updating status for {chat_id}: {e}")
+        for cid in chats_to_update:
+            chat_data = self.state.active_chats.get(cid)
+            if not chat_data or not chat_data.status_message_id:
+                continue
 
-async def main():
-    builder = ApplicationBuilder().token(BOT_TOKEN)
-    app = builder.build()
-    
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=cid,
+                    message_id=chat_data.status_message_id,
+                    text=message_text,
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+            except BadRequest:
+                logger.warning(f"Failed to update status for chat {cid}: message not found or not modified.")
+            except Forbidden:
+                logger.warning(f"Bot is blocked in chat {cid}. Can't update status.")
+            except Exception as e:
+                logger.error(f"Unexpected error updating status for {cid}: {e}")
+
+def main():
+    """Запускает бота."""
+    app = Application.builder().token(BOT_TOKEN).build()
+
     # Создаем экземпляр нашего бота
     MusicBot(app)
-    
+
     logger.info("Bot starting...")
-    await app.run_polling()
-    logger.info("Bot stopped.")
+    # Запускаем бота до тех пор, пока пользователь не нажмет Ctrl-C
+    app.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped by user.")
+    main()

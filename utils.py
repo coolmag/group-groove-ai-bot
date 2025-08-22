@@ -1,8 +1,8 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from config import ADMIN_USER_ID, BotState, Source
+from config import ADMIN_USER_ID, BotState
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +32,12 @@ def format_status_message(state: BotState) -> str:
     )
 
 # --- Клавиатуры ---
-async def get_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+async def get_menu_keyboard() -> InlineKeyboardMarkup:
     """Создает инлайн-клавиатуру меню."""
     buttons = [
-        [InlineKeyboardButton("▶️ Включить радио", callback_data="radio_on")],
-        [InlineKeyboardButton("⏹️ Выключить радио", callback_data="radio_off")],
-        [InlineKeyboardButton("⏭️ Следующий трек", callback_data="next_track")],
-        [InlineKeyboardButton("💿 Сменить источник", callback_data="source_switch")]
+        [InlineKeyboardButton("▶️ Вкл. радио", callback_data="radio_on"),
+         InlineKeyboardButton("⏹️ Выкл. радио", callback_data="radio_off")],
+        [InlineKeyboardButton("⏭️ След. трек", callback_data="next_track"),
+         InlineKeyboardButton("💿 Сменить источник", callback_data="source_switch")]
     ]
     return InlineKeyboardMarkup(buttons)
