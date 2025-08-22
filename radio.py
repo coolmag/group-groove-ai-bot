@@ -12,7 +12,6 @@ from locks import download_lock
 logger = logging.getLogger(__name__)
 
 # --- Загрузка Cookies из переменных окружения ---
-# Имена переменных должны ТОЧНО совпадать с именами в Railway!
 VK_COOKIES_CONTENT = os.getenv("VK_COOKIES_DATA")
 if VK_COOKIES_CONTENT:
     VK_COOKIES_PATH = os.path.join(DOWNLOADS_DIR, "vk_cookies.txt")
@@ -36,7 +35,8 @@ else:
 class AudioDownloadManager:
     def __init__(self):
         self.base_ydl_opts = {
-            'format': 'bestaudio/best',
+            # Более гибкий формат, который предпочитает m4a, но скачает и другое лучшее аудио
+            'format': 'm4a/bestaudio/best',
             'outtmpl': os.path.join(DOWNLOADS_DIR, '%(id)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
@@ -68,7 +68,11 @@ class AudioDownloadManager:
     async def _execute_yt_dlp(self, query: str, ydl_opts: dict) -> Optional[Tuple[str, TrackInfo]]:
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, query, download=True)
+                # Добавляем таймаут в 30 секунд на операцию скачивания
+                info = await asyncio.wait_for(
+                    asyncio.to_thread(ydl.extract_info, query, download=True),
+                    timeout=30.0
+                )
             
             entry = info.get('entries', [info])[0]
 
@@ -80,7 +84,11 @@ class AudioDownloadManager:
             )
             logger.info(f"Download successful: {track_info.title}")
             return audio_path, track_info
+        except asyncio.TimeoutError:
+            logger.error(f"Download timed out for query: {query}")
+            return None, None
         except yt_dlp.utils.DownloadError as e:
+            # Не выводим полный стектрейс для этой ошибки, т.к. она ожидаема
             logger.error(f"yt-dlp download error for query '{query}': {e}")
             return None, None
         except Exception as e:
