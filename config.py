@@ -1,90 +1,62 @@
-# -*- coding: utf-8 -*-
 import os
-import time
-from pathlib import Path
-from typing import List, Optional, Deque
-from collections import deque
-
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+from enum import Enum
+from typing import List, Dict, Optional
 
-# --- Setup ---
+# Загрузка переменных окружения
 load_dotenv()
 
-# --- Constants ---
-class Constants:
-    # Bot behavior
-    DEFAULT_SOURCE = "youtube"
-    DEFAULT_GENRE = "lo-fi hip hop"
-    SUPPORTED_SOURCES = ["youtube", "soundcloud", "vk", "archive"]
-    
-    # Radio loop
-    REFILL_THRESHOLD = 5
-    PAUSE_BETWEEN_TRACKS = 2
-    PLAYED_URLS_MEMORY = 200
+# Основные токены и ID
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
 
-    # Downloader
-    SEARCH_LIMIT = 10
-    MAX_RETRIES = 3
-    DOWNLOAD_TIMEOUT = 60
-    MAX_FILE_SIZE = 48 * 1024 * 1024  # 48 MB
-    MAX_DURATION = 7200  # 2 hours
-    MIN_DURATION = 10   # 10 seconds
+# Конфигурация для yt-dlp
+DOWNLOADS_DIR = "downloads"
+if not os.path.exists(DOWNLOADS_DIR):
+    os.makedirs(DOWNLOADS_DIR)
 
-    # UI/UX
-    VOTING_INTERVAL_SECONDS = 3600 # 1 hour
-    POLL_DURATION_SECONDS = 600 # 10 minutes
-    STATUS_UPDATE_MIN_INTERVAL = 5 # seconds
+# --- Источники --- #
+class Source(Enum):
+    YOUTUBE = "YouTube"
+    VK = "VK"
+    ARCHIVE = "Internet Archive"
 
-# --- Environment Variables ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id]
-RADIO_CHAT_ID = int(os.getenv("RADIO_CHAT_ID", 0))
-PORT = int(os.getenv("PORT", 8080))
+# --- Модели состояния (Pydantic) --- #
+class TrackInfo(BaseModel):
+    title: str = "Неизвестно"
+    artist: str = "Неизвестно"
+    duration: int = 0
 
-# --- Paths ---
-CONFIG_FILE = Path("radio_config.json")
-DOWNLOAD_DIR = Path("downloads")
-
-# --- Credentials (as environment variables) ---
-VK_COOKIES_DATA = os.getenv("VK_COOKIES_DATA")
-YOUTUBE_COOKIES_DATA = os.getenv("YOUTUBE_COOKIES_DATA")
-
-# --- Pydantic Models for State Management ---
-class NowPlaying(BaseModel):
-    title: str
-    duration: int
-    url: str
-    start_time: float = Field(default_factory=time.time)
-
-class State(BaseModel):
+class RadioStatus(BaseModel):
     is_on: bool = False
-    genre: str = Constants.DEFAULT_GENRE
-    source: str = Constants.DEFAULT_SOURCE
-    radio_playlist: Deque[str] = Field(default_factory=deque)
-    played_radio_urls: Deque[str] = Field(default_factory=deque)
-    
-    active_poll_id: Optional[str] = None
-    poll_message_id: Optional[int] = None
-    poll_options: List[str] = Field(default_factory=list)
-    poll_votes: List[int] = Field(default_factory=list)
-    
-    status_message_id: Optional[int] = None
-    last_status_update: float = 0.0
-    now_playing: Optional[NowPlaying] = None
-    last_error: Optional[str] = None
-    
-    votable_genres: List[str] = Field(
-        default_factory=lambda: sorted(list(set([
-            "pop", "80s pop", "90s pop", "2000s pop",
-            "rock", "70s rock", "80s rock", "90s rock",
-            "hip hop", "90s hip hop", "2000s hip hop",
-            "electronic", "ambient", "synthwave", "cyberpunk",
-            "classical", "jazz", "blues", "country", "metal",
-            "reggae", "folk", "indie", "rap", "r&b", "soul", "funk", "disco",
-            "lo-fi hip hop"
-        ])))
-    )
+    current_genre: str = "lounge"
+    current_track: Optional[TrackInfo] = None
+    last_played_time: float = 0.0
+    cooldown: int = 180 # 3 минуты
 
-    class Config:
-        arbitrary_types_allowed = True
+class BotState(BaseModel):
+    class ChatData(BaseModel):
+        status_message_id: Optional[int] = None
+
+    source: Source = Source.YOUTUBE
+    radio_status: RadioStatus = Field(default_factory=RadioStatus)
+    active_chats: Dict[int, ChatData] = Field(default_factory=dict)
+
+# --- Тексты и константы --- #
+MESSAGES = {
+    "welcome": "🎶 Привет! Я Group Groove AI. Используй /menu, чтобы начать.",
+    "admin_only": "⛔ Эта команда доступна только администраторам.",
+    "radio_on": "📻 Радио включено! Музыка скоро начнет играть.",
+    "radio_off": "🔇 Радио выключено.",
+    "play_usage": "🎵 Укажите название песни после /play, например: /play Queen - Bohemian Rhapsody",
+    "searching": "🔍 Ищу трек...",
+    "not_found": "😕 Трек не найден.",
+    "next_track": "⏭️ Включаю следующий трек на радио...",
+    "source_switched": "💿 Источник изменен на: {source}"
+}
+
+GENRES = [
+    "lofi hip hop", "chillstep", "ambient", "downtempo", "jazz hop",
+    "synthwave", "deep house", "liquid drum and bass", "psybient", "lounge"
+]
