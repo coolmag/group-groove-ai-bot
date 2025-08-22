@@ -25,6 +25,7 @@ if not os.path.exists(DOWNLOADS_DIR):
 class Source(Enum):
     YOUTUBE = "YouTube"
     VK = "VK"
+    SOUNDCLOUD = "SoundCloud"
     ARCHIVE = "Internet Archive"
 
 # --- Модели состояния (Pydantic) --- #

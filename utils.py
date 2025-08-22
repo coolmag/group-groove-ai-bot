@@ -23,12 +23,19 @@ def format_status_message(state: BotState) -> str:
     radio_status = "✅ Включено" if state.radio_status.is_on else "❌ Выключено"
     track_info = format_track_info(state.radio_status.current_track)
     
+    commands_list = (
+        "<b>Доступные команды:</b>\n"
+        "<code>/play &lt;название&gt;</code> - заказать трек\n"
+        "<code>/menu</code> - показать это меню\n"
+    )
+
     return (
         f"<b>🎵 Group Groove AI Status</b>\n\n"
         f"<b>Источник поиска:</b> {state.source.value}\n"
         f"<b>Статус радио:</b> {radio_status}\n"
         f"<b>Текущий жанр:</b> {state.radio_status.current_genre.capitalize()}\n"
-        f"<b>Последний трек:</b> {track_info}"
+        f"<b>Последний трек:</b> {track_info}\n\n"
+        f"{commands_list}"
     )
 
 # --- Клавиатуры ---
