@@ -34,7 +34,7 @@ class AudioDownloadManager:
         logger.info(f"Searching SoundCloud for: {query}")
         async with download_lock:
             try:
-                results = await self.soundcloud_api.search(query, limit=5)
+                                results = await self.soundcloud_api.search_tracks(query, limit=5)
                 if not results or not results.tracks:
                     logger.warning(f"SoundCloud found no tracks for query: {query}")
                     return None, None
