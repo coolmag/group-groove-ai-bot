@@ -11,18 +11,27 @@ from locks import download_lock
 # Настройка логирования
 logger = logging.getLogger(__name__)
 
-# Получение cookies из переменных окружения
-VK_COOKIES_CONTENT = os.getenv("VK_COOKIES")
-VK_COOKIES_PATH = os.path.join(DOWNLOADS_DIR, "vk_cookies.txt")
+# --- Загрузка Cookies из переменных окружения ---
+# Имена переменных должны ТОЧНО совпадать с именами в Railway!
+VK_COOKIES_CONTENT = os.getenv("VK_COOKIES_DATA")
 if VK_COOKIES_CONTENT:
-    with open(VK_COOKIES_PATH, "w") as f:
+    VK_COOKIES_PATH = os.path.join(DOWNLOADS_DIR, "vk_cookies.txt")
+    with open(VK_COOKIES_PATH, "w", encoding='utf-8') as f:
         f.write(VK_COOKIES_CONTENT)
+    logger.info("VK cookies loaded successfully.")
+else:
+    VK_COOKIES_PATH = None
+    logger.warning("VK_COOKIES_DATA environment variable not found.")
 
-YOUTUBE_COOKIES_CONTENT = os.getenv("YOUTUBE_COOKIES")
-YOUTUBE_COOKIES_PATH = os.path.join(DOWNLOADS_DIR, "youtube_cookies.txt")
+YOUTUBE_COOKIES_CONTENT = os.getenv("YOUTUBE_COOKIES_DATA")
 if YOUTUBE_COOKIES_CONTENT:
-    with open(YOUTUBE_COOKIES_PATH, "w") as f:
+    YOUTUBE_COOKIES_PATH = os.path.join(DOWNLOADS_DIR, "youtube_cookies.txt")
+    with open(YOUTUBE_COOKIES_PATH, "w", encoding='utf-8') as f:
         f.write(YOUTUBE_COOKIES_CONTENT)
+    logger.info("YouTube cookies loaded successfully.")
+else:
+    YOUTUBE_COOKIES_PATH = None
+    logger.warning("YOUTUBE_COOKIES_DATA environment variable not found.")
 
 class AudioDownloadManager:
     def __init__(self):
@@ -61,12 +70,7 @@ class AudioDownloadManager:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, query, download=True)
             
-            if not info.get('entries'):
-                # Single video result
-                entry = info
-            else:
-                # Search result, pick the first one
-                entry = info['entries'][0]
+            entry = info.get('entries', [info])[0]
 
             audio_path = os.path.join(DOWNLOADS_DIR, f"{entry['id']}.mp3")
             track_info = TrackInfo(
@@ -86,21 +90,25 @@ class AudioDownloadManager:
     async def search_and_download_youtube(self, query: str) -> Optional[Tuple[str, TrackInfo]]:
         logger.info(f"Searching YouTube for: {query}")
         opts = self.base_ydl_opts.copy()
-        opts['cookiefile'] = YOUTUBE_COOKIES_PATH if os.path.exists(YOUTUBE_COOKIES_PATH) else None
+        if YOUTUBE_COOKIES_PATH and os.path.exists(YOUTUBE_COOKIES_PATH):
+            opts['cookiefile'] = YOUTUBE_COOKIES_PATH
+            logger.info("Using YouTube cookies for download.")
+        else:
+            logger.warning("YouTube cookies not found, proceeding without them.")
         return await self._execute_yt_dlp(f"ytsearch1:{query}", opts)
 
     async def search_and_download_vk(self, query: str) -> Optional[Tuple[str, TrackInfo]]:
-        if not os.path.exists(VK_COOKIES_PATH):
-            logger.warning("VK search skipped: vk_cookies.txt not found.")
+        if not (VK_COOKIES_PATH and os.path.exists(VK_COOKIES_PATH)):
+            logger.warning("VK search skipped: vk_cookies.txt not found or loaded.")
             return None, None
         logger.info(f"Searching VK for: {query}")
         opts = self.base_ydl_opts.copy()
         opts['cookiefile'] = VK_COOKIES_PATH
+        logger.info("Using VK cookies for download.")
         return await self._execute_yt_dlp(f"vksearch1:{query}", opts)
 
     async def get_random_from_archive(self) -> Optional[Tuple[str, TrackInfo]]:
         logger.info("Getting random track from Internet Archive")
-        # Пример запроса к Internet Archive (можно усложнить)
         query = 'collection:etree AND mediatype:audio AND format:"VBR MP3"'
         opts = self.base_ydl_opts.copy()
-        return await self._execute_yt_dlp(f"iasearch:{query}", opts)
+        return await self._execute_yt_dlp(f"iasearch1:{query}", opts)
