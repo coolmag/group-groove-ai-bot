@@ -1,56 +1,69 @@
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+import time
+from typing import List
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from config import BotState, GENRES, Source
 
-from config import ADMIN_IDS, BotState, Source
+def is_admin(user_id: int, admins: List[int]) -> bool:
+    # Если список админов пустой — считаем всех администраторами (для теста)
+    return (not admins) or (user_id in admins)
 
-logger = logging.getLogger(__name__)
+def fmt_duration(seconds: int) -> str:
+    m, s = divmod(int(seconds or 0), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
-# --- Проверка прав ---
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Проверяет, является ли пользователь администратором."""
-    return update.effective_user.id in ADMIN_IDS
+def progress_bar(percent: float, width: int = 20) -> str:
+    percent = max(0.0, min(1.0, percent))
+    filled = int(round(width * percent))
+    return "█" * filled + "░" * (width - filled)
 
-# --- Форматирование сообщений ---
-def format_track_info(track) -> str:
-    """Форматирует информацию о треке в красивую строку."""
-    if not track:
-        return "—"
-    
-    minutes, seconds = divmod(track.duration, 60)
-    return f"{track.artist} - {track.title} ({minutes}:{seconds:02d})"
+def get_menu_keyboard(state: BotState) -> InlineKeyboardMarkup:
+    on = InlineKeyboardButton("▶️ Радио ON", callback_data="radio_on")
+    off = InlineKeyboardButton("⏸ Радио OFF", callback_data="radio_off")
+    nxt = InlineKeyboardButton("⏭ Пропустить", callback_data="next_track")
+    src = InlineKeyboardButton(f"🔁 Источник: {state.source.value}", callback_data="source_switch")
+    vote = InlineKeyboardButton("🗳 Голосование", callback_data="vote_now")
+
+    rows = [
+        [on, off, nxt],
+        [src, vote],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 def format_status_message(state: BotState) -> str:
-    """Собирает полное статус-сообщение."""
-    radio_status = "✅ Включено" if state.radio_status.is_on else "❌ Выключено"
-    track_info = format_track_info(state.radio_status.current_track)
-    
-    commands_list = (
-        "<b>Доступные команды:</b>\n"
-        "<code>/play &lt;название&gt;</code> - заказать трек\n"
-        "<code>/menu</code> - показать это меню\n"
-        "<code>/next</code> - следующий трек (админ)\n"
-        "<code>/source</code> - сменить источник (админ)\n"
-        "<code>/ron</code> - включить радио (админ)\n"
-        "<code>/roff</code> - выключить радио (админ)"
-    )
+    rs = state.radio_status
+    line1 = f"<b>Groove AI Radio</b> — источник: <b>{state.source.value}</b>"
+    line2 = f"Статус радио: {'🟢 ВКЛ' if rs.is_on else '🔴 ВЫКЛ'}"
+    line3 = f"Текущий жанр: <b>{rs.current_genre or '—'}</b>"
+    line4 = "Трек: —"
+    line5 = ""
+    if rs.current_track:
+        t = rs.current_track
+        line4 = f"Трек: <b>{t.artist} — {t.title}</b> ({fmt_duration(t.duration)})"
+        elapsed = time.time() - rs.last_played_time
+        p = 0.0
+        if t.duration:
+            p = min(max(elapsed / float(t.duration), 0.0), 1.0)
+        bar = progress_bar(p)
+        line5 = f"{bar}  {int(p*100)}%"
+    return "\n".join([line1, line2, line3, line4, line5]).strip()
 
-    return (
-        f"<b>🎵 Music Bot Status</b>\n\n"
-        f"<b>Источник поиска:</b> {state.source.value}\n"
-        f"<b>Статус радио:</b> {radio_status}\n"
-        f"<b>Текущий жанр:</b> {state.radio_status.current_genre.capitalize()}\n"
-        f"<b>Последний трек:</b> {track_info}\n\n"
-        f"{commands_list}"
-    )
-
-# --- Клавиатуры ---
-async def get_menu_keyboard() -> InlineKeyboardMarkup:
-    """Создает инлайн-клавиатуру меню."""
-    buttons = [
-        [InlineKeyboardButton("▶️ Вкл. радио", callback_data="radio_on"),
-         InlineKeyboardButton("⏹️ Выкл. радио", callback_data="radio_off")],
-        [InlineKeyboardButton("⏭️ След. трек", callback_data="next_track"),
-         InlineKeyboardButton("💿 Сменить источник", callback_data="source_switch")]
-    ]
+def build_search_keyboard(titles: List[str]) -> InlineKeyboardMarkup:
+    # Каждая кнопка — индекс трека
+    buttons = []
+    for idx, title in enumerate(titles):
+        buttons.append([InlineKeyboardButton(f"{idx+1}. {title}", callback_data=f"pick:{idx}")])
     return InlineKeyboardMarkup(buttons)
+
+def build_vote_keyboard(genres: List[str]) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for i, g in enumerate(genres):
+        row.append(InlineKeyboardButton(g, callback_data=f"vote:{g}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)

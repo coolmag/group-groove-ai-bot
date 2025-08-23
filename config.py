@@ -1,101 +1,103 @@
 import os
+import time
 import logging
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Dict, Optional
-import subprocess
+from typing import Dict, List, Optional
 
-# Загрузка переменных окружения
-load_dotenv()
+# === Environment ===
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMINS_ENV = os.getenv("ADMINS", "").strip()  # comma-separated user IDs
+DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
+YOUTUBE_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES", "").strip()
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+PROXY_ENABLED = os.getenv("PROXY_ENABLED", "0") in ("1", "true", "True")
+PROXY_URL = os.getenv("PROXY_URL", "").strip()
+FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip()  # optional custom path to ffmpeg/ffprobe
 
-# --- Основные ID и токены ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# Voting settings
+VOTE_WINDOW_SEC = int(os.getenv("VOTE_WINDOW_SEC", "180"))  # 3 minutes by default
+SONG_COOLDOWN_SEC = int(os.getenv("SONG_COOLDOWN_SEC", "240"))  # 4 minutes between radio sends
+RADIO_SEARCH_QUERY_SUFFIX = os.getenv("RADIO_SEARCH_QUERY_SUFFIX", "music")
 
-# Читаем переменную ADMIN_IDS, ожидая строку с ID через запятую
-ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "0")
-# Превращаем строку в список чисел
-ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip()]
-
-# Конфигурация для yt-dlp
-DOWNLOADS_DIR = "downloads"
-if not os.path.exists(DOWNLOADS_DIR):
-    os.makedirs(DOWNLOADS_DIR)
-
-# --- Источники --- #
-class Source(Enum):
-    YOUTUBE = "YouTube"
-    VK = "VK"
-    SOUNDCLOUD = "SoundCloud"
-    ARCHIVE = "Internet Archive"
-
-# --- Модели состояния (Pydantic) --- #
-class TrackInfo(BaseModel):
-    title: str = "Неизвестно"
-    artist: str = "Неизвестно"
-    duration: int = 0
-
-class RadioStatus(BaseModel):
-    is_on: bool = False
-    current_genre: str = "lofi hip hop"
-    current_track: Optional[TrackInfo] = None
-    last_played_time: float = 0.0
-    cooldown: int = 180  # 3 минуты
-
-class BotState(BaseModel):
-    class ChatData(BaseModel):
-        status_message_id: Optional[int] = None
-
-    source: Source = Source.YOUTUBE
-    radio_status: RadioStatus = Field(default_factory=RadioStatus)
-    active_chats: Dict[int, ChatData] = Field(default_factory=dict)
-
-# --- Тексты и константы --- #
-MESSAGES = {
-    "welcome": "🎶 Привет! Я музыкальный бот. Используй /menu, чтобы начать.",
-    "admin_only": "⛔ Эта команда доступна только администраторам.",
-    "radio_on": "📻 Радио включено! Музыка скоро начнет играть.",
-    "radio_off": "🔇 Радио выключено.",
-    "play_usage": "🎵 Укажите название песни после /play, например: /play Queen - Bohemian Rhapsody",
-    "searching": "🔍 Ищу трек...",
-    "not_found": "😕 Трек не найден.",
-    "next_track": "⏭️ Включаю следующий трек на радио...",
-    "source_switched": "💿 Источник изменен на: {source}"
-}
-
-GENRES = [
-    "lofi hip hop", "chillstep", "ambient", "downtempo", "jazz hop",
-    "synthwave", "deep house", "liquid drum and bass", "psybient", "lounge"
+# === Constants ===
+GENRES: List[str] = [
+    "Electronic", "Pop", "Rock", "Hip-Hop", "House", "Techno", "Trance", "Ambient",
+    "Drum & Bass", "Dubstep", "Jazz", "Blues", "Reggae", "Disco", "Funk", "Soul",
+    "Classical", "Indie", "Synthwave", "Lo-fi"
 ]
 
-def check_environment():
-    """Проверяет необходимые переменные окружения и зависимости"""
-    logger.info("Checking environment...")
-    
-    # Проверка переменных окружения
-    required_vars = ['BOT_TOKEN']
-    for var in required_vars:
-        if not os.getenv(var):
-            logger.error(f"Missing environment variable: {var}")
-            return False
-    
-    # Проверка директорий
-    required_dirs = ['downloads']
-    for dir_name in required_dirs:
-        if not os.path.exists(dir_name):
-            os.makedirs(dir_name)
-            logger.info(f"Created directory: {dir_name}")
-    
-    # Проверка доступности FFmpeg (для yt-dlp)
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, timeout=5)
-        logger.info("FFmpeg is available")
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        logger.warning("FFmpeg is not available - audio conversion may fail")
-    
-    logger.info("Environment check completed")
-    return True
+class Source(str, Enum):
+    YOUTUBE = "youtube"
+    YOUTUBE_MUSIC = "ytmusic"
+    SOUNDCLOUD = "soundcloud"
+    JAMENDO = "jamendo"
+    ARCHIVE = "archive"
+
+@dataclass
+class TrackInfo:
+    id: str
+    title: str
+    artist: str
+    duration: int  # seconds
+    source: str
+    url: str
+
+@dataclass
+class RadioStatus:
+    is_on: bool = True
+    current_genre: Optional[str] = None
+    current_track: Optional[TrackInfo] = None
+    last_played_time: float = 0.0
+    cooldown: int = SONG_COOLDOWN_SEC
+
+@dataclass
+class ChatData:
+    status_message_id: Optional[int] = None
+
+@dataclass
+class BotState:
+    active_chats: Dict[int, ChatData] = field(default_factory=dict)
+    source: Source = Source.YOUTUBE
+    radio_status: RadioStatus = field(default_factory=RadioStatus)
+    search_results: Dict[int, List[TrackInfo]] = field(default_factory=dict)
+    voting_active: bool = False
+    vote_end_ts: float = 0.0
+    vote_counts: Dict[str, int] = field(default_factory=dict)
+    playlist: List[TrackInfo] = field(default_factory=list)
+
+MESSAGES = {
+    "welcome": "👋 Привет! Я Groove AI Bot. Включай радио, ищи треки по названию и голосуй за жанр каждый час.",
+    "play_usage": "Использование: <b>/play &lt;название&gt;</b> — покажу до 10 вариантов.",
+    "searching": "🔎 Ищу треки...",
+    "not_found": "😕 Ничего не нашлось. Попробуй другой запрос или источник.",
+    "radio_on": "📻 Радио включено.",
+    "radio_off": "⏸ Радио выключено.",
+    "admin_only": "⛔ Команда доступна только администраторам.",
+    "next_track": "⏭ Пропускаем текущий трек...",
+    "source_switched": "🔁 Источник переключён: <b>{source}</b>",
+    "proxy_enabled": "🌐 Прокси включён (см. переменные окружения).",
+    "proxy_disabled": "🌐 Прокси выключен.",
+    "vote_started": "🗳 Старт голосования за жанр! Выбирайте ниже. Окно голосования: {mins} мин.",
+    "vote_accepted": "✅ Голос за жанр <b>{genre}</b> засчитан!",
+    "vote_ended": "🏁 Голосование окончено. Победил жанр: <b>{genre}</b>.",
+}
+
+def check_environment() -> bool:
+    ok = True
+    if not BOT_TOKEN:
+        logging.getLogger(__name__).error("BOT_TOKEN не задан в окружении.")
+        ok = False
+    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    return ok
+
+def parse_admins() -> List[int]:
+    ids: List[int] = []
+    if ADMINS_ENV:
+        for p in ADMINS_ENV.split(","):
+            p = p.strip()
+            if p.isdigit():
+                ids.append(int(p))
+    return ids
+
+ADMINS: List[int] = parse_admins()

@@ -1,24 +1,20 @@
 FROM python:3.11-slim
 
-# Устанавливаем системные зависимости включая FFmpeg
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Копируем зависимости
-COPY requirements.txt .
+COPY requirements.txt /app/requirements.txt
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements.txt && \
+    pip install -U yt-dlp
 
-# Устанавливаем Python зависимости
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+COPY . /app
 
-# Копируем код
-COPY . .
-
-# Создаем директорию для загрузок
-RUN mkdir -p downloads && chmod 777 downloads
-
-# Запускаем приложение
-CMD ["python", "-u", "main.py"]
+CMD ["python", "main.py"]
