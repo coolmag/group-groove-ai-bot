@@ -1,0 +1,4 @@
+python-telegram-bot[job-queue]==20.7
+yt-dlp>=2025.1.1
+aiohttp>=3.9.0
+requests>=2.31.0
