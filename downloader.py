@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 class AudioDownloadManager:
     def __init__(self):
         os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        # defaults tuning
+        self.socket_timeout = 20
+        self.retries = 2
 
     async def check_ffmpeg(self) -> None:
         for bin_name in ("ffmpeg", "ffprobe"):
@@ -27,8 +30,8 @@ class AudioDownloadManager:
             "noplaylist": True,
             "quiet": True,
             "no_warnings": False,
-            "socket_timeout": 30,
-            "retries": 3,
+            "socket_timeout": self.socket_timeout,
+            "retries": self.retries,
             "extract_flat": False,
             "outtmpl": os.path.join(DOWNLOADS_DIR, "%(id)s.%(ext)s"),
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36",
@@ -68,19 +71,19 @@ class AudioDownloadManager:
         search_q = f"{prefix}{limit}:{query}"
         logger.info("Searching for '%s' on %s", query, source.value)
         try:
-            with yt_dlp.YoutubeDL(self._base_opts()) as ydl:
+            opts = self._base_opts()
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = await asyncio.to_thread(ydl.extract_info, search_q, download=False)
             entries = info.get("entries", []) if info else []
         except Exception as e:
             logger.error("Search failed: %s", e)
             return []
-        results: List[TrackInfo] = []
+        results = []
         for e in entries[:limit]:
             if not e:
                 continue
             url = e.get("webpage_url") or e.get("url") or ""
-            if not url:
-                continue
+            if not url: continue
             title = e.get("title") or "Unknown"
             artist = e.get("artist") or e.get("uploader") or "Unknown Artist"
             duration = int(e.get("duration") or 0)
@@ -97,8 +100,7 @@ class AudioDownloadManager:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = await asyncio.to_thread(ydl.extract_info, url, download=True)
                     entry = info.get("entries", [info])[0] if info else None
-                    if not entry:
-                        continue
+                    if not entry: continue
                     filename = ydl.prepare_filename(entry)
                     out_file = os.path.splitext(filename)[0] + f".{codec}"
                     ti = TrackInfo(
@@ -123,10 +125,8 @@ class AudioDownloadManager:
 
     def _find_downloaded_file(self, entry) -> Optional[str]:
         vid = entry.get("id") if isinstance(entry, dict) else None
-        if not vid:
-            return None
+        if not vid: return None
         for ext in ("mp3","m4a","webm","opus","m4b","mp4"):
             p = os.path.join(DOWNLOADS_DIR, f"{vid}.{ext}")
-            if os.path.exists(p):
-                return p
+            if os.path.exists(p): return p
         return None

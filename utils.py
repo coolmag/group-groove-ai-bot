@@ -1,7 +1,7 @@
 import time
 from typing import List
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-from config import BotState, GENRES, Source
+from config import BotState, GENRES
 
 def fmt_duration(seconds: int) -> str:
     seconds = int(seconds or 0)
@@ -34,13 +34,15 @@ def format_status_message(state: BotState) -> str:
         line4 = f"Трек: <b>{t.artist} — {t.title}</b> ({fmt_duration(t.duration)})"
         elapsed = time.time() - rs.last_played_time
         p = min(max(elapsed / float(t.duration or 1), 0.0), 1.0)
-        line5 = f"{progress_bar(p)}  {int(p*100)}%"
+        line5 = f"{progress_bar(p)}  {int(p*100)}%  {fmt_duration(int(elapsed))} / {fmt_duration(t.duration)}"
     return "\n".join([line1, line2, line3, line4, line5]).strip()
 
-def build_search_keyboard(titles: List[str]) -> InlineKeyboardMarkup:
+def build_search_keyboard(titles: List[str]):
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     return InlineKeyboardMarkup([[InlineKeyboardButton(f"{i+1}. {t}", callback_data=f"pick:{i}")] for i, t in enumerate(titles)])
 
-def build_vote_keyboard(genres: List[str]) -> InlineKeyboardMarkup:
+def build_vote_keyboard(genres: List[str]):
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     rows, row = [], []
     for i, g in enumerate(genres):
         row.append(InlineKeyboardButton(g, callback_data=f"vote:{g}"))
@@ -50,5 +52,4 @@ def build_vote_keyboard(genres: List[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def is_admin(user_id: int, admins: List[int]) -> bool:
-    # Если список админов пустой — считаем всех администраторами (для теста/стендов)
     return (not admins) or (user_id in admins)

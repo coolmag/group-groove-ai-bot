@@ -4,26 +4,22 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
-# ========== Environment ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMINS_ENV = os.getenv("ADMINS", "").strip()  # comma-separated integers
+ADMINS_ENV = os.getenv("ADMINS", "").strip()
 DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
 YOUTUBE_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES", "").strip()
 
-PROXY_ENABLED = os.getenv("PROXY_ENABLED", "0").lower() in ("1", "true", "yes")
+PROXY_ENABLED = os.getenv("PROXY_ENABLED", "0").lower() in ("1","true","yes")
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
-FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip()  # dir or full path for ffmpeg/ffprobe
+FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip()
 
-# Voting/radio tuning
-VOTE_WINDOW_SEC = int(os.getenv("VOTE_WINDOW_SEC", "180"))  # 3 minutes
+VOTE_WINDOW_SEC = int(os.getenv("VOTE_WINDOW_SEC", "180"))
 SONG_COOLDOWN_SEC = int(os.getenv("SONG_COOLDOWN_SEC", "240"))
 RADIO_SEARCH_QUERY_SUFFIX = os.getenv("RADIO_SEARCH_QUERY_SUFFIX", "music")
 
-# Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
-# ========== Domain ==========
 GENRES: List[str] = [
     "Electronic", "Pop", "Rock", "Hip-Hop", "House", "Techno", "Trance", "Ambient",
     "Drum & Bass", "Dubstep", "Jazz", "Blues", "Reggae", "Disco", "Funk", "Soul",
@@ -42,7 +38,7 @@ class TrackInfo:
     id: str
     title: str
     artist: str
-    duration: int  # seconds
+    duration: int
     source: str
     url: str
 
@@ -74,7 +70,7 @@ MESSAGES = {
     "play_usage": "Использование: <b>/play &lt;название&gt;</b> — покажу до 10 вариантов.",
     "searching": "🔎 Ищу треки...",
     "not_found": "😕 Ничего не нашлось. Попробуй другой запрос или источник.",
-    "radio_on": "📻 Радио включено.",
+    "radio_on": "📻 Радио включено! Музыка скоро начнет играть.",
     "radio_off": "⏸ Радио выключено.",
     "admin_only": "⛔ Команда доступна только администраторам.",
     "next_track": "⏭ Пропускаем текущий трек...",
@@ -83,7 +79,6 @@ MESSAGES = {
     "vote_accepted": "✅ Голос за жанр <b>{genre}</b> засчитан!",
     "vote_ended": "🏁 Голосование окончено. Победил жанр: <b>{genre}</b>.",
 }
-
 def check_environment() -> bool:
     ok = True
     if not BOT_TOKEN:
@@ -93,7 +88,7 @@ def check_environment() -> bool:
     return ok
 
 def parse_admins() -> List[int]:
-    out: List[int] = []
+    out = []
     if ADMINS_ENV:
         for p in ADMINS_ENV.split(","):
             p = p.strip()
