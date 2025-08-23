@@ -397,7 +397,7 @@ class MusicBot:
 def main():
     if not check_environment():
         return
-    builder = Application.builder().token(BOT_TOKEN)
+    builder = Application.builder().token(BOT_TOKEN).job_queue()
     app = builder.build()
     bot = MusicBot(app)
 
