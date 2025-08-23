@@ -1,5 +1,24 @@
+# Python / build
 __pycache__/
 *.pyc
-downloads/
+*.pyo
+*.pyd
+*.egg-info/
+.dist/
+.build/
 .env
-cookies.txt
+.venv
+.env.local
+.env.*
+.envrc
+
+# Downloads & runtime
+downloads/
+logs/
+*.log
+
+# Cookies / secrets
+*cookies.txt
+.env
+.env.production
+.env.development

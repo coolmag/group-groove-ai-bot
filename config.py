@@ -1,99 +1,65 @@
 import os
-import logging
+import enum
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Deque, Tuple
+from collections import deque
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMINS_ENV = os.getenv("ADMINS", "").strip()
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "")
+
+PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
+PROXY_URL = os.getenv("PROXY_URL") or ""
+
+YOUTUBE_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_PATH") or ""
+SOUNDCLOUD_COOKIES_PATH = os.getenv("SOUNDCLOUD_COOKIES_PATH") or ""
+
 DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
-YOUTUBE_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES", "").strip()
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-PROXY_ENABLED = os.getenv("PROXY_ENABLED", "0").lower() in ("1","true","yes")
-PROXY_URL = os.getenv("PROXY_URL", "").strip()
-FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip()
-
-VOTE_WINDOW_SEC = int(os.getenv("VOTE_WINDOW_SEC", "180"))
-SONG_COOLDOWN_SEC = int(os.getenv("SONG_COOLDOWN_SEC", "240"))
-RADIO_SEARCH_QUERY_SUFFIX = os.getenv("RADIO_SEARCH_QUERY_SUFFIX", "music")
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.getLogger().setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
-
-GENRES: List[str] = [
-    "Electronic", "Pop", "Rock", "Hip-Hop", "House", "Techno", "Trance", "Ambient",
-    "Drum & Bass", "Dubstep", "Jazz", "Blues", "Reggae", "Disco", "Funk", "Soul",
-    "Classical", "Indie", "Synthwave", "Lo-fi"
+GENRES = [
+    "Chillout","Ambient","Lo-fi","Electronic","Techno","House","Soul","Jazz",
+    "Hip-Hop","Trap","Drum and Bass","Trance","Retrowave","Synthwave","Chillstep"
 ]
 
-class Source(str, Enum):
+DEFAULT_GENRE = "Chillout"
+
+class Source(enum.Enum):
     YOUTUBE = "youtube"
-    YOUTUBE_MUSIC = "ytmusic"
     SOUNDCLOUD = "soundcloud"
-    JAMENDO = "jamendo"
-    ARCHIVE = "archive"
 
 @dataclass
 class TrackInfo:
-    id: str
     title: str
-    artist: str
-    duration: int
-    source: str
-    url: str
+    artist: Optional[str] = None
+    duration: Optional[int] = None
+    source: Optional[str] = None
+    url: Optional[str] = None
 
 @dataclass
 class RadioStatus:
     is_on: bool = True
     current_genre: Optional[str] = None
     current_track: Optional[TrackInfo] = None
-    last_played_time: float = 0.0
-    cooldown: int = SONG_COOLDOWN_SEC
-
-@dataclass
-class ChatData:
-    status_message_id: Optional[int] = None
+    last_sent_ts: float = 0.0
 
 @dataclass
 class BotState:
-    active_chats: Dict[int, ChatData] = field(default_factory=dict)
+    active_chats: Dict[int, int] = field(default_factory=dict)
     source: Source = Source.YOUTUBE
-    radio_status: RadioStatus = field(default_factory=RadioStatus)
+    radio: RadioStatus = field(default_factory=RadioStatus)
     search_results: Dict[int, List[TrackInfo]] = field(default_factory=dict)
     voting_active: bool = False
-    vote_end_ts: float = 0.0
     vote_counts: Dict[str, int] = field(default_factory=dict)
-    playlist: List[TrackInfo] = field(default_factory=list)
+    vote_end_ts: float = 0.0
+    history: Deque[str] = field(default_factory=lambda: deque(maxlen=20))
 
 MESSAGES = {
-    "welcome": "👋 Привет! Я Groove AI Bot. Включай радио, ищи треки по названию и голосуй за жанр каждый час.",
-    "play_usage": "Использование: <b>/play &lt;название&gt;</b> — покажу до 10 вариантов.",
-    "searching": "🔎 Ищу треки...",
-    "not_found": "😕 Ничего не нашлось. Попробуй другой запрос или источник.",
     "radio_on": "📻 Радио включено! Музыка скоро начнет играть.",
     "radio_off": "⏸ Радио выключено.",
-    "admin_only": "⛔ Команда доступна только администраторам.",
-    "next_track": "⏭ Пропускаем текущий трек...",
-    "source_switched": "🔁 Источник переключён: <b>{source}</b>",
-    "vote_started": "🗳 Старт голосования за жанр! Выбирайте ниже. Окно голосования: {mins} мин.",
-    "vote_accepted": "✅ Голос за жанр <b>{genre}</b> засчитан!",
-    "vote_ended": "🏁 Голосование окончено. Победил жанр: <b>{genre}</b>.",
+    "nothing_found": "⚠️ Для жанра '{genre}' ничего не найдено, пробую следующий...",
 }
-def check_environment() -> bool:
-    ok = True
-    if not BOT_TOKEN:
-        logging.getLogger(__name__).error("BOT_TOKEN не задан в окружении.")
-        ok = False
-    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-    return ok
 
-def parse_admins() -> List[int]:
-    out = []
-    if ADMINS_ENV:
-        for p in ADMINS_ENV.split(","):
-            p = p.strip()
-            if p.isdigit():
-                out.append(int(p))
-    return out
-
-ADMINS: List[int] = parse_admins()
+def is_valid() -> bool:
+    return bool(BOT_TOKEN) and bool(LASTFM_API_KEY)
