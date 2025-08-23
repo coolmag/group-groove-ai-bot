@@ -177,12 +177,10 @@ class MusicBot:
         try:
             async with radio_lock:
                 rs = self.state.radio_status
-                if not rs.is_on: return
-                now = time.time()
-                if rs.current_track:
-                    elapsed = now - rs.last_played_time
-                    dur = max(60, rs.current_track.duration or 180)
-                    if elapsed < dur: return
+                if not rs.is_on:
+                    return
+                # Logic to wait for the previous track to finish has been removed.
+                # A new track will be fetched every minute.
                 genre = rs.current_genre or self._random_genre()
                 self.state.radio_status.current_genre = genre
 
@@ -190,42 +188,56 @@ class MusicBot:
             preferred_sources = [self.state.source, Source.YOUTUBE_MUSIC, Source.SOUNDCLOUD, Source.JAMENDO, Source.YOUTUBE]
             results = []
             for src in preferred_sources:
-                results = await self.downloader.search_tracks(f"{genre} {os.getenv('RADIO_SEARCH_QUERY_SUFFIX','music')}", src, limit=5)
+                results = await self.downloader.search_tracks(f"{genre} {os.getenv('RADIO_SEARCH_QUERY_SUFFIX','music')}", src, limit=10) # Increased limit to get more results
                 if results:
-                    # record the source chosen
                     async with state_lock:
                         self.state.source = src
                     break
 
             if not results:
                 logger.warning("Radio: no results for genre %s on any source", genre)
-                # notify chats and return (will retry next minute)
                 for cid in list(self.state.active_chats.keys()):
                     try:
-                        await context.bot.send_message(cid, "⚠️ Трек не найден, пробуем следующий...")
+                        await context.bot.send_message(cid, f"⚠️ Для жанра '{genre}' ничего не найдено, пробую следующий...")
+                    except Exception:
+                        pass
+                return
+
+            # Filter tracks to be 10 minutes or less (600 seconds)
+            short_tracks = [t for t in results if t.duration and t.duration <= 600]
+
+            if not short_tracks:
+                logger.warning("Radio: Found tracks for genre %s, but all were longer than 10 minutes.", genre)
+                for cid in list(self.state.active_chats.keys()):
+                    try:
+                        await context.bot.send_message(cid, f"⚠️ Треки для жанра '{genre}' слишком длинные, ищу другой жанр...")
                     except Exception:
                         pass
                 return
 
             import random
-            sel = random.choice(results[:min(5,len(results))])
+            sel = random.choice(short_tracks)
+            
             # announce and broadcast
             for cid in list(self.state.active_chats.keys()):
                 try:
                     await context.bot.send_message(cid, f"▶️ Отправляю трек: {sel.title} — {sel.artist}")
                 except Exception:
                     pass
+            
             ok = await self._broadcast_track(sel.url, context, caption=f"📻 Радио: {genre}")
             if ok:
                 async with state_lock:
                     self.state.radio_status.current_track = sel
                     self.state.radio_status.last_played_time = time.time()
         except Exception as e:
-            logger.error("update_radio failed: %s", e)
+            logger.error("update_radio failed: %s", e, exc_info=True)
             # ensure we don't leave radio blocked; notify chats
             for cid in list(self.state.active_chats.keys()):
-                try: await context.bot.send_message(cid, "⚠️ Ошибка при попытке поставить трек. Попробуем снова через минуту.")
-                except Exception: pass
+                try:
+                    await context.bot.send_message(cid, "⚠️ Ошибка при попытке поставить трек. Попробуем снова через минуту.")
+                except Exception:
+                    pass
 
     async def _broadcast_track(self, url: str, context: ContextTypes.DEFAULT_TYPE, caption: Optional[str] = None) -> bool:
         path_info = await self.downloader.download_by_url(url, prefer_mp3=True)
