@@ -1,5 +1,7 @@
+import time
 from typing import List, Optional
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from config import RadioStatus
 
 def is_admin(user_id: int, admins_env: Optional[str] = None) -> bool:
     if not admins_env:
@@ -7,31 +9,24 @@ def is_admin(user_id: int, admins_env: Optional[str] = None) -> bool:
     ids = {int(x) for x in admins_env.split(",") if x.strip().isdigit()}
     return user_id in ids
 
-def make_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶️ Включить радио", callback_data="ron"),
-         InlineKeyboardButton("⏸ Выключить", callback_data="roff")],
-        [InlineKeyboardButton("🔄 Источник: YouTube", callback_data="src_youtube"),
-         InlineKeyboardButton("SoundCloud", callback_data="src_soundcloud")],
-        [InlineKeyboardButton("🗳 Голосовать", callback_data="vote")]
-    ])
+def get_menu_keyboard(state) -> InlineKeyboardMarkup:
+    on = InlineKeyboardButton("▶️ Радио ON", callback_data="radio_on")
+    off = InlineKeyboardButton("⏸ Радио OFF", callback_data="radio_off")
+    nxt = InlineKeyboardButton("⏭ Пропустить", callback_data="next_track")
+    src = InlineKeyboardButton(f"🔁 Источник: {state.source.value}", callback_data="source_switch")
+    vote = InlineKeyboardButton("🗳 Голосование", callback_data="vote_now")
+    return InlineKeyboardMarkup([[on, off, nxt], [src, vote]])
 
-def make_search_keyboard(titles: List[str]):
-    rows = []
-    for i, t in enumerate(titles[:10]):
-        rows.append([InlineKeyboardButton(f"{i+1}. {t[:48]}", callback_data=f"pick_{i}")])
-    return InlineKeyboardMarkup(rows)
-
-def make_vote_keyboard(genres: List[str]):
-    rows = []
-    for g in genres:
-        rows.append([InlineKeyboardButton(g, callback_data=f"vote_{g}")])
-    return InlineKeyboardMarkup(rows)
-
-def format_status(source: str, genre: Optional[str], last_title: Optional[str]):
-    return (f"🎵 Music Bot Status\n\n"
-            f"Источник поиска: {source}\n"
-            f"Статус радио: {'✅ Включено' if genre else '⏸ Выключено'}\n"
-            f"Текущий жанр: {genre or '—'}\n"
-            f"Последний трек: {last_title or '—'}\n\n"
-            f"Команды: /play, /menu, /vote")
+def format_status_message(state) -> str:
+    rs: RadioStatus = state.radio_status
+    line1 = f"<b>Groove AI Radio</b> — источник: <b>{state.source.value}</b>"
+    line2 = f"Статус радио: {'🟢 ВКЛ' if rs.is_on else '🔴 ВЫКЛ'}"
+    line3 = f"Текущий жанр: <b>{rs.current_genre or '—'}</b>"
+    line4 = "Трек: —"
+    line5 = ""
+    if rs.current_track:
+        t = rs.current_track
+        dur = t.duration or 0
+        elapsed = int(time.time() - rs.last_played_time)
+        line4 = f"Трек: <b>{t.artist or '—'} — {t.title}</b> ({elapsed}s / {dur}s)"
+    return "\n".join([line1, line2, line3, line4, line5]).strip()

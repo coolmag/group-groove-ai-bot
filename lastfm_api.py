@@ -1,30 +1,21 @@
-import aiohttp
-import logging
-import os
-
+import aiohttp, os, logging
 log = logging.getLogger("lastfm")
-LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "")
+API_KEY = os.getenv("LASTFM_API_KEY", "")
 
 async def get_top_tracks_by_genre(genre: str, limit: int = 20):
-    if not LASTFM_API_KEY:
-        log.error("LASTFM_API_KEY is missing")
+    if not API_KEY:
+        log.warning("LASTFM_API_KEY not set")
         return []
     url = "http://ws.audioscrobbler.com/2.0/"
-    params = {
-        "method": "tag.gettoptracks",
-        "tag": genre,
-        "limit": limit,
-        "api_key": LASTFM_API_KEY,
-        "format": "json"
-    }
+    params = {"method":"tag.gettoptracks","tag":genre,"limit":limit,"api_key":API_KEY,"format":"json"}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, timeout=20) as resp:
                 if resp.status != 200:
-                    log.warning("Last.fm status=%s", resp.status)
+                    log.warning("Last.fm returned %s", resp.status)
                     return []
                 data = await resp.json()
-                tracks = data.get("tracks", {}).get("track", [])
+                tracks = data.get("tracks",{}).get("track",[])
                 out = []
                 for t in tracks:
                     name = t.get("name")
@@ -33,5 +24,5 @@ async def get_top_tracks_by_genre(genre: str, limit: int = 20):
                         out.append(f"{artist} - {name}")
                 return out
     except Exception as e:
-        log.exception("Last.fm error: %s", e)
+        log.exception("Last.fm fetch failed: %s", e)
         return []

@@ -1,209 +1,339 @@
 import os
-import time
 import logging
 import asyncio
-from typing import List, Optional
-
 from telegram import Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
+from telegram.error import BadRequest, Forbidden
 
-from config import BOT_TOKEN, CHAT_ID, GENRES, DEFAULT_GENRE, Source, BotState, TrackInfo, is_valid
-from utils import is_admin, make_menu_keyboard, make_search_keyboard, make_vote_keyboard, format_status
-from locks import state_lock, radio_lock
+# Импортируем наши модули
+from config import BOT_TOKEN, BotState, MESSAGES, check_environment, PROXY_ENABLED, PROXY_URL
 from downloader import AudioDownloadManager
-from lastfm_api import get_top_tracks_by_genre
+from utils import is_admin, get_menu_keyboard, format_status_message
+from locks import state_lock, radio_lock
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-log = logging.getLogger("GrooveAIBot")
-
-ADMINS_ENV = os.getenv("ADMINS", "")
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 class MusicBot:
     def __init__(self, app: Application):
         self.app = app
+        self.job_queue: JobQueue = self.app.job_queue
+        self.downloader = AudioDownloadManager()
         self.state = BotState()
-        self.dl = AudioDownloadManager()
+        
+        # Принудительно включаем радио для тестирования
+        self.state.radio_status.is_on = True
+        self.state.radio_status.last_played_time = 0
+        
+        logger.info(f"Initialized bot with state: {self.state}")
+        
+        if PROXY_ENABLED and PROXY_URL:
+            logger.info(f"Proxy enabled: {PROXY_URL}")
+        
+        # Регистрация обработчиков
+        self.register_handlers()
+        
+        # Регистрация обработчика ошибок
+        self.app.add_error_handler(self.on_error)
 
-        # schedule jobs via PTB JobQueue (installed via extra)
-        jq = self.app.job_queue
-        jq.run_repeating(self.update_radio, interval=60, first=5, name="radio_loop", coalesce=True, max_instances=1)
-        jq.run_repeating(self.update_status_message, interval=30, first=10, name="status", coalesce=True, max_instances=1)
-        jq.run_repeating(self.autostart_vote, interval=60, first=20, name="vote_watch", coalesce=True, max_instances=1)
+        # Запуск фоновых задач
+        self.job_queue.run_repeating(self.update_radio, interval=60, first=10)  # Каждую минуту
+        self.job_queue.run_repeating(self.update_status_message, interval=30, first=5)  # Каждые 30 секунд
 
-        log.info("Bot initialized")
+    def register_handlers(self):
+        handlers = [
+            CommandHandler("start", self.start),
+            CommandHandler("menu", self.show_menu),
+            CommandHandler("play", self.play_song),
+            CommandHandler(["ron", "radio_on"], self.radio_on),
+            CommandHandler(["roff", "radio_off"], self.radio_off),
+            CommandHandler("next", self.next_track),
+            CommandHandler("source", self.source_switch),
+            CommandHandler("proxy", self.toggle_proxy),
+            CallbackQueryHandler(self.button_callback)
+        ]
+        for handler in handlers:
+            self.app.add_handler(handler)
 
-    async def send_status(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-        st = self.state.radio
-        text = format_status(self.state.source.value, st.current_genre or DEFAULT_GENRE, st.current_track.title if st.current_track else None)
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True, reply_markup=make_menu_keyboard())
-        except Exception as e:
-            log.warning("Failed to send status: %s", e)
-
-    async def update_status_message(self, context: ContextTypes.DEFAULT_TYPE):
-        # can be extended to edit a pinned message
-        pass
-
-    async def autostart_vote(self, context: ContextTypes.DEFAULT_TYPE):
-        # every hour at minute 0 start vote; simplified: if not active and minute==0
-        minute = int(time.strftime("%M"))
-        if minute == 0 and not self.state.voting_active:
-            await self.vote_broadcast(context)
-
-    async def vote_broadcast(self, context: ContextTypes.DEFAULT_TYPE):
-        self.state.voting_active = True
-        self.state.vote_counts = {g: 0 for g in GENRES}
-        chats = list(self.state.active_chats.keys()) or ([int(CHAT_ID)] if CHAT_ID else [])
-        for chat_id in chats:
+    async def on_error(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик ошибок"""
+        logger.error(f"Update {update} caused error {context.error}")
+        
+        if update and update.effective_chat:
             try:
-                await context.bot.send_message(chat_id=chat_id, text="🗳 Старт голосования за жанр! Окно: 3 мин.", reply_markup=make_vote_keyboard(GENRES))
-            except Exception as e:
-                log.warning("vote message failed: %s", e)
-        # stop vote after 3 min
-        context.job_queue.run_once(self.finish_vote, when=180)
-
-    async def finish_vote(self, context: ContextTypes.DEFAULT_TYPE):
-        self.state.voting_active = False
-        if not self.state.vote_counts:
-            return
-        winner = max(self.state.vote_counts.items(), key=lambda x: x[1])[0]
-        self.state.radio.current_genre = winner
-        chats = list(self.state.active_chats.keys()) or ([int(CHAT_ID)] if CHAT_ID else [])
-        for cid in chats:
-            try:
-                await context.bot.send_message(chat_id=cid, text=f"✅ Победил жанр: {winner}. Продолжаем радио!")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ Произошла ошибка при обработке запроса. Попробуйте позже."
+                )
             except Exception:
-                pass
-
-    async def update_radio(self, context: ContextTypes.DEFAULT_TYPE):
-        async with radio_lock:
-            if not self.state.radio.is_on:
-                return
-            chat_ids = list(self.state.active_chats.keys()) or ([int(CHAT_ID)] if CHAT_ID else [])
-            if not chat_ids:
-                return
-            genre = self.state.radio.current_genre or DEFAULT_GENRE
-
-            # Build candidate queries from Last.fm
-            queries = await get_top_tracks_by_genre(genre, limit=15)
-            if not queries:
-                for cid in chat_ids:
-                    await context.bot.send_message(chat_id=cid, text=f"⚠️ Для жанра '{genre}' ничего не найдено, пробую следующий...")
-                # fallback to default
-                queries = await get_top_tracks_by_genre(DEFAULT_GENRE, limit=15)
-
-            # Skip already played (by title)
-            queries = [q for q in queries if q not in self.state.history]
-            if not queries:
-                queries = await get_top_tracks_by_genre(DEFAULT_GENRE, limit=15)
-
-            for cid in chat_ids:
-                await context.bot.send_message(chat_id=cid, text=f"📻 Радио: {genre}")
-
-            # Try to download
-            for q in queries:
-                res = await self.dl.download_by_query(q)
-                if not res:
-                    continue
-                path, info = res
-                # prevent repeats
-                self.state.history.append(q)
-                self.state.radio.current_track = info
-                # Send
-                for cid in chat_ids:
-                    try:
-                        await context.bot.send_audio(chat_id=cid, audio=open(path, "rb"), caption=f"▶️ Отправляю трек: {q}")
-                    except Exception as e:
-                        log.warning("send_audio failed: %s", e)
-                break
+                logger.error("Failed to send error message")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        self.state.active_chats[update.effective_chat.id] = 1
-        await update.message.reply_text("📻 Радио включено! Музыка скоро начнет играть.")
-        await self.send_status(update.effective_chat.id, context)
+        await update.message.reply_text(MESSAGES['welcome'])
+        await self.show_menu(update, context)
 
-    async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.send_status(update.effective_chat.id, context)
+    async def show_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
 
-    async def play(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.args:
-            await update.message.reply_text("Использование: /play <название>")
+        async with state_lock:
+            if chat_id not in self.state.active_chats:
+                # Создаем новую запись о чате
+                self.state.active_chats[chat_id] = BotState.ChatData(status_message_id=None)
+                logger.info(f"New chat added: {chat_id}")
+        
+        # Отправляем или обновляем статус сообщение
+        await self.update_status_message(context, chat_id)
+
+    async def play_song(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        query = " ".join(context.args)
+        if not query:
+            await context.bot.send_message(chat_id, MESSAGES['play_usage'])
             return
-        query = " ".join(context.args).strip()
-        # Pretend search by building 10 variants (yt_dlp will resolve exact link on pick)
-        titles = [query] + [f"{query} #{i}" for i in range(2, 11)]
-        self.state.search_results[update.effective_chat.id] = [TrackInfo(title=t) for t in titles]
-        await update.message.reply_text("Выберите трек:", reply_markup=make_search_keyboard(titles))
 
-    async def on_pick(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        q = update.callback_query
-        await q.answer()
-        if q.data.startswith("pick_"):
-            idx = int(q.data.split("_")[1])
-            items = self.state.search_results.get(q.message.chat_id) or []
-            if idx >= len(items):
+        status_msg = await context.bot.send_message(chat_id, MESSAGES['searching'])
+        
+        try:
+            audio_path, track_info = await self.downloader.download_track(query, self.state.source)
+            
+            if audio_path and track_info:
+                try:
+                    with open(audio_path, 'rb') as audio_file:
+                        await context.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=audio_file,
+                            title=track_info.title,
+                            performer=track_info.artist,
+                            duration=track_info.duration,
+                            caption=f"🎵 {track_info.artist} - {track_info.title} (источник: {track_info.source})"
+                        )
+                    await status_msg.delete()
+                finally:
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+                        logger.info(f"File deleted: {audio_path}")
+            else:
+                await status_msg.edit_text(MESSAGES['not_found'])
+        except Exception as e:
+            logger.error(f"Error in play_song: {e}")
+            await status_msg.edit_text("❌ Ошибка при загрузке трека")
+
+    async def radio_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await is_admin(update, context):
+            await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
+            return
+        
+        async with state_lock:
+            self.state.radio_status.is_on = True
+        await context.bot.send_message(update.effective_chat.id, MESSAGES['radio_on'])
+        await self.update_status_message(context, update.effective_chat.id)
+
+    async def radio_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await is_admin(update, context):
+            await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
+            return
+
+        async with state_lock:
+            self.state.radio_status.is_on = False
+        await context.bot.send_message(update.effective_chat.id, MESSAGES['radio_off'])
+        await self.update_status_message(context, update.effective_chat.id)
+
+    async def next_track(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await is_admin(update, context):
+            await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
+            return
+        
+        async with radio_lock:
+            self.state.radio_status.last_played_time = 0
+        await context.bot.send_message(update.effective_chat.id, MESSAGES['next_track'])
+
+    async def source_switch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await is_admin(update, context):
+            await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
+            return
+        
+        async with state_lock:
+            sources = list(self.state.source.__class__)
+            current_index = sources.index(self.state.source)
+            next_index = (current_index + 1) % len(sources)
+            self.state.source = sources[next_index]
+            message = MESSAGES['source_switched'].format(source=self.state.source.value)
+        
+        await context.bot.send_message(update.effective_chat.id, message)
+        await self.update_status_message(context, update.effective_chat.id)
+
+    async def toggle_proxy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await is_admin(update, context):
+            await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
+            return
+        
+        # Это просто демонстрация - в реальности нужно перезагружать бота для применения изменений прокси
+        if PROXY_ENABLED:
+            message = MESSAGES['proxy_enabled']
+        else:
+            message = MESSAGES['proxy_disabled']
+            
+        await context.bot.send_message(update.effective_chat.id, message)
+
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        command = query.data
+
+        commands = {
+            'radio_on': self.radio_on,
+            'radio_off': self.radio_off,
+            'next_track': self.next_track,
+            'source_switch': self.source_switch,
+        }
+        
+        if command in commands:
+            await commands[command](update, context)
+
+    async def update_radio(self, context: ContextTypes.DEFAULT_TYPE):
+        logger.info("Radio update started")
+        
+        async with radio_lock:
+            logger.info(f"Radio status: {self.state.radio_status.is_on}")
+            
+            if not self.state.radio_status.is_on:
+                logger.info("Radio is off, skipping update")
                 return
-            title = items[idx].title
-            await q.edit_message_text(f"▶️ Отправляю: {title}")
-            res = await self.dl.download_by_query(title)
-            if res:
-                path, info = res
-                await context.bot.send_audio(chat_id=q.message.chat_id, audio=open(path,"rb"), caption=title)
-        elif q.data.startswith("vote_"):
-            genre = q.data.split("_",1)[1]
-            self.state.vote_counts[genre] = self.state.vote_counts.get(genre, 0) + 1
-            await q.answer(f"Голос за {genre} засчитан!", show_alert=False)
-        elif q.data == "ron":
-            self.state.radio.is_on = True
-            await q.edit_message_text("📻 Радио включено.", reply_markup=make_menu_keyboard())
-        elif q.data == "roff":
-            self.state.radio.is_on = False
-            await q.edit_message_text("⏸ Радио выключено.", reply_markup=make_menu_keyboard())
-        elif q.data == "src_youtube":
-            self.state.source = Source.YOUTUBE
-            await q.answer("Источник: YouTube")
-        elif q.data == "src_soundcloud":
-            self.state.source = Source.SOUNDCLOUD
-            await q.answer("Источник: SoundCloud")
 
-    async def vote_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.vote_broadcast(context)
+            current_time = asyncio.get_event_loop().time()
+            logger.info(f"Current time: {current_time}, Last played: {self.state.radio_status.last_played_time}")
+            
+            if (current_time - self.state.radio_status.last_played_time) < self.state.radio_status.cooldown:
+                logger.info("Cooldown active, skipping update")
+                return
 
-    async def ron(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not is_admin(update.effective_user.id, os.getenv("ADMINS")):
-            return
-        self.state.radio.is_on = True
-        await update.message.reply_text("📻 Радио включено.")
+            logger.info("Attempting to download track for radio")
+            
+            genre = self.downloader.get_random_genre()
+            async with state_lock:
+                self.state.radio_status.current_genre = genre
 
-    async def roff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not is_admin(update.effective_user.id, os.getenv("ADMINS")):
-            return
-        self.state.radio.is_on = False
-        await update.message.reply_text("⏸ Радио выключено.")
+            # Пытаемся скачать трек
+            audio_path, track_info = await self.downloader.download_track(f"{genre} music", self.state.source)
 
-    async def skip(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not is_admin(update.effective_user.id, os.getenv("ADMINS")):
-            return
-        # Trigger immediate update
-        await self.update_radio(context)
+            if audio_path and track_info:
+                logger.info(f"Successfully downloaded: {track_info.title}")
+                
+                async with state_lock:
+                    self.state.radio_status.current_track = track_info
+                
+                # Отправляем трек во все активные чаты
+                for chat_id in list(self.state.active_chats.keys()):
+                    try:
+                        with open(audio_path, 'rb') as audio_file:
+                            await context.bot.send_audio(
+                                chat_id=chat_id,
+                                audio=audio_file,
+                                title=track_info.title,
+                                performer=track_info.artist,
+                                duration=track_info.duration,
+                                caption=f"📻 Радио: {genre.capitalize()} (источник: {track_info.source})"
+                            )
+                        logger.info(f"Track sent to chat {chat_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send radio track to {chat_id}: {e}")
+                
+                # Удаляем файл после отправки
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                    logger.info(f"File deleted: {audio_path}")
 
-def build_app() -> Application:
-    if not is_valid():
-        raise SystemExit("Environment invalid. Set TELEGRAM_TOKEN and LASTFM_API_KEY")
+                async with state_lock:
+                    self.state.radio_status.last_played_time = current_time
+            else:
+                logger.warning(f"Radio could not find a track for genre: {genre}")
+                # Устанавливаем задержку при ошибке
+                async with state_lock:
+                    self.state.radio_status.last_played_time = current_time - self.state.radio_status.cooldown + 30
+
+    async def update_status_message(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
+        keyboard = get_menu_keyboard()
+        message_text = format_status_message(self.state)
+        
+        chats_to_update = [chat_id] if chat_id else list(self.state.active_chats.keys())
+
+        for cid in chats_to_update:
+            chat_data = self.state.active_chats.get(cid)
+            
+            try:
+                if chat_data and chat_data.status_message_id:
+                    # Пытаемся обновить существующее сообщение
+                    await context.bot.edit_message_text(
+                        chat_id=cid,
+                        message_id=chat_data.status_message_id,
+                        text=message_text,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                else:
+                    # Создаем новое сообщение
+                    sent_message = await context.bot.send_message(
+                        chat_id=cid,
+                        text=message_text,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                    # Сохраняем ID сообщения
+                    async with state_lock:
+                        if cid in self.state.active_chats:
+                            self.state.active_chats[cid].status_message_id = sent_message.message_id
+                            logger.info(f"Created status message for chat {cid}: {sent_message.message_id}")
+            except BadRequest as e:
+                if "message not found" in str(e).lower():
+                    # Сообщение было удалено, создаем новое
+                    async with state_lock:
+                        if cid in self.state.active_chats:
+                            self.state.active_chats[cid].status_message_id = None
+                    logger.warning(f"Status message not found for chat {cid}, will create new one")
+                else:
+                    logger.warning(f"Failed to update status for chat {cid}: {e}")
+            except Forbidden:
+                logger.warning(f"Bot is blocked in chat {cid}. Removing from active chats.")
+                async with state_lock:
+                    if cid in self.state.active_chats:
+                        del self.state.active_chats[cid]
+            except Exception as e:
+                logger.error(f"Unexpected error updating status for {cid}: {e}")
+
+    async def shutdown(self):
+        """Очистка ресурсов при завершении"""
+        await self.downloader.close()
+
+def main():
+    """Запускает бота."""
+    if not check_environment():
+        return
+    
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Создаем экземпляр нашего бота
     bot = MusicBot(app)
 
-    app.add_handler(CommandHandler(["start"], bot.start))
-    app.add_handler(CommandHandler(["menu"], bot.menu))
-    app.add_handler(CommandHandler(["play","p"], bot.play))
-    app.add_handler(CommandHandler(["vote"], bot.vote_cmd))
-    app.add_handler(CommandHandler(["ron"], bot.ron))
-    app.add_handler(CommandHandler(["roff"], bot.roff))
-    app.add_handler(CommandHandler(["skip"], bot.skip))
-    app.add_handler(CallbackQueryHandler(bot.on_pick))
+    # Добавляем обработчик завершения
+    import signal
+    import functools
+    
+    def signal_handler(app, signal_name):
+        logger.info(f"Received signal {signal_name}, shutting down...")
+        loop = asyncio.get_event_loop()
+        loop.create_task(bot.shutdown())
+    
+    signal.signal(signal.SIGTERM, functools.partial(signal_handler, app))
+    signal.signal(signal.SIGINT, functools.partial(signal_handler, app))
 
-    return app
+    logger.info("Bot starting...")
+    # Запускаем бота
+    app.run_polling()
 
 if __name__ == "__main__":
-    application = build_app()
-    application.run_polling(close_loop=False)
+    main()

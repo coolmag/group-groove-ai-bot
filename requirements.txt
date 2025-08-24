@@ -1,6 +1,4 @@
 python-telegram-bot[job-queue]==20.7
-yt-dlp==2024.8.6
-aiohttp==3.9.5
-APScheduler==3.10.4
-pydantic==2.8.2
-python-dotenv==1.0.1
+yt-dlp>=2025.1.1
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
