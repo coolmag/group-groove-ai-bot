@@ -1,78 +1,44 @@
-import os
-from dataclasses import dataclass, field
-from typing import Dict, Optional
+# config.py (v8 фикс)
+from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN") or ""
-PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() in ("1","true","yes")
-PROXY_URL = os.getenv("PROXY_URL", "")
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 
-DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
-os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+DOWNLOADS_DIR = "./downloads"
 
-
-# Supported genres for radio (can be adjusted)
-GENRES = [
-    "Chillout","Ambient","Lo-fi","Electronic","Techno","House","Soul","Jazz",
-    "Hip-Hop","Trap","Drum and Bass","Trance","Retrowave","Synthwave","Chillstep"
-]
-
-# Optional cookie files for sites that may require them
-YOUTUBE_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_PATH", "")
-SOUNDCLOUD_COOKIES_PATH = os.getenv("SOUNDCLOUD_COOKIES_PATH", "")
-class Source(str, Enum):
+class Source(Enum):
     YOUTUBE = "youtube"
-    YTMUSIC = "ytmusic"
-    SOUNDCLOUD = "soundcloud"
-    JAMENDO = "jamendo"
-    ARCHIVE = "archive"
+    VKMUSIC = "vk"
 
 @dataclass
 class TrackInfo:
-    title: str = ""
-    artist: Optional[str] = None
-    duration: Optional[int] = None
-    source: Optional[str] = None
-    url: Optional[str] = None
+    title: str
+    url: str
 
 @dataclass
 class RadioStatus:
-    is_on: bool = True
-    current_genre: Optional[str] = None
-    current_track: Optional[TrackInfo] = None
-    last_played_time: float = 0.0
-    cooldown: int = 60
+    is_on: bool
+    current_genre: Optional[str]
+    current_track: Optional[str]
+    last_played_time: float
+    cooldown: int
 
 @dataclass
 class BotState:
-    @dataclass
-    class ChatData:
-        status_message_id: Optional[int] = None
+    active_chats: dict
+    source: Source
+    radio_status: RadioStatus
+    search_results: dict
+    voting_active: bool
+    vote_counts: dict
+    playlist: list
 
-    active_chats: Dict[int, ChatData] = field(default_factory=dict)
-    source: Source = Source.YOUTUBE
-    radio_status: RadioStatus = field(default_factory=RadioStatus)
-    search_results: Dict[int, list] = field(default_factory=dict)
-    voting_active: bool = False
-    vote_counts: Dict[str, int] = field(default_factory=dict)
-    playlist: list = field(default_factory=list)
-
-MESSAGES = {
-    "welcome": "👋 Привет! Я Groove AI Bot.",
-    "play_usage": "Использование: /play <название>",
-    "searching": "🔎 Ищу треки...",
-    "not_found": "😕 Ничего не найдено.",
-    "radio_on": "📻 Радио включено! Музыка скоро начнет играть.",
-    "radio_off": "⏸ Радио выключено.",
-    "admin_only": "⛔ Команда доступна только администраторам.",
-    "next_track": "⏭ Пропускаем текущий трек...",
-    "source_switched": "🔁 Источник переключён: {source}",
-    "proxy_enabled": "🔗 Proxy включён.",
-    "proxy_disabled": "🔗 Proxy отключён.",
-}
-def check_environment() -> bool:
-    ok = True
-    if not BOT_TOKEN:
-        print("BOT_TOKEN not set in environment")
-        ok = False
-    return ok
+GENRES = [
+    "Lo-fi",
+    "Jazz",
+    "Hip-hop",
+    "Electronic",
+    "Classical",
+    "Rock",
+]
