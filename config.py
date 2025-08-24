@@ -10,6 +10,16 @@ PROXY_URL = os.getenv("PROXY_URL", "")
 DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
+
+# Supported genres for radio (can be adjusted)
+GENRES = [
+    "Chillout","Ambient","Lo-fi","Electronic","Techno","House","Soul","Jazz",
+    "Hip-Hop","Trap","Drum and Bass","Trance","Retrowave","Synthwave","Chillstep"
+]
+
+# Optional cookie files for sites that may require them
+YOUTUBE_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_PATH", "")
+SOUNDCLOUD_COOKIES_PATH = os.getenv("SOUNDCLOUD_COOKIES_PATH", "")
 class Source(str, Enum):
     YOUTUBE = "youtube"
     YTMUSIC = "ytmusic"
