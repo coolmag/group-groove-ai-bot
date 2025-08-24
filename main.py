@@ -257,7 +257,7 @@ class MusicBot:
                     self.state.radio_status.last_played_time = current_time - self.state.radio_status.cooldown + 30
 
     async def update_status_message(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
-        keyboard = get_menu_keyboard()
+        keyboard = get_menu_keyboard(self.state)
         message_text = format_status_message(self.state)
         
         chats_to_update = [chat_id] if chat_id else list(self.state.active_chats.keys())
