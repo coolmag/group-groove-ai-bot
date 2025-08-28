@@ -1,5 +1,25 @@
+__pycache__
+*.pyc
+.git
+.env
+downloads/
+
+# Environment variables and credentials
+.env
+*.session
+*cookies.txt
+radio_config.json
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# IDE and OS specific files
+.idea/
+.vscode/
+.DS_Store
+
+# Downloaded media files
 downloads/
-.env
-cookies.txt
