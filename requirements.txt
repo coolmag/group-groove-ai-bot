@@ -4,4 +4,4 @@ aiohttp==3.9.1
 python-dotenv==1.0.1
 Pyrogram>=2.0.106
 tgcrypto>=1.2.5
-pytgcalls==4.0.0a11
+pytgcalls==3.0.0.dev24
