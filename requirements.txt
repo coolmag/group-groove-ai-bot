@@ -5,4 +5,4 @@ python-dotenv==1.0.1
 Pyrogram>=2.0.106
 tgcrypto>=1.2.5
 # Устанавливаем pytgcalls напрямую с GitHub, чтобы обойти проблемы индексации Railway
-pytgcalls @ git+https://github.com/pytgcalls/pytgcalls@develop
+pytgcalls @ git+https://github.com/pytgcalls/pytgcalls@master
