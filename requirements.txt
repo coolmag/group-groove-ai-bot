@@ -2,7 +2,3 @@ python-telegram-bot[job-queue]==20.7
 yt-dlp==2023.12.30
 aiohttp==3.9.5
 python-dotenv==1.0.1
-Pyrogram>=2.0.106
-tgcrypto>=1.2.5
-# Устанавливаем pytgcalls напрямую с GitHub, чтобы обойти проблемы индексации Railway
-py-tgcalls @ git+https://github.com/pytgcalls/pytgcalls@master

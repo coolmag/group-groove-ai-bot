@@ -1,42 +1,55 @@
 import logging
+import os
 import yt_dlp
-from models import Source, TrackInfo
-from config import PROXY_ENABLED, PROXY_URL, YOUTUBE_COOKIES_PATH
+from uuid import uuid4
+
+from config import (
+    PROXY_ENABLED, PROXY_URL, YOUTUBE_COOKIES_PATH, DOWNLOADS_DIR
+)
 
 logger = logging.getLogger(__name__)
 
-class TrackInfoExtractor:
-    async def extract_track_info(self, query: str, source: Source) -> TrackInfo | None:
-        try:
-            if source == Source.YOUTUBE:
-                url = f"ytsearch:{query}"
-            else:
-                raise ValueError(f"Unknown source: {source}")
+class AudioDownloader:
+    def __init__(self):
+        if not os.path.exists(DOWNLOADS_DIR):
+            os.makedirs(DOWNLOADS_DIR)
 
-            logger.info(f"Extracting info for: '{query}' from {source.value}")
+    def download_audio(self, query: str) -> str | None:
+        """Находит видео по запросу, скачивает аудио и возвращает путь к файлу."""
+        try:
+            search_query = f"ytsearch1:{query}"
+            filename = f"{str(uuid4())}.mp3"
+            filepath = os.path.join(DOWNLOADS_DIR, filename)
 
             ydl_opts = {
-                "format": "bestaudio/best",
-                "noplaylist": True,
-                "quiet": True,
-                "extract_flat": False,
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': filepath,
+                'noplaylist': True,
+                'quiet': True,
             }
 
-            # Добавляем прокси, если включено
             if PROXY_ENABLED and PROXY_URL:
                 ydl_opts['proxy'] = PROXY_URL
-                logger.info("Using proxy for yt-dlp.")
 
-            # Добавляем cookies, если указан путь
             if YOUTUBE_COOKIES_PATH:
                 ydl_opts['cookiefile'] = YOUTUBE_COOKIES_PATH
-                logger.info(f"Using cookies for yt-dlp from {YOUTUBE_COOKIES_PATH}.")
 
+            logger.info(f"Starting download for query: '{query}'")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if "entries" in info:
-                    info = info["entries"][0]
-                return TrackInfo(title=info["title"], url=info["webpage_url"])
+                ydl.download([search_query])
+            
+            if os.path.exists(filepath):
+                logger.info(f"Successfully downloaded to {filepath}")
+                return filepath
+            else:
+                logger.error("Download finished, but file not found.")
+                return None
+
         except Exception as e:
-            logger.error(f"Download error: {e}")
+            logger.error(f"An error occurred during download: {e}")
             return None
