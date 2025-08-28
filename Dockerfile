@@ -5,4 +5,4 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
 COPY . /app
-CMD ["python", "main.py"]
+CMD ["ls", "-R", "/usr/local/lib/python3.10/site-packages/pytgcalls"]
