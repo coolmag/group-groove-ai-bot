@@ -10,7 +10,8 @@ class LibriVoxClient:
 
     async def search_books(self, title_query: str) -> List[AudioBook]:
         params = {
-            "title": f"^{title_query}",
+            params = {
+            "title": title_query, # Убираем ^ для поиска по всей строке
             "format": "json",
             "extended": 1,
             "limit": 5,

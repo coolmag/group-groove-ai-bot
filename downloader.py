@@ -34,6 +34,7 @@ class AudioDownloader:
                 entry = info['entries'][0]
                 title = entry.get('title', query)
                 artist = entry.get('artist') or entry.get('uploader', 'Unknown Artist')
+                duration = entry.get('duration', 0)
 
             # Теперь скачиваем аудио с нужным именем файла
             filename = f"{str(uuid4())}.mp3"
