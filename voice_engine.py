@@ -2,7 +2,7 @@ import asyncio
 import logging
 from pyrogram import Client
 from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioPiped
+from pytgcalls.types.input_stream import AudioPiped
 
 from config import API_ID, API_HASH, BOT_TOKEN
 
