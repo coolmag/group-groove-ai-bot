@@ -14,14 +14,32 @@ class AudioDownloader:
         if not os.path.exists(DOWNLOADS_DIR):
             os.makedirs(DOWNLOADS_DIR)
 
-    def download_audio(self, query: str) -> str | None:
-        """Находит видео по запросу, скачивает аудио и возвращает путь к файлу."""
+    def download_audio(self, query: str) -> dict | None:
+        """Находит видео, извлекает метаданные, скачивает аудио и возвращает информацию."""
         try:
             search_query = f"ytsearch1:{query}"
+            
+            # Сначала извлекаем информацию, чтобы получить метаданные
+            info_opts = {
+                'quiet': True,
+                'noplaylist': True,
+            }
+            if PROXY_ENABLED and PROXY_URL:
+                info_opts['proxy'] = PROXY_URL
+            if YOUTUBE_COOKIES_PATH:
+                info_opts['cookiefile'] = YOUTUBE_COOKIES_PATH
+
+            with yt_dlp.YoutubeDL(info_opts) as ydl:
+                info = ydl.extract_info(search_query, download=False)
+                entry = info['entries'][0]
+                title = entry.get('title', query)
+                artist = entry.get('artist') or entry.get('uploader', 'Unknown Artist')
+
+            # Теперь скачиваем аудио с нужным именем файла
             filename = f"{str(uuid4())}.mp3"
             filepath = os.path.join(DOWNLOADS_DIR, filename)
 
-            ydl_opts = {
+            download_opts = {
                 'format': 'bestaudio/best',
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
@@ -32,20 +50,24 @@ class AudioDownloader:
                 'noplaylist': True,
                 'quiet': True,
             }
-
             if PROXY_ENABLED and PROXY_URL:
-                ydl_opts['proxy'] = PROXY_URL
-
+                download_opts['proxy'] = PROXY_URL
             if YOUTUBE_COOKIES_PATH:
-                ydl_opts['cookiefile'] = YOUTUBE_COOKIES_PATH
+                download_opts['cookiefile'] = YOUTUBE_COOKIES_PATH
 
-            logger.info(f"Starting download for query: '{query}'")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([search_query])
+            logger.info(f"Starting download for: '{title}'")
+            with yt_dlp.YoutubeDL(download_opts) as ydl:
+                ydl.download([entry['webpage_url']])
             
             if os.path.exists(filepath):
                 logger.info(f"Successfully downloaded to {filepath}")
-                return filepath
+                return {
+                    'filepath': filepath,
+                    'title': title,
+                    'artist': artist,
+                    'duration': duration,
+                    'filename': f"{title}.mp3"
+                }
             else:
                 logger.error("Download finished, but file not found.")
                 return None
