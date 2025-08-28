@@ -1,8 +1,7 @@
-# downloader.py (v8 фикс)
 import logging
 import yt_dlp
 from models import Source, TrackInfo
-from config import DOWNLOADS_DIR
+from config import PROXY_ENABLED, PROXY_URL, YOUTUBE_COOKIES_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +13,7 @@ class TrackInfoExtractor:
             else:
                 raise ValueError(f"Unknown source: {source}")
 
-            logger.info(f"Downloading: '{query}' from {source.value}")
+            logger.info(f"Extracting info for: '{query}' from {source.value}")
 
             ydl_opts = {
                 "format": "bestaudio/best",
@@ -22,6 +21,16 @@ class TrackInfoExtractor:
                 "quiet": True,
                 "extract_flat": False,
             }
+
+            # Добавляем прокси, если включено
+            if PROXY_ENABLED and PROXY_URL:
+                ydl_opts['proxy'] = PROXY_URL
+                logger.info("Using proxy for yt-dlp.")
+
+            # Добавляем cookies, если указан путь
+            if YOUTUBE_COOKIES_PATH:
+                ydl_opts['cookiefile'] = YOUTUBE_COOKIES_PATH
+                logger.info(f"Using cookies for yt-dlp from {YOUTUBE_COOKIES_PATH}.")
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
