@@ -1,14 +1,7 @@
-__pycache__
-*.pyc
-.git
+# Environment variables
 .env
-downloads/
-
-# Environment variables and credentials
-.env
-*.session
-*cookies.txt
-radio_config.json
+.env.*
+!.env.example
 
 # Python cache
 __pycache__/
@@ -16,10 +9,22 @@ __pycache__/
 *.pyo
 *.pyd
 
-# IDE and OS specific files
+# IDE and OS files
 .idea/
 .vscode/
-.DS_Store
+*.swp
+*~
+desktop.ini
+Thumbs.db
 
-# Downloaded media files
+# Pyrogram/TgCalls session files
+*.session
+*.session-journal
+
+# Downloaded media
 downloads/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

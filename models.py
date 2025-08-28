@@ -5,6 +5,11 @@ class Source(Enum):
     YOUTUBE = "youtube"
 
 @dataclass
+class TrackInfo:
+    title: str
+    url: str
+
+@dataclass
 class RadioStatus:
     is_on: bool = True
     current_genre: str = None
@@ -14,10 +19,9 @@ class RadioStatus:
 
 @dataclass
 class BotState:
-    active_chats: dict = field(default_factory=dict)
     source: Source = Source.YOUTUBE
     radio_status: RadioStatus = field(default_factory=RadioStatus)
-    search_results: dict = field(default_factory=dict)
+    playlist: list[TrackInfo] = field(default_factory=list)
+    # Голосование пока оставим для будущих фич
     voting_active: bool = False
     vote_counts: dict = field(default_factory=dict)
-    playlist: list = field(default_factory=list)
