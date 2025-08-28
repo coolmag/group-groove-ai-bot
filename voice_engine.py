@@ -1,13 +1,12 @@
+import asyncio
 import logging
 from pyrogram import Client
-from pytgcalls import GroupCall
+from pytgcalls import PyTgCalls
+from pytgcalls.types import AudioPiped
 
 from config import API_ID, API_HASH, BOT_TOKEN
 
 logger = logging.getLogger(__name__)
-
-# Для v3 нужно вручную управлять экземплярами звонков для каждого чата
-group_calls = {}
 
 class VoiceEngine:
     def __init__(self):
@@ -17,53 +16,52 @@ class VoiceEngine:
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
         )
+        self._call_manager = PyTgCalls(self._app)
         self._is_running = False
 
     async def start(self):
+        """Запускает Pyrogram клиент и обработчик звонков."""
         if self._is_running:
             return
-        logger.info("Starting Voice Engine (Pyrogram Client)...")
+        logger.info("Starting Voice Engine (Pyrogram & PyTgCalls)...")
         await self._app.start()
+        await self._call_manager.start()
         self._is_running = True
         logger.info("Voice Engine started successfully.")
 
     async def stop(self):
+        """Останавливает все компоненты движка."""
         if not self._is_running:
             return
         logger.info("Stopping Voice Engine...")
-        for chat_id in list(group_calls.keys()):
-            await self.leave_chat(chat_id)
+        await self._call_manager.stop()
         await self._app.stop()
         self._is_running = False
         logger.info("Voice Engine stopped.")
 
-    def _get_group_call(self, chat_id: int) -> GroupCall:
-        if chat_id not in group_calls:
-            group_calls[chat_id] = GroupCall(self._app, chat_id)
-        return group_calls[chat_id]
-
     async def join_chat(self, chat_id: int):
+        """Подключается к голосовому чату."""
         try:
-            group_call = self._get_group_call(chat_id)
-            await group_call.join()
+            await self._call_manager.join_group_call(chat_id, AudioPiped("")) # Пустой файл для инициализации
             logger.info(f"Successfully joined voice chat: {chat_id}")
         except Exception as e:
             logger.error(f"Failed to join voice chat {chat_id}: {e}")
 
     async def leave_chat(self, chat_id: int):
+        """Отключается от голосового чата."""
         try:
-            if chat_id in group_calls:
-                await group_calls[chat_id].leave()
-                del group_calls[chat_id]
-                logger.info(f"Successfully left voice chat: {chat_id}")
+            await self._call_manager.leave_group_call(chat_id)
+            logger.info(f"Successfully left voice chat: {chat_id}")
         except Exception as e:
             logger.error(f"Failed to leave voice chat {chat_id}: {e}")
 
     async def play_audio(self, chat_id: int, audio_file_path: str):
+        """Проигрывает аудиофайл в голосовом чате."""
         try:
-            group_call = self._get_group_call(chat_id)
-            # В v3 для проигрывания используется метод start_audio
-            await group_call.start_audio(audio_file_path, repeat=False)
+            await self._call_manager.change_stream(
+                chat_id,
+                AudioPiped(audio_file_path),
+            )
             logger.info(f"Started playing {audio_file_path} in chat {chat_id}")
         except Exception as e:
             logger.error(f"Failed to play audio in chat {chat_id}: {e}")
