@@ -1,17 +1,11 @@
 import logging
 import os
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 from config import BOT_TOKEN
-from downloader import AudioDownloader
-from librivox_client import LibriVoxClient
-from models import AudioBook, TrackInfo # Импортируем нужные модели
-
-# --- Константы для Callback Data ---
-CALLBACK_PREFIX_SELECT_BOOK = "select_book_"
-CALLBACK_PREFIX_ADD_CHAPTER = "add_chapter_"
+from downloader import SmartDownloader
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -23,8 +17,7 @@ logger = logging.getLogger(__name__)
 class MusicBot:
     def __init__(self, app: Application):
         self.app = app
-        self.downloader = AudioDownloader()
-        self.librivox_client = LibriVoxClient()
+        self.downloader = SmartDownloader()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
@@ -32,101 +25,48 @@ class MusicBot:
             "Используй /play <песня> или /audiobook <книга>."
         )
 
-    async def play(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _process_media_request(self, update: Update, context: ContextTypes.DEFAULT_TYPE, search_type: str):
         query = " ".join(context.args)
         if not query:
-            await update.message.reply_text("Пожалуйста, укажите название трека после /play.")
+            await update.message.reply_text(f"Пожалуйста, укажите название после команды /{search_type}.")
             return
 
-        msg = await update.message.reply_text(f"🔎 Ищу и скачиваю: '{query}'...")
+        msg = await update.message.reply_text(f"🔎 Ищу: '{query}'...")
 
         try:
             loop = asyncio.get_running_loop()
-            track_data = await loop.run_in_executor(None, self.downloader.download_audio, query)
+            media_data = await loop.run_in_executor(
+                None, self.downloader.download_media, query, search_type
+            )
 
-            if track_data and os.path.exists(track_data['filepath']):
-                await msg.edit_text("📤 Отправляю аудио...")
-                filepath = track_data['filepath']
+            if media_data and os.path.exists(media_data['filepath']):
+                await msg.edit_text("📤 Отправляю файл...")
+                filepath = media_data['filepath']
                 await context.bot.send_audio(
                     chat_id=update.effective_chat.id,
                     audio=open(filepath, 'rb'),
-                    title=track_data['title'],
-                    performer=track_data['artist'],
-                    filename=track_data['filename'],
-                    duration=track_data['duration'],
-                    write_timeout=60
+                    title=media_data['title'],
+                    performer=media_data['artist'],
+                    filename=media_data['filename'],
+                    duration=media_data['duration'],
+                    write_timeout=120 # Увеличиваем таймаут еще больше для аудиокниг
                 )
-                await msg.delete()
+                await msg.delete() # Удаляем сообщение с индикатором поиска
             else:
-                await msg.edit_text(f"❌ Не удалось найти или скачать трек: '{query}'.")
+                await msg.edit_text(f"❌ Не удалось найти подходящий медиафайл для: '{query}'.")
 
         except Exception as e:
-            logger.error(f"Error in /play command: {e}")
+            logger.error(f"Error in /{search_type} command: {e}")
             await msg.edit_text("Произошла внутренняя ошибка.")
         finally:
-            if 'track_data' in locals() and track_data and os.path.exists(track_data['filepath']):
-                os.remove(track_data['filepath'])
+            if 'media_data' in locals() and media_data and os.path.exists(media_data['filepath']):
+                os.remove(media_data['filepath'])
+
+    async def play(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._process_media_request(update, context, search_type='music')
 
     async def audiobook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = " ".join(context.args)
-        if not query:
-            await update.message.reply_text("Укажите название книги после /audiobook.")
-            return
-
-        await update.message.reply_text(f"📚 Ищу аудиокниги: '{query}'...")
-        books = await self.librivox_client.search_books(query)
-
-        if not books:
-            await update.message.reply_text("Не удалось найти аудиокниги по вашему запросу.")
-            return
-
-        context.chat_data['audiobooks'] = books
-        keyboard = []
-        for i, book in enumerate(books):
-            button = InlineKeyboardButton(f"{book.title} - {book.author}", callback_data=f"{CALLBACK_PREFIX_SELECT_BOOK}{i}")
-            keyboard.append([button])
-
-        await update.message.reply_text("Вот что я нашел:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
-        data = query.data
-
-        if data.startswith(CALLBACK_PREFIX_SELECT_BOOK):
-            book_index = int(data.split("_")[-1])
-            book = context.chat_data['audiobooks'][book_index]
-            context.chat_data['selected_book'] = book
-
-            keyboard = []
-            for i, chapter in enumerate(book.chapters[:20]):
-                button = InlineKeyboardButton(chapter.title, callback_data=f"{CALLBACK_PREFIX_ADD_CHAPTER}{i}")
-                keyboard.append([button])
-            
-            await query.edit_message_text(f"**{book.title}**\nВыберите главу:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
-        elif data.startswith(CALLBACK_PREFIX_ADD_CHAPTER):
-            chapter_index = int(data.split("_")[-1])
-            book = context.chat_data['selected_book']
-            chapter = book.chapters[chapter_index]
-
-            await query.edit_message_text(f"Скачиваю главу: {chapter.title}")
-            loop = asyncio.get_running_loop()
-            track_data = await loop.run_in_executor(None, self.downloader.download_audio, chapter.url)
-
-            if track_data and os.path.exists(track_data['filepath']):
-                await query.message.reply_audio(
-                    audio=open(track_data['filepath'], 'rb'),
-                    title=chapter.title,
-                    performer=book.author,
-                    filename=f"{chapter.title}.mp3",
-                    duration=track_data['duration'],
-                    write_timeout=60
-                )
-                os.remove(track_data['filepath'])
-                await query.delete_message() # Удаляем сообщение с кнопками
-            else:
-                await query.edit_message_text("❌ Не удалось скачать главу.")
+        await self._process_media_request(update, context, search_type='audiobook')
 
 # --- Сборка и запуск приложения ---
 async def main():
@@ -136,7 +76,6 @@ async def main():
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(CommandHandler("play", bot.play))
     app.add_handler(CommandHandler("audiobook", bot.audiobook))
-    app.add_handler(CallbackQueryHandler(bot.button_handler))
 
     logger.info("Bot starting...")
     try:
@@ -144,7 +83,7 @@ async def main():
         await app.start()
         await app.updater.start_polling()
         logger.info("Bot started successfully.")
-        await asyncio.Event().wait()  # Работать вечно
+        await asyncio.Event().wait() # Работать вечно
     finally:
         logger.info("Shutting down bot...")
         await app.updater.stop()
