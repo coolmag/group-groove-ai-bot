@@ -9,9 +9,9 @@ class LibriVoxClient:
     BASE_URL = "https://librivox.org/api/feed/audiobooks"
 
     async def search_books(self, title_query: str) -> List[AudioBook]:
+        """Ищет аудиокниги по названию."""
         params = {
-            params = {
-            "title": title_query, # Убираем ^ для поиска по всей строке
+            "title": title_query,  # Ищем по всему названию
             "format": "json",
             "extended": 1,
             "limit": 5,
@@ -21,6 +21,7 @@ class LibriVoxClient:
                 async with session.get(self.BASE_URL, params=params) as response:
                     response.raise_for_status()
                     data = await response.json()
+
                     if not data.get("books"):
                         return []
 
@@ -41,6 +42,9 @@ class LibriVoxClient:
                         )
                         books.append(book)
                     return books
-        except Exception as e:
+        except aiohttp.ClientError as e:
             logger.error(f"Error fetching data from LibriVox API: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"An unexpected error occurred in LibriVox client: {e}")
             return []
