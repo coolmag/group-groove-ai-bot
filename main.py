@@ -139,7 +139,18 @@ async def main():
     app.add_handler(CallbackQueryHandler(bot.button_handler))
 
     logger.info("Bot starting...")
-    await app.run_polling()
+    try:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        logger.info("Bot started successfully.")
+        await asyncio.Event().wait()  # Работать вечно
+    finally:
+        logger.info("Shutting down bot...")
+        await app.updater.stop()
+        await app.stop()
+        logger.info("Bot has been shut down.")
+
 
 if __name__ == "__main__":
     try:
