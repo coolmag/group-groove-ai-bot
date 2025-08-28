@@ -1,8 +1,8 @@
 import asyncio
 import logging
 from pyrogram import Client
-from py_tgcalls import PyTgCalls
-from py_tgcalls.types import AudioPiped
+from pytgcalls import PyTgCalls
+from pytgcalls.types import AudioPiped
 
 from config import API_ID, API_HASH, BOT_TOKEN
 
