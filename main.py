@@ -105,7 +105,7 @@ class MusicBot:
         
         async with state_lock:
             if chat_id not in self.state.active_chats:
-                self.state.active_chats[chat_id] = BotState.ChatData(status_message_id=None)
+                self.state.active_chats[chat_id] = ChatData(status_message_id=None)
                 logger.info(f"Новый чат: {chat_id}")
         
         await self.update_status_message(context, chat_id)
