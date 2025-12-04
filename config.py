@@ -33,7 +33,7 @@ PROXY_URL = os.getenv("PROXY_URL", "")
 PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
 
 # Конфигурация для yt-dlp
-DOWNLOADS_DIR = "downloads"
+DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "/tmp/music_bot_downloads")
 DOWNLOAD_TIMEOUT = 60
 MAX_QUERY_LENGTH = 200
 MAX_AUDIO_SIZE_MB = 50  # Максимальный размер аудиофайла в МБ
