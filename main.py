@@ -10,7 +10,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from config import (
     BOT_TOKEN, BotState, MESSAGES, check_environment, 
     PROXY_ENABLED, PROXY_URL, MAX_QUERY_LENGTH, cleanup_temp_files,
-    Source
+    Source, ChatData  # ← ДОБАВЛЕН ChatData
 )
 from simple_youtube_downloader import SimpleYouTubeDownloader
 from deezer_simple_downloader import DeezerSimpleDownloadManager
@@ -105,7 +105,7 @@ class MusicBot:
         
         async with state_lock:
             if chat_id not in self.state.active_chats:
-                self.state.active_chats[chat_id] = ChatData(status_message_id=None)
+                self.state.active_chats[chat_id] = ChatData(status_message_id=None)  # ← ИСПРАВЛЕНО
                 logger.info(f"Новый чат: {chat_id}")
         
         await self.update_status_message(context, chat_id)
@@ -166,7 +166,7 @@ class MusicBot:
                 await status_msg.edit_text(MESSAGES['not_found'])
                 
         except Exception as e:
-            logger.error(f"Ошибка в play_song: {e}")
+            logger.error(f"Ошибка в play_song: {e}", exc_info=True)
             await status_msg.edit_text("❌ Ошибка при загрузке")
     
     async def audiobook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,7 +220,7 @@ class MusicBot:
                 await status_msg.edit_text(MESSAGES['audiobook_not_found'])
                 
         except Exception as e:
-            logger.error(f"Ошибка в audiobook: {e}")
+            logger.error(f"Ошибка в audiobook: {e}", exc_info=True)
             await status_msg.edit_text("❌ Ошибка при загрузке")
     
     async def radio_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -313,7 +313,7 @@ class MusicBot:
             try:
                 await self._update_radio(context)
             except Exception as e:
-                logger.error(f"Ошибка в радио: {e}")
+                logger.error(f"Ошибка в радио: {e}", exc_info=True)
     
     async def _update_radio(self, context: ContextTypes.DEFAULT_TYPE):
         """Логика радио."""
@@ -340,10 +340,14 @@ class MusicBot:
         
         # Скачивание трека
         result = None
-        if self.state.source == Source.DEEZER:
-            result = await self.deezer_downloader.download_track(f"{genre} music")
-        else:
-            result = await self.youtube_downloader.download_track(f"{genre} music", self.state.source)
+        try:
+            if self.state.source == Source.DEEZER:
+                result = await self.deezer_downloader.download_track(f"{genre} music")
+            else:
+                result = await self.youtube_downloader.download_track(f"{genre} music", self.state.source)
+        except Exception as e:
+            logger.error(f"Ошибка скачивания для радио: {e}")
+            result = None
         
         if result:
             audio_path, track_info = result
@@ -381,6 +385,8 @@ class MusicBot:
                 async with state_lock:
                     self.state.radio_status.last_played_time = asyncio.get_event_loop().time()
                 
+            except Exception as e:
+                logger.error(f"Ошибка отправки радио: {e}")
             finally:
                 # Удаляем файл
                 if os.path.exists(audio_path):
@@ -403,55 +409,58 @@ class MusicBot:
     
     async def update_status_message(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
         """Обновляет статус-сообщение."""
-        keyboard = get_menu_keyboard()
-        message_text = format_status_message(self.state)
-        
-        async with state_lock:
-            if chat_id:
-                chats_to_update = [chat_id] if chat_id in self.state.active_chats else []
-            else:
-                chats_to_update = list(self.state.active_chats.keys())
-        
-        for cid in chats_to_update:
-            try:
-                chat_data = self.state.active_chats.get(cid)
-                
-                if chat_data and chat_data.status_message_id:
-                    await context.bot.edit_message_text(
-                        chat_id=cid,
-                        message_id=chat_data.status_message_id,
-                        text=message_text,
-                        reply_markup=keyboard,
-                        parse_mode='HTML'
-                    )
+        try:
+            keyboard = get_menu_keyboard()
+            message_text = format_status_message(self.state)
+            
+            async with state_lock:
+                if chat_id:
+                    chats_to_update = [chat_id] if chat_id in self.state.active_chats else []
                 else:
-                    sent_message = await context.bot.send_message(
-                        chat_id=cid,
-                        text=message_text,
-                        reply_markup=keyboard,
-                        parse_mode='HTML'
-                    )
+                    chats_to_update = list(self.state.active_chats.keys())
+            
+            for cid in chats_to_update:
+                try:
+                    chat_data = self.state.active_chats.get(cid)
                     
+                    if chat_data and chat_data.status_message_id:
+                        await context.bot.edit_message_text(
+                            chat_id=cid,
+                            message_id=chat_data.status_message_id,
+                            text=message_text,
+                            reply_markup=keyboard,
+                            parse_mode='HTML'
+                        )
+                    else:
+                        sent_message = await context.bot.send_message(
+                            chat_id=cid,
+                            text=message_text,
+                            reply_markup=keyboard,
+                            parse_mode='HTML'
+                        )
+                        
+                        async with state_lock:
+                            if cid in self.state.active_chats:
+                                self.state.active_chats[cid].status_message_id = sent_message.message_id
+                        
+                except BadRequest as e:
+                    if "message not found" in str(e).lower():
+                        async with state_lock:
+                            if cid in self.state.active_chats:
+                                self.state.active_chats[cid].status_message_id = None
+                    elif "not modified" in str(e).lower():
+                        pass  # Это нормально, сообщение не изменилось
+                    else:
+                        logger.warning(f"Не удалось обновить статус в {cid}: {e}")
+                except Forbidden:
+                    logger.warning(f"Бот заблокирован в {cid}")
                     async with state_lock:
                         if cid in self.state.active_chats:
-                            self.state.active_chats[cid].status_message_id = sent_message.message_id
-                    
-            except BadRequest as e:
-                if "message not found" in str(e).lower():
-                    async with state_lock:
-                        if cid in self.state.active_chats:
-                            self.state.active_chats[cid].status_message_id = None
-                elif "not modified" in str(e).lower():
-                    pass  # Это нормально, сообщение не изменилось
-                else:
-                    logger.warning(f"Не удалось обновить статус в {cid}: {e}")
-            except Forbidden:
-                logger.warning(f"Бот заблокирован в {cid}")
-                async with state_lock:
-                    if cid in self.state.active_chats:
-                        del self.state.active_chats[cid]
-            except Exception as e:
-                logger.error(f"Ошибка обновления статуса для {cid}: {e}")
+                            del self.state.active_chats[cid]
+                except Exception as e:
+                    logger.error(f"Ошибка обновления статуса для {cid}: {e}")
+        except Exception as e:
+            logger.error(f"Критическая ошибка в update_status_message: {e}")
     
     async def shutdown(self):
         """Завершение работы."""
@@ -462,8 +471,15 @@ class MusicBot:
             job.schedule_removal()
         
         # Закрываем загрузчики
-        await self.youtube_downloader.close()
-        await self.deezer_downloader.close()
+        try:
+            await self.youtube_downloader.close()
+        except Exception as e:
+            logger.error(f"Ошибка закрытия YouTube загрузчика: {e}")
+        
+        try:
+            await self.deezer_downloader.close()
+        except Exception as e:
+            logger.error(f"Ошибка закрытия Deezer загрузчика: {e}")
         
         # Очищаем временные файлы
         cleanup_temp_files()
@@ -478,23 +494,23 @@ async def main():
     
     logger.info("Запуск бота...")
     
-    app = Application.builder().token(BOT_TOKEN).build()
-    bot = MusicBot(app)
-    
-    await bot.initialize()
-    
-    stop_event = asyncio.Event()
-    
-    def signal_handler(signame):
-        logger.info(f"Сигнал {signame}, завершаю работу...")
-        stop_event.set()
-    
-    if sys.platform != 'win32':
-        loop = asyncio.get_event_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda s=sig: signal_handler(s.name))
-    
     try:
+        app = Application.builder().token(BOT_TOKEN).build()
+        bot = MusicBot(app)
+        
+        await bot.initialize()
+        
+        stop_event = asyncio.Event()
+        
+        def signal_handler(signame):
+            logger.info(f"Сигнал {signame}, завершаю работу...")
+            stop_event.set()
+        
+        if sys.platform != 'win32':
+            loop = asyncio.get_event_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda s=sig: signal_handler(s.name))
+        
         await app.initialize()
         await app.start()
         
@@ -508,17 +524,22 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C...")
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        logger.error(f"Критическая ошибка при запуске: {e}", exc_info=True)
     finally:
-        logger.info("Завершение...")
+        logger.info("Завершение работы...")
         
-        if app.updater:
-            await app.updater.stop()
-        
-        await app.stop()
-        await app.shutdown()
-        
-        await bot.shutdown()
+        try:
+            if 'app' in locals():
+                if app.updater:
+                    await app.updater.stop()
+                
+                await app.stop()
+                await app.shutdown()
+            
+            if 'bot' in locals():
+                await bot.shutdown()
+        except Exception as e:
+            logger.error(f"Ошибка при завершении работы: {e}")
         
         logger.info("Бот остановлен")
 
