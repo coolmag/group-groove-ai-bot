@@ -66,13 +66,18 @@ class MusicBot:
             CommandHandler("start", self.start),
             CommandHandler("menu", self.show_menu),
             CommandHandler("play", self.play_song),
+            CommandHandler("p", self.play_song),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
             CommandHandler("audiobook", self.audiobook),
+            CommandHandler("ab", self.audiobook),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
             CommandHandler(["ron", "radio_on"], self.radio_on),
             CommandHandler(["roff", "radio_off"], self.radio_off),
             CommandHandler("next", self.next_track),
+            CommandHandler("n", self.next_track),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
             CommandHandler("source", self.source_switch),
+            CommandHandler("src", self.source_switch),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
             CommandHandler("proxy", self.show_proxy_status),
             CommandHandler("status", self.get_status),
+            CommandHandler("stat", self.get_status),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
             CallbackQueryHandler(self.button_callback)
         ]
         
@@ -111,7 +116,7 @@ class MusicBot:
         await self.update_status_message(context, chat_id)
     
     async def play_song(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик /play"""
+        """Обработчик /play и /p"""
         chat_id = update.effective_chat.id
         
         if not context.args:
@@ -170,7 +175,7 @@ class MusicBot:
             await status_msg.edit_text("❌ Ошибка при загрузке")
     
     async def audiobook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик /audiobook"""
+        """Обработчик /audiobook и /ab"""
         chat_id = update.effective_chat.id
         
         if not context.args:
