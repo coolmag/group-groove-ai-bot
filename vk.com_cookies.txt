@@ -1,0 +1,39 @@
+# Netscape HTTP Cookie File
+# http://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file!  Do not edit.
+
+.vk.com	TRUE	/	TRUE	1779933886	remixlang	0
+.vk.com	TRUE	/	TRUE	1787333408	remixstlid	9114224754008610728_6vuB0huq0yvkEsmSBRRsDpATOiCaQMxTCuv4byzmsdX
+.vk.com	TRUE	/	TRUE	1779906672	remixstid	1656940473_uiIH99JYRpnTseVltV2FFr7NmVELcwm2RDFe0Sa9eAT
+.vk.com	TRUE	/	TRUE	1787334487	remixscreen_width	1920
+.vk.com	TRUE	/	TRUE	1787334487	remixscreen_height	1080
+.vk.com	TRUE	/	TRUE	1787334487	remixscreen_dpr	1
+.vk.com	TRUE	/	TRUE	1787334487	remixscreen_depth	24
+.vk.com	TRUE	/	TRUE	1787334489	remixcolor_scheme_mode	auto
+.vk.com	TRUE	/	TRUE	1780002073	remixdt	0
+.vk.com	TRUE	/	TRUE	1779853999	remixuacck	b3f151aad750763ec0
+.vk.com	TRUE	/	TRUE	1757094488	remixsf	1
+.vk.com	TRUE	/	TRUE	1787475311	remixuas	NDA5ZDVlY2Q5MzEwODkwZWZjN2ViOGRi
+.vk.com	TRUE	/	TRUE	1786852294	remixsuc	1%3A
+.vk.com	TRUE	/	TRUE	1782231642	remixrefkey	c1db2412f427c9550d
+vk.com	FALSE	/	TRUE	1782843863	remixscreen_width	1920
+vk.com	FALSE	/	TRUE	1782843863	remixscreen_height	1080
+vk.com	FALSE	/	TRUE	1782843863	remixscreen_dpr	1
+vk.com	FALSE	/	TRUE	1782843863	remixscreen_depth	24
+vk.com	FALSE	/	TRUE	1782843863	remixscreen_winzoom	1
+.vk.com	TRUE	/	FALSE	1780239552	tmr_lvid	4df8c0553c74f107ec0026fe64b6b0ab
+.vk.com	TRUE	/	FALSE	1780239552	tmr_lvidTS	1751468352853
+.vk.com	TRUE	/	TRUE	1756403287	remixscreen_orient	1
+.vk.com	TRUE	/	TRUE	1756994361	remixseenads	1
+.vk.com	TRUE	/	TRUE	1787750804	remixua	43%7C-1%7C215%7C1974591223
+.vk.com	TRUE	/	TRUE	1787334487	remixscreen_winzoom	1
+.vk.com	TRUE	/	TRUE	1756222980	remixgp	9c6169feddd4551e726d3fe14719133d
+.vk.com	TRUE	/	TRUE	0	remixcurr_audio	null
+.vk.com	TRUE	/	TRUE	0	remixmaudio	null
+.vk.com	TRUE	/	TRUE	1755800453	httoken	F9cD5UrXeTbZcpiKXunTbV1ccctotGSBrHA4z31lz-Bi0YwBs1UKskuh4R_VbIgX8FmTijR0r0wiGp8YmrQ7lLuYEBoVxnBlPXc6-KCzJxwKMu7pHPZAaZ94LSAh0M6ycQ
+.vk.com	TRUE	/	TRUE	1787334489	remixdark_color_scheme	1
+.vk.com	TRUE	/	TRUE	1787112131	remixnttpid	vk1.a.8nKa_F86mVdVtFnW6CyuL9K5SHTluDvS3U5VKCNsSdyk5CCjA2riekNRLtprpUsMz7kQ3--uBviTcmHMqoqp4zGXfxfeqmvKRPGrcezbjXl77vuIWpOz6fSiZG0Jyn8j7XqSWa9_-uyVX6W5ihbEfRyGIUEkCoNNkueercP-ek_gUowJ4XSKTDMWCNOEfply
+.vk.com	TRUE	/	TRUE	1787614604	remixdmgr	c701f7ec00f87d3e95cbdb7ced20ad4bd8718ab60776646fd5828c7c1379a232
+.vk.com	TRUE	/	TRUE	1787333408	remixpuad	uwIfQS6uIIZRpnzGeA16Zfuza_YDwBs0lHxJPAjeDbE
+vk.com	FALSE	/	TRUE	1786969730	remixnsid	vk1.a.xTCsgAJ3QhA8xES7SJFVdasT8RVFfG6IQJVJ686gDUt9Ps150s3S_CdhC6ybzIi_d6tYP22Cz99pZWoBlqTYjq7IJVc318-o6CDVyNTHrMMRXWrNJdFrKkwcJOHbn3IkHiUM-qE-u7aGOygMMZad1JzMy_5hcF7YgKVinGh1Bu_juA8ausJBrlbsfSv67pg8
+.vk.com	TRUE	/	TRUE	1787280498	remixsid	1_f2qz03ihsfwcnhA16GDlyBc_SCcm3h-COJWIBwGP1jIUKvRCqnU-3pSbH10u0aievZEZyV5doPhYa_5P_OfKmA
