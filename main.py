@@ -3,6 +3,7 @@ import logging
 import asyncio
 import signal
 import sys
+import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
 from telegram.error import BadRequest, Forbidden, TelegramError
@@ -66,18 +67,18 @@ class MusicBot:
             CommandHandler("start", self.start),
             CommandHandler("menu", self.show_menu),
             CommandHandler("play", self.play_song),
-            CommandHandler("p", self.play_song),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
+            CommandHandler("p", self.play_song),
             CommandHandler("audiobook", self.audiobook),
-            CommandHandler("ab", self.audiobook),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
+            CommandHandler("ab", self.audiobook),
             CommandHandler(["ron", "radio_on"], self.radio_on),
             CommandHandler(["roff", "radio_off"], self.radio_off),
             CommandHandler("next", self.next_track),
-            CommandHandler("n", self.next_track),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
+            CommandHandler("n", self.next_track),
             CommandHandler("source", self.source_switch),
-            CommandHandler("src", self.source_switch),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
+            CommandHandler("src", self.source_switch),
             CommandHandler("proxy", self.show_proxy_status),
             CommandHandler("status", self.get_status),
-            CommandHandler("stat", self.get_status),  # ← ДОБАВЛЕНА СОКРАЩЕННАЯ КОМАНДА
+            CommandHandler("stat", self.get_status),
             CallbackQueryHandler(self.button_callback)
         ]
         
@@ -115,8 +116,30 @@ class MusicBot:
         
         await self.update_status_message(context, chat_id)
     
+    async def download_with_timeout(self, query: str, source: Source, timeout: int = 30):
+        """Скачивает трек с таймаутом."""
+        try:
+            if source == Source.DEEZER:
+                logger.info(f"Использую Deezer для: '{query}'")
+                return await asyncio.wait_for(
+                    self.deezer_downloader.download_track(query),
+                    timeout=timeout
+                )
+            else:
+                logger.info(f"Использую {source.value} для: '{query}'")
+                return await asyncio.wait_for(
+                    self.youtube_downloader.download_track(query, source),
+                    timeout=timeout
+                )
+        except asyncio.TimeoutError:
+            logger.error(f"Таймаут при скачивании с {source.value}: '{query}'")
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при скачивании с {source.value}: {e}")
+            return None
+    
     async def play_song(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик /play и /p"""
+        """Обработчик /play и /p с таймаутами."""
         chat_id = update.effective_chat.id
         
         if not context.args:
@@ -134,13 +157,8 @@ class MusicBot:
         status_msg = await context.bot.send_message(chat_id, MESSAGES['searching'])
         
         try:
-            # Выбор источника
-            if self.state.source == Source.DEEZER:
-                logger.info(f"Использую Deezer для: '{query}'")
-                result = await self.deezer_downloader.download_track(query)
-            else:
-                logger.info(f"Использую {self.state.source.value} для: '{query}'")
-                result = await self.youtube_downloader.download_track(query, self.state.source)
+            # Скачиваем с таймаутом
+            result = await self.download_with_timeout(query, self.state.source, timeout=30)
             
             if result:
                 audio_path, track_info = result
@@ -168,14 +186,45 @@ class MusicBot:
                         except:
                             pass
             else:
-                await status_msg.edit_text(MESSAGES['not_found'])
+                # Если текущий источник не сработал, пробуем Deezer как резервный
+                if self.state.source != Source.DEEZER:
+                    logger.info(f"Пробую Deezer как резерв для: '{query}'")
+                    await status_msg.edit_text("⚠️ Основной источник не ответил, пробую Deezer...")
+                    
+                    result = await self.download_with_timeout(query, Source.DEEZER, timeout=20)
+                    
+                    if result:
+                        audio_path, track_info = result
+                        try:
+                            with open(audio_path, 'rb') as audio_file:
+                                await context.bot.send_audio(
+                                    chat_id=chat_id,
+                                    audio=audio_file,
+                                    title=track_info.title,
+                                    performer=track_info.artist,
+                                    duration=track_info.duration,
+                                    caption=f"🎵 {track_info.artist} - {track_info.title} (резервный источник)"
+                                )
+                            
+                            await status_msg.delete()
+                            
+                        finally:
+                            if os.path.exists(audio_path):
+                                try:
+                                    os.remove(audio_path)
+                                except:
+                                    pass
+                    else:
+                        await status_msg.edit_text(MESSAGES['not_found'])
+                else:
+                    await status_msg.edit_text(MESSAGES['not_found'])
                 
         except Exception as e:
             logger.error(f"Ошибка в play_song: {e}", exc_info=True)
             await status_msg.edit_text("❌ Ошибка при загрузке")
     
     async def audiobook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик /audiobook и /ab"""
+        """Обработчик /audiobook и /ab с таймаутами."""
         chat_id = update.effective_chat.id
         
         if not context.args:
@@ -192,10 +241,17 @@ class MusicBot:
         status_msg = await context.bot.send_message(chat_id, MESSAGES['searching_audiobook'])
         
         try:
+            result = None
             if self.state.source == Source.DEEZER:
-                result = await self.deezer_downloader.download_longest_track(query)
+                result = await asyncio.wait_for(
+                    self.deezer_downloader.download_longest_track(query),
+                    timeout=30
+                )
             else:
-                result = await self.youtube_downloader.download_longest_track(query, self.state.source)
+                result = await asyncio.wait_for(
+                    self.youtube_downloader.download_longest_track(query, self.state.source),
+                    timeout=30
+                )
             
             if result:
                 audio_path, track_info = result
@@ -224,6 +280,9 @@ class MusicBot:
             else:
                 await status_msg.edit_text(MESSAGES['audiobook_not_found'])
                 
+        except asyncio.TimeoutError:
+            logger.error(f"Таймаут при поиске аудиокниги: '{query}'")
+            await status_msg.edit_text("⏰ Таймаут при поиске. Попробуйте позже.")
         except Exception as e:
             logger.error(f"Ошибка в audiobook: {e}", exc_info=True)
             await status_msg.edit_text("❌ Ошибка при загрузке")
@@ -343,13 +402,22 @@ class MusicBot:
         
         logger.info(f"Жанр радио: {genre}")
         
-        # Скачивание трека
+        # Скачивание трека с таймаутом
         result = None
         try:
             if self.state.source == Source.DEEZER:
-                result = await self.deezer_downloader.download_track(f"{genre} music")
+                result = await asyncio.wait_for(
+                    self.deezer_downloader.download_track(f"{genre} music"),
+                    timeout=30
+                )
             else:
-                result = await self.youtube_downloader.download_track(f"{genre} music", self.state.source)
+                result = await asyncio.wait_for(
+                    self.youtube_downloader.download_track(f"{genre} music", self.state.source),
+                    timeout=30
+                )
+        except asyncio.TimeoutError:
+            logger.error(f"Таймаут радио с {self.state.source.value}")
+            result = None
         except Exception as e:
             logger.error(f"Ошибка скачивания для радио: {e}")
             result = None
