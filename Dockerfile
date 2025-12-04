@@ -38,22 +38,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxtst6 \
     lsb-release \
     xdg-utils \
-    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Добавляем репозиторий Google Chrome
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
 
-# 3. Устанавливаем Google Chrome
-RUN apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && \
+# 3. Устанавливаем ФИКСИРОВАННУЮ версию Google Chrome
+RUN apt-get update && apt-get install -y --no-install-recommends google-chrome-stable=124.0.6367.201-1 && \
     rm -rf /var/lib/apt/lists/*
 
-# 4. Устанавливаем Chromedriver, используя новый официальный метод
+# 4. Устанавливаем ФИКСИРОВАННУЮ версию Chromedriver, которая соответствует версии Chrome
 RUN \
-    CHROME_VERSION=$(google-chrome --product-version) && \
-    LATEST_GOOD_VERSION=$(wget -qO- https://googlechromelabs.github.io/chrome-for-testing/latest-patch-versions-per-build.json | jq -r ".builds.\"${CHROME_VERSION%%.*}\".version") && \
-    wget -q --continue -P /tmp "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/$LATEST_GOOD_VERSION/linux64/chromedriver-linux64.zip" && \
+    wget -q --continue -P /tmp "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/124.0.6367.201/linux64/chromedriver-linux64.zip" && \
     unzip -q /tmp/chromedriver-linux64.zip -d /usr/local/bin && \
     mv /usr/local/bin/chromedriver-linux64/chromedriver /usr/local/bin/ && \
     rm -rf /tmp/chromedriver-linux64.zip /usr/local/bin/chromedriver-linux64
