@@ -85,7 +85,7 @@ def format_status_message(state: BotState) -> str:
 def get_menu_keyboard():
     """Создает инлайн-клавиатуру меню"""
     buttons = [
-        [InlineKeyboardButton(▶️ Вкл. радио", callback_data="radio_on"),
+        [InlineKeyboardButton("▶️ Вкл. радио", callback_data="radio_on"),
          InlineKeyboardButton("⏹️ Выкл. радио", callback_data="radio_off")],
         [InlineKeyboardButton("⏭️ След. трек", callback_data="next_track"),
          InlineKeyboardButton("💿 Сменить источник", callback_data="source_switch")],
