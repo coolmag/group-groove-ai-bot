@@ -67,15 +67,6 @@ class Source(Enum):
     ARCHIVE = "Internet Archive"
     DEEZER = "Deezer"
 
-class BotState:
-    class Config:
-        arbitrary_types_allowed = True
-    
-    def __init__(self):
-        self.source: Source = Source.YOUTUBE
-        self.radio_status = RadioStatus()
-        self.active_chats: Dict[int, ChatData] = {}
-
 # --- Сообщения ---
 MESSAGES = {
     'welcome': "🎵 Добро пожаловать в музыкального бота!\n\nИспользуйте /play <название> для поиска музыки.",
@@ -96,6 +87,17 @@ MESSAGES = {
     'admin_only': "⛔ Эта команда только для администраторов.",
     'error': "⚠️ Произошла ошибка. Попробуйте позже."
 }
+
+class BotState:
+    """Состояние бота."""
+    
+    class Config:
+        arbitrary_types_allowed = True
+    
+    def __init__(self):
+        self.source: Source = Source.YOUTUBE
+        self.radio_status = RadioStatus()
+        self.active_chats: Dict[int, ChatData] = {}
 
 def check_environment() -> bool:
     """Проверяет наличие необходимых зависимостей."""
