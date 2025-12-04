@@ -5,12 +5,10 @@ from config import MESSAGES, ADMIN_IDS, BotState, MAX_QUERY_LENGTH
 logger = logging.getLogger(__name__)
 
 async def is_admin(update: Update, context) -> bool:
-    """Проверяет, является ли пользователь администратором."""
     user_id = update.effective_user.id
     return user_id in ADMIN_IDS
 
 def get_menu_keyboard():
-    """Создаёт клавиатуру меню."""
     keyboard = [
         [
             InlineKeyboardButton("📻 Включить радио", callback_data='radio_on'),
@@ -24,7 +22,6 @@ def get_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def format_status_message(state: BotState) -> str:
-    """Форматирует сообщение со статусом БЕЗ HTML."""
     status_text = f"""
 🎵 Music Bot Status
 
@@ -49,7 +46,6 @@ def format_status_message(state: BotState) -> str:
     return status_text.strip()
 
 def validate_query_length(query: str):
-    """Проверяет длину запроса."""
     if len(query) > MAX_QUERY_LENGTH:
         return False, f"❌ Запрос слишком длинный (максимум {MAX_QUERY_LENGTH} символов)"
     if len(query.strip()) < 2:

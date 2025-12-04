@@ -1,13 +1,11 @@
 import os
 import logging
 from enum import Enum
-from typing import Dict, Optional, Any
+from typing import Dict, Optional
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
 load_dotenv()
 
-# Настройка логирования - только в консоль
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -15,18 +13,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Токен бота (обязательно)
+# Проверка обязательных переменных
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не найден в .env файле!")
     raise ValueError("BOT_TOKEN обязателен")
 
-# Cookies для YouTube
 COOKIES_TEXT = os.getenv("COOKIES_TEXT", "")
 if not COOKIES_TEXT:
-    logger.warning("⚠️ COOKIES_TEXT не задан. YouTube будет блокировать запросы!")
+    logger.warning("⚠️ COOKIES_TEXT не задан")
+
+# Прокси (необязательно)
+PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
+PROXY_URL = os.getenv("PROXY_URL", "")
+
+# Директория для загрузок
+if os.path.exists("/tmp"):
+    DOWNLOADS_DIR = "/tmp/music_bot_downloads"
 else:
-    logger.info("✅ COOKIES_TEXT загружен")
+    DOWNLOADS_DIR = "downloads"
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 # Админы
 ADMIN_IDS = []
@@ -34,18 +39,14 @@ try:
     admin_str = os.getenv("ADMIN_IDS", "")
     if admin_str:
         ADMIN_IDS = [int(id.strip()) for id in admin_str.split(",") if id.strip().isdigit()]
-except Exception as e:
-    logger.error(f"Ошибка парсинга ADMIN_IDS: {e}")
+except:
+    pass
 
-# Определяем директорию для загрузок
-if os.path.exists("/tmp"):
-    DOWNLOADS_DIR = "/tmp/music_bot_downloads"
-else:
-    DOWNLOADS_DIR = "downloads"
+# Ограничения
+MAX_QUERY_LENGTH = 200
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
-os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-
-# Простые классы данных (без pydantic)
+# Модели данных
 class TrackInfo:
     def __init__(self, title: str, artist: str, duration: int, source: str):
         self.title = title
@@ -55,28 +56,21 @@ class TrackInfo:
 
 class RadioStatus:
     def __init__(self):
-        self.is_on: bool = False
-        self.current_genre: Optional[str] = None
-        self.current_track: Optional[TrackInfo] = None
-        self.last_played_time: float = 0
-        self.cooldown: int = 300
+        self.is_on = False
+        self.current_genre = None
+        self.current_track = None
+        self.last_played_time = 0
+        self.cooldown = 300
 
 class ChatData:
     def __init__(self):
-        self.status_message_id: Optional[int] = None
+        self.status_message_id = None
 
-# Источники музыки
+# Источники
 class Source(Enum):
     YOUTUBE = "YouTube"
     YOUTUBE_MUSIC = "YouTube Music"
-    SOUNDCLOUD = "SoundCloud"
-    JAMENDO = "Jamendo"
-    ARCHIVE = "Internet Archive"
     DEEZER = "Deezer"
-
-    @staticmethod
-    def get_available_sources():
-        return [Source.DEEZER, Source.YOUTUBE, Source.YOUTUBE_MUSIC]
 
 class BotState:
     def __init__(self):
@@ -86,80 +80,54 @@ class BotState:
 
 # Сообщения
 MESSAGES = {
-    'welcome': "🎵 Добро пожаловать в музыкального бота!\n\nИспользуйте /play <название> для поиска музыки.",
-    'menu': "📋 Главное меню",
-    'play_usage': "🎶 Использование: /play <название трека или артиста>",
+    'welcome': "🎵 Добро пожаловать!\nИспользуйте /play <название> для поиска музыки.",
+    'play_usage': "🎶 Использование: /play <название трека>",
     'audiobook_usage': "📖 Использование: /audiobook <название книги>",
     'searching': "🔍 Ищу трек...",
     'searching_audiobook': "🔍 Ищу аудиокнигу...",
-    'not_found': "❌ Трек не найден. Попробуйте другой запрос или используйте /source для смены источника.",
-    'audiobook_not_found': "❌ Аудиокнига не найдена. Попробуйте другое название.",
-    'file_too_large': "❌ Файл слишком большой для отправки.",
-    'radio_on': "📻 Радио включено! Музыка скоро начнет играть.",
+    'not_found': "❌ Трек не найден. Попробуйте другой запрос.",
+    'audiobook_not_found': "❌ Аудиокнига не найдена.",
+    'file_too_large': "❌ Файл слишком большой.",
+    'radio_on': "📻 Радио включено!",
     'radio_off': "📻 Радио выключено.",
-    'next_track': "⏭️ Пропускаю текущий трек...",
+    'next_track': "⏭️ Пропускаю трек...",
     'source_switched': "💿 Источник изменен на: {source}",
-    'admin_only': "⛔ Эта команда только для администраторов.",
-    'error': "⚠️ Произошла ошибка. Попробуйте позже.",
-    'youtube_blocked': "⚠️ YouTube заблокировал запрос. Используйте /source для переключения на Deezer."
+    'proxy_enabled': "🌐 Прокси включен.",
+    'proxy_disabled': "🌐 Прокси выключен.",
+    'admin_only': "⛔ Только для администраторов.",
+    'error': "⚠️ Произошла ошибка.",
+    'youtube_blocked': "⚠️ YouTube заблокировал запрос.",
 }
 
-def check_environment() -> bool:
-    """Проверяет наличие необходимых зависимостей."""
+def check_environment():
     try:
         import subprocess
+        import yt_dlp
         
         # Проверка FFmpeg
-        try:
-            result = subprocess.run(
-                ['ffmpeg', '-version'], 
-                capture_output=True, 
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                logger.info("✅ FFmpeg доступен")
-            else:
-                logger.error("❌ FFmpeg не найден!")
-                return False
-        except FileNotFoundError:
-            logger.error("❌ FFmpeg не установлен!")
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            logger.error("❌ FFmpeg не найден!")
             return False
-        except subprocess.TimeoutExpired:
-            logger.error("❌ FFmpeg завис при проверке!")
-            return False
-        
-        # Проверка yt-dlp
-        try:
-            import yt_dlp
-            logger.info(f"✅ yt-dlp {yt_dlp.version.__version__} доступен")
-        except ImportError:
-            logger.error("❌ yt-dlp не установлен!")
-            return False
-        
+            
+        logger.info("✅ FFmpeg доступен")
+        logger.info(f"✅ yt-dlp {yt_dlp.version.__version__} доступен")
         logger.info(f"✅ Директория загрузок: {DOWNLOADS_DIR}")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки окружения: {e}")
+        logger.error(f"❌ Ошибка: {e}")
         return False
 
 def cleanup_temp_files():
-    """Очищает временные файлы."""
-    try:
-        import glob
-        import time
-        
-        current_time = time.time()
-        
-        for filepath in glob.glob(os.path.join(DOWNLOADS_DIR, "*.*")):
-            try:
-                file_age = current_time - os.path.getmtime(filepath)
-                if file_age > 3600:
-                    os.remove(filepath)
-                    logger.debug(f"Удален старый файл: {os.path.basename(filepath)}")
-            except Exception as e:
-                logger.debug(f"Не удалось удалить файл {filepath}: {e}")
-                
-    except Exception as e:
-        logger.error(f"Ошибка при очистке файлов: {e}")
+    import glob
+    import time
+    import os
+    
+    current_time = time.time()
+    for filepath in glob.glob(os.path.join(DOWNLOADS_DIR, "*.*")):
+        try:
+            if current_time - os.path.getmtime(filepath) > 3600:
+                os.remove(filepath)
+        except:
+            pass
