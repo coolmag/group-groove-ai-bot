@@ -1,51 +1,64 @@
 import os
 import logging
-import asyncio
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from enum import Enum
-from typing import List, Dict, Optional
-import subprocess
-import tempfile
-import atexit
-import time
+from typing import Dict, Optional
+from pydantic import BaseModel
+from dotenv import load_dotenv
 
 # Загрузка переменных окружения
 load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- Основные ID и токены ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# Токен бота
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN не найден в .env файле!")
+    raise ValueError("BOT_TOKEN обязателен")
 
-# Читаем переменную ADMIN_IDS, ожидая строку с ID через запятую
-ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "0")
-ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip()]
+# Определяем директорию для загрузок (используем /tmp на Railway)
+if os.path.exists("/tmp"):
+    DOWNLOADS_DIR = "/tmp/music_bot_downloads"
+else:
+    DOWNLOADS_DIR = "downloads"
 
-# Настройки прокси
-PROXY_URL = os.getenv("PROXY_URL", "")
+# Создаем директорию если её нет
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
+# Прокси
 PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
+PROXY_URL = os.getenv("PROXY_URL", "")
 
-# Конфигурация для yt-dlp
-DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "/tmp/music_bot_downloads")
-DOWNLOAD_TIMEOUT = 60
+# Админы
+ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()]
+
+# Ограничения
 MAX_QUERY_LENGTH = 200
-MAX_AUDIO_SIZE_MB = 50  # Максимальный размер аудиофайла в МБ
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
-if not os.path.exists(DOWNLOADS_DIR):
-    os.makedirs(DOWNLOADS_DIR)
+# --- Модели данных ---
+class TrackInfo(BaseModel):
+    title: str
+    artist: str
+    duration: int
+    source: str
 
-# Cookies paths
-YOUTUBE_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_PATH", "")
-SOUNDCLOUD_COOKIES_PATH = os.getenv("SOUNDCLOUD_COOKIES_PATH", "")
+class RadioStatus(BaseModel):
+    is_on: bool = False
+    current_genre: Optional[str] = None
+    current_track: Optional[TrackInfo] = None
+    last_played_time: float = 0
+    cooldown: int = 300  # 5 минут
 
-# --- Источники ---
+class ChatData(BaseModel):
+    status_message_id: Optional[int] = None
+
+# --- Источники музыки ---
 class Source(Enum):
     YOUTUBE = "YouTube"
     YOUTUBE_MUSIC = "YouTube Music"
@@ -54,131 +67,75 @@ class Source(Enum):
     ARCHIVE = "Internet Archive"
     DEEZER = "Deezer"
 
-# --- Модели состояния ---
-class TrackInfo(BaseModel):
-    title: str = "Неизвестно"
-    artist: str = "Неизвестно"
-    duration: int = 0
-    source: str = "Unknown"
+class BotState:
+    class Config:
+        arbitrary_types_allowed = True
+    
+    def __init__(self):
+        self.source: Source = Source.YOUTUBE
+        self.radio_status = RadioStatus()
+        self.active_chats: Dict[int, ChatData] = {}
 
-class RadioStatus(BaseModel):
-    is_on: bool = False
-    current_genre: str = "lofi hip hop"
-    current_track: Optional[TrackInfo] = None
-    last_played_time: float = 0.0
-    cooldown: int = 300
-
-class BotState(BaseModel):
-    class ChatData(BaseModel):
-        status_message_id: Optional[int] = None
-
-    source: Source = Source.YOUTUBE
-    radio_status: RadioStatus = Field(default_factory=RadioStatus)
-    active_chats: Dict[int, ChatData] = Field(default_factory=dict)
-
-# --- Тексты и константы ---
+# --- Сообщения ---
 MESSAGES = {
-    "welcome": "🎶 Привет! Я музыкальный бот. Используй /menu, чтобы начать.",
-    "admin_only": "⛔ Эта команда доступна только администраторам.",
-    "radio_on": "📻 Радио включено! Музыка скоро начнет играть.",
-    "radio_off": "🔇 Радио выключено.",
-    "play_usage": "🎵 Укажите название песни после /play, например: /play Queen - Bohemian Rhapsody",
-    "audiobook_usage": "📚 Укажите название аудиокниги после /audiobook",
-    "searching": "🔍 Ищу трек...",
-    "searching_audiobook": "📖 Ищу аудиокнигу...",
-    "not_found": "😕 Трек не найден.",
-    "audiobook_not_found": "😕 Аудиокнига не найдена.",
-    "next_track": "⏭️ Включаю следующий трек на радио...",
-    "source_switched": "💿 Источник изменен на: {source}",
-    "proxy_enabled": "🔄 Прокси активирован",
-    "proxy_disabled": "🔁 Прокси отключен",
-    "query_too_long": f"❌ Запрос слишком длинный. Максимальная длина: {MAX_QUERY_LENGTH} символов.",
-    "file_too_large": f"❌ Файл слишком большой. Максимум: {MAX_AUDIO_SIZE_MB} МБ."
+    'welcome': "🎵 Добро пожаловать в музыкального бота!\n\nИспользуйте /play <название> для поиска музыки.",
+    'menu': "📋 Главное меню",
+    'play_usage': "🎶 Использование: /play <название трека или артиста>",
+    'audiobook_usage': "📖 Использование: /audiobook <название книги>",
+    'searching': "🔍 Ищу трек...",
+    'searching_audiobook': "🔍 Ищу аудиокнигу...",
+    'not_found': "❌ Трек не найден. Попробуйте другой запрос.",
+    'audiobook_not_found': "❌ Аудиокнига не найдена.",
+    'file_too_large': "❌ Файл слишком большой для отправки.",
+    'radio_on': "📻 Радио включено! Музыка скоро начнет играть.",
+    'radio_off': "📻 Радио выключено.",
+    'next_track': "⏭️ Пропускаю текущий трек...",
+    'source_switched': "💿 Источник изменен на: {source}",
+    'proxy_enabled': "🌐 Прокси включен.",
+    'proxy_disabled': "🌐 Прокси выключен.",
+    'admin_only': "⛔ Эта команда только для администраторов.",
+    'error': "⚠️ Произошла ошибка. Попробуйте позже."
 }
 
-GENRES = [
-    "lofi hip hop", "chillstep", "ambient", "downtempo", "jazz hop",
-    "synthwave", "deep house", "liquid drum and bass", "psybient", "lounge",
-    "chillout", "trance", "house", "techno", "dubstep"
-]
-
-# --- Управление Cookies ---
-YOUTUBE_COOKIES_CONTENT = os.getenv("YOUTUBE_COOKIES_CONTENT", "")
-TEMP_COOKIE_PATH = None
-
-def create_temp_cookie_file():
-    """Создает временный файл с куки из переменной окружения"""
-    global TEMP_COOKIE_PATH
-    
-    if not YOUTUBE_COOKIES_CONTENT:
-        return None
-    
+def check_environment() -> bool:
+    """Проверяет наличие необходимых зависимостей."""
     try:
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
-            f.write(YOUTUBE_COOKIES_CONTENT)
-            TEMP_COOKIE_PATH = f.name
-        logger.info(f"Created temporary cookie file: {TEMP_COOKIE_PATH}")
-        return TEMP_COOKIE_PATH
+        # Проверка FFmpeg
+        import subprocess
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info("✅ FFmpeg доступен")
+        else:
+            logger.error("❌ FFmpeg не найден!")
+            return False
+        
+        # Проверка cookies (если есть)
+        cookies_text = os.getenv("COOKIES_TEXT", "")
+        if cookies_text:
+            logger.info("✅ Будут использоваться cookies из переменных окружения")
+        else:
+            logger.warning("⚠️ COOKIES_TEXT не задан, YouTube может блокировать запросы")
+        
+        return True
+        
     except Exception as e:
-        logger.error(f"Failed to create temporary cookie file: {e}")
-        return None
+        logger.error(f"❌ Ошибка проверки окружения: {e}")
+        return False
 
 def cleanup_temp_files():
-    """Очистка временных файлов"""
-    global TEMP_COOKIE_PATH
-    
-    if TEMP_COOKIE_PATH and os.path.exists(TEMP_COOKIE_PATH):
-        try:
-            os.remove(TEMP_COOKIE_PATH)
-            logger.info(f"Cleaned up temporary cookie file: {TEMP_COOKIE_PATH}")
-        except Exception as e:
-            logger.error(f"Failed to clean up cookie file: {e}")
-
-# Регистрируем очистку при завершении
-atexit.register(cleanup_temp_files)
-
-def check_environment() -> bool:
-    """Проверяет необходимые переменные окружения и зависимости"""
-    logger.info("Проверка окружения...")
-    
-    # Проверка обязательных переменных
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN не установлен!")
-        return False
-    
-    if not ADMIN_IDS or ADMIN_IDS == [0]:
-        logger.warning("⚠️ ADMIN_IDS не установлены или установлены в 0")
-    
-    # Проверка директорий
-    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-    
-    # Проверка FFmpeg
+    """Очищает временные файлы."""
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, timeout=5)
-        logger.info("✅ FFmpeg доступен")
+        import glob
+        import time
+        current_time = time.time()
+        
+        for filepath in glob.glob(os.path.join(DOWNLOADS_DIR, "*.mp3")):
+            try:
+                file_age = current_time - os.path.getmtime(filepath)
+                if file_age > 3600:  # Удаляем файлы старше 1 часа
+                    os.remove(filepath)
+                    logger.debug(f"Удален старый файл: {os.path.basename(filepath)}")
+            except:
+                pass
     except Exception as e:
-        logger.error(f"❌ FFmpeg не найден: {e}")
-        return False
-    
-    # Проверка cookies (НЕ создаем файлы здесь, только проверяем наличие)
-    cookie_source = None
-    if YOUTUBE_COOKIES_CONTENT:
-        cookie_source = "переменная окружения"
-        # Файл будет создан позже, когда это действительно нужно
-    elif YOUTUBE_COOKIES_PATH and os.path.exists(YOUTUBE_COOKIES_PATH):
-        cookie_source = f"файл: {YOUTUBE_COOKIES_PATH}"
-    
-    if cookie_source:
-        logger.info(f"✅ Будут использоваться cookies из {cookie_source}")
-    else:
-        logger.warning("⚠️ Cookies не предоставлены, возможны ограничения при скачивании")
-    
-    # Проверка прокси
-    if PROXY_ENABLED:
-        if PROXY_URL:
-            logger.info(f"✅ Прокси включен: {PROXY_URL}")
-        else:
-            logger.warning("⚠️ Прокси включен, но URL не указан")
-    
-    logger.info("✅ Проверка окружения завершена успешно")
-    return True
+        logger.error(f"Ошибка при очистке файлов: {e}")
