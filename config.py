@@ -1,18 +1,17 @@
 import os
 import logging
 from enum import Enum
-from typing import Dict, Optional, List
-from pydantic import BaseModel
+from typing import Dict, Optional, Any
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
 load_dotenv()
 
-# Настройка логирования - только в консоль для Railway
+# Настройка логирования - только в консоль
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]  # Только консоль, без файла
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,7 @@ if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не найден в .env файле!")
     raise ValueError("BOT_TOKEN обязателен")
 
-# Cookies для YouTube (очень важно!)
+# Cookies для YouTube
 COOKIES_TEXT = os.getenv("COOKIES_TEXT", "")
 if not COOKIES_TEXT:
     logger.warning("⚠️ COOKIES_TEXT не задан. YouTube будет блокировать запросы!")
@@ -38,44 +37,35 @@ try:
 except Exception as e:
     logger.error(f"Ошибка парсинга ADMIN_IDS: {e}")
 
-if not ADMIN_IDS:
-    logger.warning("⚠️ ADMIN_IDS не задан. Некоторые команды будут недоступны")
-
-# Определяем директорию для загрузок (используем /tmp на Railway)
+# Определяем директорию для загрузок
 if os.path.exists("/tmp"):
     DOWNLOADS_DIR = "/tmp/music_bot_downloads"
 else:
     DOWNLOADS_DIR = "downloads"
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-logger.info(f"Директория загрузок: {DOWNLOADS_DIR}")
 
-# Прокси (необязательно)
-PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
-PROXY_URL = os.getenv("PROXY_URL", "")
+# Простые классы данных (без pydantic)
+class TrackInfo:
+    def __init__(self, title: str, artist: str, duration: int, source: str):
+        self.title = title
+        self.artist = artist
+        self.duration = duration
+        self.source = source
 
-# Ограничения
-MAX_QUERY_LENGTH = 200
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+class RadioStatus:
+    def __init__(self):
+        self.is_on: bool = False
+        self.current_genre: Optional[str] = None
+        self.current_track: Optional[TrackInfo] = None
+        self.last_played_time: float = 0
+        self.cooldown: int = 300
 
-# --- Модели данных ---
-class TrackInfo(BaseModel):
-    title: str
-    artist: str
-    duration: int
-    source: str
+class ChatData:
+    def __init__(self):
+        self.status_message_id: Optional[int] = None
 
-class RadioStatus(BaseModel):
-    is_on: bool = False
-    current_genre: Optional[str] = None
-    current_track: Optional[TrackInfo] = None
-    last_played_time: float = 0
-    cooldown: int = 300  # 5 минут
-
-class ChatData(BaseModel):
-    status_message_id: Optional[int] = None
-
-# --- Источники музыки ---
+# Источники музыки
 class Source(Enum):
     YOUTUBE = "YouTube"
     YOUTUBE_MUSIC = "YouTube Music"
@@ -86,18 +76,15 @@ class Source(Enum):
 
     @staticmethod
     def get_available_sources():
-        """Возвращает только доступные источники."""
         return [Source.DEEZER, Source.YOUTUBE, Source.YOUTUBE_MUSIC]
 
 class BotState:
-    """Состояние бота."""
-    
     def __init__(self):
-        self.source: Source = Source.DEEZER  # Deezer как источник по умолчанию
+        self.source: Source = Source.DEEZER
         self.radio_status = RadioStatus()
         self.active_chats: Dict[int, ChatData] = {}
 
-# --- Сообщения ---
+# Сообщения
 MESSAGES = {
     'welcome': "🎵 Добро пожаловать в музыкального бота!\n\nИспользуйте /play <название> для поиска музыки.",
     'menu': "📋 Главное меню",
@@ -112,20 +99,15 @@ MESSAGES = {
     'radio_off': "📻 Радио выключено.",
     'next_track': "⏭️ Пропускаю текущий трек...",
     'source_switched': "💿 Источник изменен на: {source}",
-    'proxy_enabled': "🌐 Прокси включен.",
-    'proxy_disabled': "🌐 Прокси выключен.",
     'admin_only': "⛔ Эта команда только для администраторов.",
     'error': "⚠️ Произошла ошибка. Попробуйте позже.",
-    'youtube_blocked': "⚠️ YouTube заблокировал запрос. Проверьте COOKIES_TEXT в настройках.",
-    'downloading': "📥 Скачиваю трек...",
-    'processing': "⚙️ Обрабатываю аудио..."
+    'youtube_blocked': "⚠️ YouTube заблокировал запрос. Используйте /source для переключения на Deezer."
 }
 
 def check_environment() -> bool:
     """Проверяет наличие необходимых зависимостей."""
     try:
         import subprocess
-        import sys
         
         # Проверка FFmpeg
         try:
@@ -138,7 +120,7 @@ def check_environment() -> bool:
             if result.returncode == 0:
                 logger.info("✅ FFmpeg доступен")
             else:
-                logger.error("❌ FFmpeg не найден или не работает!")
+                logger.error("❌ FFmpeg не найден!")
                 return False
         except FileNotFoundError:
             logger.error("❌ FFmpeg не установлен!")
@@ -155,21 +137,11 @@ def check_environment() -> bool:
             logger.error("❌ yt-dlp не установлен!")
             return False
         
-        # Проверка cookies
-        if not COOKIES_TEXT:
-            logger.warning("⚠️ COOKIES_TEXT не задан. YouTube может блокировать запросы!")
-        else:
-            # Простая проверка
-            if 'youtube.com' in COOKIES_TEXT:
-                logger.info("✅ Cookies содержат youtube.com")
-            else:
-                logger.warning("⚠️ Cookies могут быть неполными")
-        
         logger.info(f"✅ Директория загрузок: {DOWNLOADS_DIR}")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки окружения: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка проверки окружения: {e}")
         return False
 
 def cleanup_temp_files():
@@ -180,11 +152,10 @@ def cleanup_temp_files():
         
         current_time = time.time()
         
-        # Очищаем старые файлы в директории загрузок
         for filepath in glob.glob(os.path.join(DOWNLOADS_DIR, "*.*")):
             try:
                 file_age = current_time - os.path.getmtime(filepath)
-                if file_age > 3600:  # Удаляем файлы старше 1 часа
+                if file_age > 3600:
                     os.remove(filepath)
                     logger.debug(f"Удален старый файл: {os.path.basename(filepath)}")
             except Exception as e:
