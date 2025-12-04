@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxtst6 \
     lsb-release \
     xdg-utils \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Добавляем репозиторий Google Chrome
@@ -48,12 +49,15 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
 RUN apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && \
     rm -rf /var/lib/apt/lists/*
 
-# 4. Устанавливаем Chromedriver, соответствующий версии установленного Chrome
-RUN CHROME_VERSION=$(google-chrome --product-version | grep -o "^[^.]*") && \
-    CHROMEDRIVER_VERSION=$(wget -qO- "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}") && \
-    wget -q --continue -P /tmp "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" && \
-    unzip /tmp/chromedriver_linux64.zip -d /usr/local/bin && \
-    rm /tmp/chromedriver_linux64.zip
+# 4. Устанавливаем Chromedriver, используя новый официальный метод
+RUN \
+    CHROME_VERSION=$(google-chrome --product-version) && \
+    LATEST_GOOD_VERSION=$(wget -qO- https://googlechromelabs.github.io/chrome-for-testing/latest-patch-versions-per-build.json | jq -r ".builds.\"${CHROME_VERSION%%.*}\".version") && \
+    wget -q --continue -P /tmp "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/$LATEST_GOOD_VERSION/linux64/chromedriver-linux64.zip" && \
+    unzip -q /tmp/chromedriver-linux64.zip -d /usr/local/bin && \
+    mv /usr/local/bin/chromedriver-linux64/chromedriver /usr/local/bin/ && \
+    rm -rf /tmp/chromedriver-linux64.zip /usr/local/bin/chromedriver-linux64
+
 
 # 5. Устанавливаем рабочую директорию
 WORKDIR /app
