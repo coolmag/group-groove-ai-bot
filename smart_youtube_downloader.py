@@ -15,41 +15,54 @@ logger = logging.getLogger(__name__)
 class SmartYouTubeDownloader:
     """Умный YouTube загрузчик с кэшированием метаданных."""
     
-    CACHE_DB = "metadata_cache.db"
+    # Используем /tmp для Railway
+    CACHE_DB = os.path.join("/tmp", "metadata_cache.db") if os.path.exists("/tmp") else "metadata_cache.db"
     CACHE_DURATION_DAYS = 7
     MAX_CACHE_SIZE = 300
     
     def __init__(self):
         self.setup_database()
         self.youtube_downloader = AudioDownloadManager()
-        logger.info("[SmartYouTube] Умный загрузчик инициализирован")
+        logger.info(f"[SmartYouTube] Умный загрузчик инициализирован. DB: {self.CACHE_DB}")
     
     def setup_database(self):
         """Создаёт базу данных для кэша метаданных."""
-        conn = sqlite3.connect(self.CACHE_DB)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS metadata_cache (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query_hash TEXT,
-                video_id TEXT,
-                source TEXT,
-                title TEXT,
-                artist TEXT,
-                duration INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                use_count INTEGER DEFAULT 1,
-                success_rate REAL DEFAULT 1.0
-            )
-        ''')
-        
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_query_hash ON metadata_cache(query_hash, source)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_last_used ON metadata_cache(last_used)')
-        
-        conn.commit()
-        conn.close()
+        try:
+            # Создаем директорию если нужно
+            db_dir = os.path.dirname(self.CACHE_DB)
+            if db_dir and not os.path.exists(db_dir):
+                os.makedirs(db_dir, exist_ok=True)
+            
+            conn = sqlite3.connect(self.CACHE_DB)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS metadata_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_hash TEXT,
+                    video_id TEXT,
+                    source TEXT,
+                    title TEXT,
+                    artist TEXT,
+                    duration INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    use_count INTEGER DEFAULT 1,
+                    success_rate REAL DEFAULT 1.0
+                )
+            ''')
+            
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_query_hash ON metadata_cache(query_hash, source)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_last_used ON metadata_cache(last_used)')
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"[SmartYouTube] База данных создана: {self.CACHE_DB}")
+            
+        except Exception as e:
+            logger.error(f"[SmartYouTube] Ошибка создания БД: {e}")
+            # Если не удалось создать БД, работаем без кэша
+            self.CACHE_DB = None
     
     def _get_query_hash(self, query: str) -> str:
         """Создаёт хеш запроса."""
@@ -57,53 +70,63 @@ class SmartYouTubeDownloader:
     
     def get_cached_metadata(self, query: str, source: Source) -> Optional[Dict]:
         """Ищет метаданные в кэше."""
+        if not self.CACHE_DB or not os.path.exists(self.CACHE_DB):
+            return None
+        
         query_hash = self._get_query_hash(query)
         
-        conn = sqlite3.connect(self.CACHE_DB)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT video_id, title, artist, duration, success_rate
-            FROM metadata_cache 
-            WHERE query_hash = ? AND source = ? AND 
-                  datetime(created_at) >= datetime('now', ?)
-            ORDER BY success_rate DESC, use_count DESC
-            LIMIT 1
-        ''', (query_hash, source.value, f'-{self.CACHE_DURATION_DAYS} days'))
-        
-        result = cursor.fetchone()
-        
-        if result:
-            video_id, title, artist, duration, success_rate = result
-            # Обновляем статистику использования
-            cursor.execute('''
-                UPDATE metadata_cache 
-                SET last_used = CURRENT_TIMESTAMP, use_count = use_count + 1 
-                WHERE query_hash = ? AND video_id = ?
-            ''', (query_hash, video_id))
-            conn.commit()
+        try:
+            conn = sqlite3.connect(self.CACHE_DB)
+            cursor = conn.cursor()
             
-            logger.info(f"[SmartYouTube] Кэш найден для: {query} ({source.value})")
-            return {
-                'video_id': video_id,
-                'title': title,
-                'artist': artist,
-                'duration': duration,
-                'success_rate': success_rate
-            }
+            cursor.execute('''
+                SELECT video_id, title, artist, duration, success_rate
+                FROM metadata_cache 
+                WHERE query_hash = ? AND source = ? AND 
+                      datetime(created_at) >= datetime('now', ?)
+                ORDER BY success_rate DESC, use_count DESC
+                LIMIT 1
+            ''', (query_hash, source.value, f'-{self.CACHE_DURATION_DAYS} days'))
+            
+            result = cursor.fetchone()
+            
+            if result:
+                video_id, title, artist, duration, success_rate = result
+                # Обновляем статистику использования
+                cursor.execute('''
+                    UPDATE metadata_cache 
+                    SET last_used = CURRENT_TIMESTAMP, use_count = use_count + 1 
+                    WHERE query_hash = ? AND video_id = ?
+                ''', (query_hash, video_id))
+                conn.commit()
+                
+                logger.info(f"[SmartYouTube] Кэш найден для: {query} ({source.value})")
+                return {
+                    'video_id': video_id,
+                    'title': title,
+                    'artist': artist,
+                    'duration': duration,
+                    'success_rate': success_rate
+                }
+            
+            conn.close()
+        except Exception as e:
+            logger.error(f"[SmartYouTube] Ошибка чтения кэша: {e}")
         
-        conn.close()
         return None
     
     def add_to_cache(self, query: str, video_id: str, source: Source, 
                     title: str, artist: str, duration: int, success: bool = True):
         """Добавляет метаданные в кэш."""
+        if not self.CACHE_DB:
+            return
+        
         query_hash = self._get_query_hash(query)
         
-        conn = sqlite3.connect(self.CACHE_DB)
-        cursor = conn.cursor()
-        
         try:
+            conn = sqlite3.connect(self.CACHE_DB)
+            cursor = conn.cursor()
+            
             # Проверяем существующую запись
             cursor.execute('''
                 SELECT id, success_rate, use_count FROM metadata_cache 
@@ -148,11 +171,10 @@ class SmartYouTubeDownloader:
                 ''', (count - self.MAX_CACHE_SIZE,))
             
             conn.commit()
+            conn.close()
             
         except Exception as e:
-            logger.error(f"[SmartYouTube] Ошибка кэша: {e}")
-        finally:
-            conn.close()
+            logger.error(f"[SmartYouTube] Ошибка записи в кэш: {e}")
     
     async def download_track(self, query: str, source: Source) -> Optional[Tuple[str, TrackInfo]]:
         """Скачивает трек с использованием кэша."""
@@ -185,12 +207,13 @@ class SmartYouTubeDownloader:
             
             if result:
                 audio_path, track_info = result
-                video_id = self.youtube_downloader.last_video_id or "unknown"
+                video_id = getattr(self.youtube_downloader, 'last_video_id', None)
                 
-                # Добавляем в кэш
-                self.add_to_cache(query, video_id, source,
-                                 track_info.title, track_info.artist,
-                                 track_info.duration, success=True)
+                if video_id and video_id != "unknown":
+                    # Добавляем в кэш
+                    self.add_to_cache(query, video_id, source,
+                                     track_info.title, track_info.artist,
+                                     track_info.duration, success=True)
             
             return result
     
@@ -212,13 +235,15 @@ class SmartYouTubeDownloader:
             
             if result:
                 audio_path, track_info = result
-                video_id = self.youtube_downloader.last_video_id or "unknown"
-                self.add_to_cache(f"long_{query}", video_id, source,
-                                 track_info.title, track_info.artist,
-                                 track_info.duration, success=True)
+                video_id = getattr(self.youtube_downloader, 'last_video_id', None)
+                if video_id and video_id != "unknown":
+                    self.add_to_cache(f"long_{query}", video_id, source,
+                                     track_info.title, track_info.artist,
+                                     track_info.duration, success=True)
             
             return result
     
     async def close(self):
         """Закрывает соединения."""
         await self.youtube_downloader.close()
+        logger.info("[SmartYouTube] Загрузчик остановлен")
