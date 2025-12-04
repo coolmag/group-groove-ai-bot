@@ -13,19 +13,20 @@ from config import (
     YOUTUBE_COOKIES_PATH, SOUNDCLOUD_COOKIES_PATH,
     DOWNLOAD_TIMEOUT, MAX_AUDIO_SIZE_MB
 )
-self.setup_directories()
+from locks import download_lock
 
 logger = logging.getLogger(__name__)
 
 class AudioDownloadManager:
     def __init__(self):
-        self.setup_directories()
+        self.setup_directories()  # ← Это должно быть ВНУТРИ __init__!
         self._cache = {}  # Простой кэш для повторных запросов
         
     def setup_directories(self):
         """Создает необходимые директории"""
         os.makedirs(DOWNLOADS_DIR, exist_ok=True)
         logger.info(f"Директория загрузок: {DOWNLOADS_DIR}")
+    
     
     def get_random_genre(self) -> str:
         """Возвращает случайный жанр"""
