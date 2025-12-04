@@ -4,7 +4,7 @@ import asyncio
 import json
 import hashlib
 from typing import Optional, Tuple, Dict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from config import DOWNLOADS_DIR, TrackInfo, Source
 from downloader import AudioDownloadManager
