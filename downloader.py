@@ -13,7 +13,7 @@ from config import (
     YOUTUBE_COOKIES_PATH, SOUNDCLOUD_COOKIES_PATH,
     DOWNLOAD_TIMEOUT, MAX_AUDIO_SIZE_MB
 )
-from locks import download_lock
+self.setup_directories()
 
 logger = logging.getLogger(__name__)
 
