@@ -19,8 +19,22 @@ logger = logging.getLogger(__name__)
 
 class AudioDownloadManager:
     def __init__(self):
-        self.setup_directories()  # ← Это должно быть ВНУТРИ __init__!
-        self._cache = {}  # Простой кэш для повторных запросов
+        # ... существующий код ...
+        self.last_video_id = None  # Добавьте эту строку
+    
+    async def download_track(self, query: str, source: str) -> Optional[Tuple[str, TrackInfo]]:
+        # ... существующий код в методе ...
+        
+        try:
+            # После успешного скачивания сохраняем video_id
+            if 'info_dict' in ydl_result:
+                self.last_video_id = ydl_result['info_dict'].get('id')
+            elif ydl_result.get('url'):
+                # Пробуем извлечь из URL
+                import re
+                match = re.search(r'v=([a-zA-Z0-9_-]+)', ydl_result['url'])
+                if match:
+                    self.last_video_id = match.group(1)
         
     def setup_directories(self):
         """Создает необходимые директории"""
