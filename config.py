@@ -11,20 +11,38 @@ load_dotenv()
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Токен бота
+# Токен бота (обязательно)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не найден в .env файле!")
     raise ValueError("BOT_TOKEN обязателен")
 
-# Cookies для YouTube (обязательно!)
+# Cookies для YouTube (очень важно!)
 COOKIES_TEXT = os.getenv("COOKIES_TEXT", "")
 if not COOKIES_TEXT:
     logger.warning("⚠️ COOKIES_TEXT не задан. YouTube будет блокировать запросы!")
+else:
+    logger.info("✅ COOKIES_TEXT загружен (длина: %d символов)", len(COOKIES_TEXT))
+
+# Админы
+ADMIN_IDS = []
+try:
+    admin_str = os.getenv("ADMIN_IDS", "")
+    if admin_str:
+        ADMIN_IDS = [int(id.strip()) for id in admin_str.split(",") if id.strip().isdigit()]
+except Exception as e:
+    logger.error(f"Ошибка парсинга ADMIN_IDS: {e}")
+
+if not ADMIN_IDS:
+    logger.warning("⚠️ ADMIN_IDS не задан. Некоторые команды будут недоступны")
 
 # Определяем директорию для загрузок
 if os.path.exists("/tmp"):
@@ -34,16 +52,13 @@ else:
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-# Прокси
+# Прокси (необязательно)
 PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
 PROXY_URL = os.getenv("PROXY_URL", "")
 
-# Админы
-ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()]
-
 # Ограничения
 MAX_QUERY_LENGTH = 200
-MAX_FILE_SIZE = 50 * 1024 * 1024
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
 # --- Модели данных ---
 class TrackInfo(BaseModel):
@@ -57,7 +72,7 @@ class RadioStatus(BaseModel):
     current_genre: Optional[str] = None
     current_track: Optional[TrackInfo] = None
     last_played_time: float = 0
-    cooldown: int = 300
+    cooldown: int = 300  # 5 минут
 
 class ChatData(BaseModel):
     status_message_id: Optional[int] = None
@@ -73,10 +88,12 @@ class Source(Enum):
 
     @staticmethod
     def get_available_sources():
-        """Возвращает только доступные источники (без заблокированных)."""
-        return [s for s in Source]
+        """Возвращает только доступные источники."""
+        return [Source.DEEZER, Source.YOUTUBE, Source.YOUTUBE_MUSIC]
 
 class BotState:
+    """Состояние бота."""
+    
     def __init__(self):
         self.source: Source = Source.DEEZER  # Deezer как источник по умолчанию
         self.radio_status = RadioStatus()
@@ -101,18 +118,35 @@ MESSAGES = {
     'proxy_disabled': "🌐 Прокси выключен.",
     'admin_only': "⛔ Эта команда только для администраторов.",
     'error': "⚠️ Произошла ошибка. Попробуйте позже.",
-    'youtube_blocked': "⚠️ YouTube заблокировал запрос. Добавьте COOKIES_TEXT в настройках или используйте другой источник."
+    'youtube_blocked': "⚠️ YouTube заблокировал запрос. Проверьте COOKIES_TEXT в настройках.",
+    'downloading': "📥 Скачиваю трек...",
+    'processing': "⚙️ Обрабатываю аудио..."
 }
 
 def check_environment() -> bool:
     """Проверяет наличие необходимых зависимостей."""
     try:
         import subprocess
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-        if result.returncode == 0:
-            logger.info("✅ FFmpeg доступен")
-        else:
-            logger.error("❌ FFmpeg не найден!")
+        import sys
+        
+        # Проверка FFmpeg
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-version'], 
+                capture_output=True, 
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                logger.info("✅ FFmpeg доступен: %s", result.stdout.split('\n')[0])
+            else:
+                logger.error("❌ FFmpeg не найден или не работает!")
+                return False
+        except FileNotFoundError:
+            logger.error("❌ FFmpeg не установлен!")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error("❌ FFmpeg завис при проверке!")
             return False
         
         # Проверка yt-dlp
@@ -123,10 +157,20 @@ def check_environment() -> bool:
             logger.error("❌ yt-dlp не установлен!")
             return False
         
+        # Проверка cookies
+        if not COOKIES_TEXT:
+            logger.warning("⚠️ COOKIES_TEXT не задан. YouTube может блокировать запросы!")
+        else:
+            # Проверяем, что cookies содержат необходимые поля
+            if 'youtube.com' in COOKIES_TEXT and 'LOGIN_INFO' in COOKIES_TEXT:
+                logger.info("✅ Cookies выглядят валидными")
+            else:
+                logger.warning("⚠️ Cookies могут быть неполными")
+        
         return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки окружения: {e}")
+        logger.error(f"❌ Ошибка проверки окружения: {e}", exc_info=True)
         return False
 
 def cleanup_temp_files():
@@ -134,15 +178,30 @@ def cleanup_temp_files():
     try:
         import glob
         import time
+        import shutil
+        
         current_time = time.time()
         
-        for filepath in glob.glob(os.path.join(DOWNLOADS_DIR, "*.mp3")):
+        # Очищаем старые файлы в директории загрузок
+        for filepath in glob.glob(os.path.join(DOWNLOADS_DIR, "*.*")):
             try:
                 file_age = current_time - os.path.getmtime(filepath)
-                if file_age > 3600:
+                if file_age > 3600:  # Удаляем файлы старше 1 часа
                     os.remove(filepath)
                     logger.debug(f"Удален старый файл: {os.path.basename(filepath)}")
+            except Exception as e:
+                logger.debug(f"Не удалось удалить файл {filepath}: {e}")
+        
+        # Очищаем старые логи (старше 7 дней)
+        log_files = glob.glob("*.log")
+        for log_file in log_files:
+            try:
+                if os.path.exists(log_file):
+                    file_age = current_time - os.path.getmtime(log_file)
+                    if file_age > 7 * 24 * 3600:  # 7 дней
+                        os.remove(log_file)
             except:
                 pass
+                
     except Exception as e:
         logger.error(f"Ошибка при очистке файлов: {e}")
