@@ -24,18 +24,18 @@ def get_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def format_status_message(state: BotState) -> str:
-    """Форматирует сообщение со статусом."""
+    """Форматирует сообщение со статусом БЕЗ HTML."""
     status_text = f"""
-🎵 <b>Music Bot Status</b>
+🎵 Music Bot Status
 
-📊 <b>Статистика:</b>
+📊 Статистика:
 • Источник поиска: {state.source.value}
 • Статус радио: {'✅ Включено' if state.radio_status.is_on else '❌ Выключено'}
 • Текущий жанр: {state.radio_status.current_genre or '—'}
 • Последний трек: {state.radio_status.current_track.title if state.radio_status.current_track else '—'}
 • Активных чатов: {len(state.active_chats)}
 
-📋 <b>Доступные команды:</b>
+📋 Доступные команды:
 /play [название] - заказать трек
 /audiobook [название] - найти аудиокнигу
 /menu - показать это меню

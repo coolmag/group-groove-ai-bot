@@ -13,31 +13,31 @@ from locks import download_lock
 logger = logging.getLogger(__name__)
 
 class SimpleYouTubeDownloader:
-    """Простой YouTube загрузчик с файловым кэшем."""
+    """Простой YouTube загрузчик с улучшенным кэшированием."""
     
     def __init__(self):
         self.youtube_downloader = AudioDownloadManager()
         self.cache_file = os.path.join("/tmp", "yt_cache.json") if os.path.exists("/tmp") else "yt_cache.json"
         self.cache = self._load_cache()
-        logger.info(f"[SimpleYouTube] Загрузчик инициализирован. Кэш: {self.cache_file}")
+        logger.info(f"[SimpleYouTube] Инициализирован. Кэш: {self.cache_file}")
     
     def _load_cache(self) -> Dict:
-        """Загружает кэш из файла."""
+        """Загружает и очищает кэш."""
         try:
             if os.path.exists(self.cache_file):
                 with open(self.cache_file, 'r', encoding='utf-8') as f:
                     cache_data = json.load(f)
                     
-                    # Очищаем устаревшие записи (старше 7 дней)
+                    # Очищаем старые записи (старше 3 дней)
                     cleaned_cache = {}
                     now = datetime.now().timestamp()
-                    week_ago = now - (7 * 24 * 3600)
+                    three_days_ago = now - (3 * 24 * 3600)
                     
                     for key, data in cache_data.items():
-                        if data.get('timestamp', 0) > week_ago:
+                        if data.get('timestamp', 0) > three_days_ago:
                             cleaned_cache[key] = data
                     
-                    # Если очистили старые записи, сохраняем обновленный кэш
+                    # Сохраняем если очистили
                     if len(cleaned_cache) != len(cache_data):
                         self._save_cache(cleaned_cache)
                     
@@ -48,7 +48,7 @@ class SimpleYouTubeDownloader:
         return {}
     
     def _save_cache(self, cache_data: Dict = None):
-        """Сохраняет кэш в файл."""
+        """Сохраняет кэш."""
         try:
             data_to_save = cache_data or self.cache
             with open(self.cache_file, 'w', encoding='utf-8') as f:
@@ -67,20 +67,31 @@ class SimpleYouTubeDownloader:
         cached = self.cache.get(cache_key)
         
         if cached:
-            # Проверяем срок годности (максимум 30 дней)
+            # Проверяем срок годности (максимум 7 дней)
             timestamp = cached.get('timestamp', 0)
-            max_age = datetime.now().timestamp() - (30 * 24 * 3600)
+            max_age = datetime.now().timestamp() - (7 * 24 * 3600)
             
             if timestamp > max_age:
-                logger.info(f"[SimpleYouTube] Найден кэш для: {query}")
-                return cached
+                success_rate = cached.get('success_rate', 0)
+                if success_rate > 0.5:  # Только если успешность > 50%
+                    logger.info(f"[SimpleYouTube] Кэш найден для: {query}")
+                    return cached
         
         return None
     
     def add_to_cache(self, query: str, source: Source, video_id: str, 
                     title: str, artist: str, duration: int, success: bool = True):
-        """Добавляет данные в кэш."""
+        """Добавляет или обновляет кэш."""
         cache_key = self._get_cache_key(query, source)
+        
+        if cache_key in self.cache:
+            # Обновляем существующую запись
+            old_data = self.cache[cache_key]
+            old_success = old_data.get('success', False)
+            # Простая логика обновления успешности
+            new_success_rate = 0.7 if success else 0.3
+        else:
+            new_success_rate = 1.0 if success else 0.0
         
         self.cache[cache_key] = {
             'video_id': video_id,
@@ -88,97 +99,96 @@ class SimpleYouTubeDownloader:
             'artist': artist,
             'duration': duration,
             'success': success,
+            'success_rate': new_success_rate,
             'timestamp': datetime.now().timestamp(),
             'query': query,
             'source': source.value
         }
         
-        # Ограничиваем размер кэша (максимум 100 записей)
-        if len(self.cache) > 100:
-            # Удаляем самые старые записи
-            oldest_keys = sorted(
+        # Ограничиваем размер кэша (максимум 50 записей)
+        if len(self.cache) > 50:
+            # Удаляем самые старые записи с низкой успешностью
+            sorted_keys = sorted(
                 self.cache.keys(),
-                key=lambda k: self.cache[k].get('timestamp', 0)
-            )[:len(self.cache) - 100]
+                key=lambda k: (self.cache[k].get('success_rate', 0), 
+                              self.cache[k].get('timestamp', 0))
+            )
             
-            for key in oldest_keys:
+            for key in sorted_keys[:len(self.cache) - 50]:
                 del self.cache[key]
         
-        # Сохраняем кэш
         self._save_cache()
     
     async def download_track(self, query: str, source: Source) -> Optional[Tuple[str, TrackInfo]]:
         """Скачивает трек с использованием кэша."""
         async with download_lock:
-            # 1. Проверяем кэш
+            # Проверяем кэш
             cached = self.get_cached_data(query, source)
             
-            if cached and cached.get('success', False):
+            if cached and cached.get('success_rate', 0) > 0.6:
                 try:
-                    logger.info(f"[SimpleYouTube] Использую кэш для: {query}")
+                    logger.info(f"[SimpleYouTube] Использую кэш: {query}")
                     result = await self.youtube_downloader.download_track(
                         cached['video_id'], 
                         source
                     )
                     
                     if result:
+                        # Увеличиваем рейтинг успешности
+                        self.add_to_cache(query, source, cached['video_id'],
+                                         cached['title'], cached['artist'],
+                                         cached['duration'], success=True)
                         return result
                     else:
-                        # Помечаем как неудачный
+                        # Уменьшаем рейтинг
                         self.add_to_cache(query, source, cached['video_id'],
                                          cached['title'], cached['artist'],
                                          cached['duration'], success=False)
                 except Exception as e:
                     logger.warning(f"[SimpleYouTube] Кэш не сработал: {e}")
             
-            # 2. Обычный поиск
+            # Новый поиск
             logger.info(f"[SimpleYouTube] Новый поиск: '{query}'")
-            result = await self.youtube_downloader.download_track(query, source)
-            
-            if result:
-                audio_path, track_info = result
-                video_id = getattr(self.youtube_downloader, 'last_video_id', None)
+            try:
+                result = await self.youtube_downloader.download_track(query, source)
                 
-                if video_id:
-                    # Добавляем в кэш
-                    self.add_to_cache(query, source, video_id,
-                                     track_info.title, track_info.artist,
-                                     track_info.duration, success=True)
-            
-            return result
+                if result:
+                    audio_path, track_info = result
+                    video_id = getattr(self.youtube_downloader, 'last_video_id', None)
+                    
+                    if video_id and video_id != "unknown":
+                        self.add_to_cache(query, source, video_id,
+                                         track_info.title, track_info.artist,
+                                         track_info.duration, success=True)
+                
+                return result
+            except Exception as e:
+                if "YouTube заблокировал запрос" in str(e):
+                    raise  # Пробрасываем выше для обработки
+                return None
     
-    async def download_longest_track(self, query: str, source: Source) -> Optional[Tuple[str, TrackInfo]]:
-        """Скачивает самый длинный трек."""
+    async def download_audiobook(self, query: str, source: Source) -> Optional[Tuple[str, TrackInfo]]:
+        """Скачивает аудиокнигу."""
         async with download_lock:
-            cached = self.get_cached_data(f"long_{query}", source)
+            logger.info(f"[SimpleYouTube] Поиск аудиокниги: '{query}'")
             
-            if cached and cached.get('success', False):
-                try:
-                    result = await self.youtube_downloader.download_longest_track(
-                        cached['video_id'], 
-                        source
-                    )
-                    if result:
-                        return result
-                except:
-                    pass
+            # Пробуем специализированный поиск
+            result = await self.youtube_downloader.download_audiobook(query, source)
             
-            result = await self.youtube_downloader.download_longest_track(query, source)
-            
-            if result:
-                audio_path, track_info = result
-                video_id = getattr(self.youtube_downloader, 'last_video_id', None)
+            if not result:
+                # Если не нашли, пробуем обычный поиск самого длинного
+                logger.info(f"Специализированный поиск не дал результатов, пробую общий")
+                if source in [Source.YOUTUBE, Source.YOUTUBE_MUSIC]:
+                    search_query = f"ytsearch10:{query} аудиокнига"
+                else:
+                    search_query = f"{query} аудиокнига"
                 
-                if video_id:
-                    self.add_to_cache(f"long_{query}", source, video_id,
-                                     track_info.title, track_info.artist,
-                                     track_info.duration, success=True)
+                result = await self.youtube_downloader.download_track(search_query, source)
             
             return result
     
     async def close(self):
         """Закрывает соединения."""
         await self.youtube_downloader.close()
-        # Сохраняем кэш при закрытии
         self._save_cache()
         logger.info("[SimpleYouTube] Загрузчик остановлен")

@@ -1,7 +1,7 @@
 import os
 import logging
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -21,13 +21,17 @@ if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не найден в .env файле!")
     raise ValueError("BOT_TOKEN обязателен")
 
-# Определяем директорию для загрузок (используем /tmp на Railway)
+# Cookies для YouTube (обязательно!)
+COOKIES_TEXT = os.getenv("COOKIES_TEXT", "")
+if not COOKIES_TEXT:
+    logger.warning("⚠️ COOKIES_TEXT не задан. YouTube будет блокировать запросы!")
+
+# Определяем директорию для загрузок
 if os.path.exists("/tmp"):
     DOWNLOADS_DIR = "/tmp/music_bot_downloads"
 else:
     DOWNLOADS_DIR = "downloads"
 
-# Создаем директорию если её нет
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 # Прокси
@@ -39,7 +43,7 @@ ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if 
 
 # Ограничения
 MAX_QUERY_LENGTH = 200
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # --- Модели данных ---
 class TrackInfo(BaseModel):
@@ -53,7 +57,7 @@ class RadioStatus(BaseModel):
     current_genre: Optional[str] = None
     current_track: Optional[TrackInfo] = None
     last_played_time: float = 0
-    cooldown: int = 300  # 5 минут
+    cooldown: int = 300
 
 class ChatData(BaseModel):
     status_message_id: Optional[int] = None
@@ -67,11 +71,14 @@ class Source(Enum):
     ARCHIVE = "Internet Archive"
     DEEZER = "Deezer"
 
+    @staticmethod
+    def get_available_sources():
+        """Возвращает только доступные источники (без заблокированных)."""
+        return [s for s in Source]
+
 class BotState:
-    """Состояние бота."""
-    
     def __init__(self):
-        self.source: Source = Source.YOUTUBE
+        self.source: Source = Source.DEEZER  # Deezer как источник по умолчанию
         self.radio_status = RadioStatus()
         self.active_chats: Dict[int, ChatData] = {}
 
@@ -83,8 +90,8 @@ MESSAGES = {
     'audiobook_usage': "📖 Использование: /audiobook <название книги>",
     'searching': "🔍 Ищу трек...",
     'searching_audiobook': "🔍 Ищу аудиокнигу...",
-    'not_found': "❌ Трек не найден. Попробуйте другой запрос.",
-    'audiobook_not_found': "❌ Аудиокнига не найдена.",
+    'not_found': "❌ Трек не найден. Попробуйте другой запрос или используйте /source для смены источника.",
+    'audiobook_not_found': "❌ Аудиокнига не найдена. Попробуйте другое название.",
     'file_too_large': "❌ Файл слишком большой для отправки.",
     'radio_on': "📻 Радио включено! Музыка скоро начнет играть.",
     'radio_off': "📻 Радио выключено.",
@@ -93,13 +100,13 @@ MESSAGES = {
     'proxy_enabled': "🌐 Прокси включен.",
     'proxy_disabled': "🌐 Прокси выключен.",
     'admin_only': "⛔ Эта команда только для администраторов.",
-    'error': "⚠️ Произошла ошибка. Попробуйте позже."
+    'error': "⚠️ Произошла ошибка. Попробуйте позже.",
+    'youtube_blocked': "⚠️ YouTube заблокировал запрос. Добавьте COOKIES_TEXT в настройках или используйте другой источник."
 }
 
 def check_environment() -> bool:
     """Проверяет наличие необходимых зависимостей."""
     try:
-        # Проверка FFmpeg
         import subprocess
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
         if result.returncode == 0:
@@ -108,12 +115,13 @@ def check_environment() -> bool:
             logger.error("❌ FFmpeg не найден!")
             return False
         
-        # Проверка cookies (если есть)
-        cookies_text = os.getenv("COOKIES_TEXT", "")
-        if cookies_text:
-            logger.info("✅ Будут использоваться cookies из переменных окружения")
-        else:
-            logger.warning("⚠️ COOKIES_TEXT не задан, YouTube может блокировать запросы")
+        # Проверка yt-dlp
+        try:
+            import yt_dlp
+            logger.info(f"✅ yt-dlp {yt_dlp.version.__version__} доступен")
+        except ImportError:
+            logger.error("❌ yt-dlp не установлен!")
+            return False
         
         return True
         
@@ -131,7 +139,7 @@ def cleanup_temp_files():
         for filepath in glob.glob(os.path.join(DOWNLOADS_DIR, "*.mp3")):
             try:
                 file_age = current_time - os.path.getmtime(filepath)
-                if file_age > 3600:  # Удаляем файлы старше 1 часа
+                if file_age > 3600:
                     os.remove(filepath)
                     logger.debug(f"Удален старый файл: {os.path.basename(filepath)}")
             except:

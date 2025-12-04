@@ -13,7 +13,7 @@ from locks import download_lock
 logger = logging.getLogger(__name__)
 
 class DeezerSimpleDownloadManager:
-    """Менеджер загрузки через Deezer Simple API (только превью 30 сек)."""
+    """Улучшенный менеджер Deezer с таймаутами."""
     
     API_BASE = "https://api.deezer.com"
     
@@ -22,46 +22,49 @@ class DeezerSimpleDownloadManager:
         logger.info("[DeezerSimple] Загрузчик инициализирован")
     
     async def initialize(self):
-        """Инициализация сессии."""
+        """Инициализация сессии с таймаутами."""
         if not self.session:
-            timeout = aiohttp.ClientTimeout(total=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            timeout = aiohttp.ClientTimeout(
+                total=30,
+                connect=10,
+                sock_read=20
+            )
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
             logger.info("[DeezerSimple] HTTP сессия создана")
     
     def get_random_genre(self) -> str:
-        """Возвращает случайный жанр для радио."""
         genres = ["rock", "pop", "hip hop", "electronic", "jazz", "lofi", "chill", "classical"]
         return random.choice(genres)
     
     async def _search_tracks(self, query: str, limit: int = 5) -> Optional[List[dict]]:
-        """Ищет треки в Deezer."""
+        """Ищет треки в Deezer с таймаутом."""
         await self.initialize()
         
         try:
             async with self.session.get(
                 f"{self.API_BASE}/search",
-                params={"q": query, "limit": limit}
+                params={"q": query, "limit": limit},
+                timeout=15
             ) as response:
                 if response.status == 200:
                     data = await response.json()
                     if data.get('data'):
-                        # Фильтруем только треки с превью
-                        tracks_with_preview = []
-                        for track in data['data']:
-                            if track.get('preview'):
-                                tracks_with_preview.append(track)
-                        
+                        tracks_with_preview = [t for t in data['data'] if t.get('preview')]
                         if tracks_with_preview:
                             return tracks_with_preview
                 
-                logger.warning(f"[DeezerSimple] Не найдено треков с превью для: {query}")
                 return None
                 
         except asyncio.TimeoutError:
-            logger.error(f"[DeezerSimple] Таймаут при поиске: {query}")
+            logger.error(f"[DeezerSimple] Таймаут поиска: {query}")
             return None
         except Exception as e:
-            logger.error(f"[DeezerSimple] Ошибка поиска {query}: {e}")
+            logger.error(f"[DeezerSimple] Ошибка поиска: {e}")
             return None
     
     async def download_track(self, query: str) -> Optional[Tuple[str, TrackInfo]]:
@@ -73,7 +76,6 @@ class DeezerSimpleDownloadManager:
             if not tracks:
                 return None
             
-            # Берем первый трек с превью
             track = tracks[0]
             track_id = track['id']
             title = track['title'][:100]
@@ -82,7 +84,6 @@ class DeezerSimpleDownloadManager:
             
             logger.info(f"[DeezerSimple] Найден: {artist} - {title}")
             
-            # Скачиваем превью
             file_hash = hashlib.md5(f"dz_{track_id}".encode()).hexdigest()[:8]
             filename = f"dz_{file_hash}.mp3"
             filepath = os.path.join(DOWNLOADS_DIR, filename)
@@ -90,21 +91,19 @@ class DeezerSimpleDownloadManager:
             try:
                 await self.initialize()
                 
-                async with self.session.get(preview_url, timeout=30) as response:
+                async with self.session.get(preview_url, timeout=20) as response:
                     if response.status == 200:
                         content = await response.read()
                         
-                        # Проверяем размер (должен быть хотя бы 50KB для 30-секундного превью)
                         if len(content) < 50 * 1024:
-                            logger.warning(f"[DeezerSimple] Слишком маленький файл: {len(content)} байт")
+                            logger.warning(f"[DeezerSimple] Слишком маленький файл")
                             return None
                         
                         async with aiofiles.open(filepath, 'wb') as f:
                             await f.write(content)
                         
-                        # Проверяем что файл создан
                         if os.path.exists(filepath):
-                            file_size = os.path.getsize(filepath) / 1024  # KB
+                            file_size = os.path.getsize(filepath) / 1024
                             logger.info(f"[DeezerSimple] Скачано: {file_size:.1f} KB")
                             
                             track_info = TrackInfo(
@@ -116,21 +115,20 @@ class DeezerSimpleDownloadManager:
                             
                             return (filepath, track_info)
                         else:
-                            logger.error(f"[DeezerSimple] Файл не создан: {filepath}")
                             return None
                     else:
-                        logger.error(f"[DeezerSimple] Ошибка HTTP {response.status} при загрузке")
+                        logger.error(f"[DeezerSimple] Ошибка HTTP {response.status}")
                         return None
                         
             except asyncio.TimeoutError:
-                logger.error(f"[DeezerSimple] Таймаут при загрузке превью")
+                logger.error(f"[DeezerSimple] Таймаут загрузки")
                 return None
             except Exception as e:
                 logger.error(f"[DeezerSimple] Ошибка загрузки: {e}")
                 return None
     
     async def download_longest_track(self, query: str) -> Optional[Tuple[str, TrackInfo]]:
-        """Скачивает самый длинный трек (превью)."""
+        """Скачивает самый длинный трек."""
         async with download_lock:
             logger.info(f"[DeezerSimple] Поиск длинного трека: '{query}'")
             
@@ -138,10 +136,7 @@ class DeezerSimpleDownloadManager:
             if not tracks:
                 return None
             
-            # Ищем самый длинный трек
             longest_track = max(tracks, key=lambda x: x.get('duration', 0))
-            
-            # Используем общий метод скачивания
             return await self.download_track(longest_track['title'])
     
     async def close(self):
@@ -150,4 +145,3 @@ class DeezerSimpleDownloadManager:
             await self.session.close()
             self.session = None
             logger.info("[DeezerSimple] Сессия закрыта")
-        logger.info("[DeezerSimple] Загрузчик остановлен")
