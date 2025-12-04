@@ -41,9 +41,10 @@ class AudioDownloadManager:
 
     def get_ydl_opts(self, unique_id: str):
         """Generates yt-dlp options with a unique output template."""
+        from config import TEMP_COOKIE_PATH  # Импортируем здесь, чтобы избежать циклических зависимостей
+
         opts = {
             'format': 'bestaudio/best',
-            # Use a unique name for each download to prevent conflicts
             'outtmpl': os.path.join(DOWNLOADS_DIR, f'{unique_id}.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
@@ -59,9 +60,15 @@ class AudioDownloadManager:
             }]
         }
 
-        if YOUTUBE_COOKIES_PATH and os.path.exists(YOUTUBE_COOKIES_PATH):
+        # НОВАЯ ЛОГИКА: Приоритет отдается cookies из переменной окружения
+        if TEMP_COOKIE_PATH:
+            opts['cookiefile'] = TEMP_COOKIE_PATH
+            logger.info(f"Using temporary cookie file from environment variable: {TEMP_COOKIE_PATH}")
+        elif YOUTUBE_COOKIES_PATH and os.path.exists(YOUTUBE_COOKIES_PATH):
             opts['cookiefile'] = YOUTUBE_COOKIES_PATH
-            logger.info("Using YouTube cookies for authentication.")
+            logger.info(f"Using YouTube cookies from file path: {YOUTUBE_COOKIES_PATH}")
+        else:
+            logger.warning("No YouTube cookies provided. Downloads may be blocked or restricted.")
 
         if PROXY_ENABLED and PROXY_URL:
             opts['proxy'] = PROXY_URL

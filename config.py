@@ -111,11 +111,14 @@ def check_environment():
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         logger.warning("FFmpeg is not available - audio conversion may fail")
     
-    # Проверка cookies файлов
-    if YOUTUBE_COOKIES_PATH and os.path.exists(YOUTUBE_COOKIES_PATH):
-        logger.info("YouTube cookies file found")
+    # Улучшенная проверка cookies
+    if YOUTUBE_COOKIES_CONTENT:
+        # Эта проверка произойдет до создания файла, так как переменная уже прочитана
+        logger.info("YOUTUBE_COOKIES_CONTENT environment variable is set.")
+    elif YOUTUBE_COOKIES_PATH and os.path.exists(YOUTUBE_COOKIES_PATH):
+        logger.info(f"Using YouTube cookies from file: {YOUTUBE_COOKIES_PATH}")
     else:
-        logger.warning("YouTube cookies file not found or not configured")
+        logger.warning("CRITICAL: No YouTube cookies provided via file or environment variable. Downloads will likely fail.")
         
     if PROXY_ENABLED and PROXY_URL:
         logger.info(f"Proxy enabled: {PROXY_URL}")
@@ -124,3 +127,41 @@ def check_environment():
     
     logger.info("Environment check completed")
     return True
+
+# --- Управление Cookies из переменной окружения ---
+
+# Сначала читаем переменную окружения
+YOUTUBE_COOKIES_CONTENT = os.getenv("YOUTUBE_COOKIES_CONTENT", "")
+
+# Глобальная переменная для хранения пути к временному файлу
+TEMP_COOKIE_PATH = None
+
+# Если переменная с содержимым cookies установлена, создаем временный файл
+if YOUTUBE_COOKIES_CONTENT:
+    # ДОБАВЛЕНО ЛОГИРОВАНИЕ: Проверяем, что переменная не пустая
+    logger.info(f"Found YOUTUBE_COOKIES_CONTENT with length: {len(YOUTUBE_COOKIES_CONTENT)}")
+    import tempfile
+    import atexit
+    
+    try:
+        # Создаем временный файл и записываем в него содержимое
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', suffix='.txt') as tf:
+            tf.write(YOUTUBE_COOKIES_CONTENT)
+            TEMP_COOKIE_PATH = tf.name
+        logger.info(f"Cookies from YOUTUBE_COOKIES_CONTENT successfully stored in temporary file: {TEMP_COOKIE_PATH}")
+
+        # Регистрируем функцию, которая удалит временный файл при выходе из программы
+        @atexit.register
+        def cleanup_temp_cookie():
+            global TEMP_COOKIE_PATH
+            if TEMP_COOKIE_PATH and os.path.exists(TEMP_COOKIE_PATH):
+                try:
+                    os.remove(TEMP_COOKIE_PATH)
+                    logger.info(f"Successfully cleaned up temporary cookie file: {TEMP_COOKIE_PATH}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up temporary cookie file {TEMP_COOKIE_PATH}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to create temporary cookie file from environment variable: {e}")
+else:
+    # ДОБАВЛЕНО ЛОГИРОВАНИЕ: Явно сообщаем, что переменная не найдена
+    logger.info("YOUTUBE_COOKIES_CONTENT environment variable not found. Falling back to file path if available.")
