@@ -21,6 +21,11 @@ ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "0")
 # Превращаем строку в список чисел
 ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip()]
 
+# --- Учетные данные для авто-обновления Cookies ---
+# ВАЖНО: Используйте отдельный аккаунт Google, а не личный!
+GOOGLE_USERNAME = os.getenv("GOOGLE_USERNAME", "")
+GOOGLE_PASSWORD = os.getenv("GOOGLE_PASSWORD", "")
+
 # Настройки прокси
 PROXY_URL = os.getenv("PROXY_URL", "")
 PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"

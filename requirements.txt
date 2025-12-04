@@ -4,3 +4,4 @@ pydantic==2.6.4
 python-dotenv==1.0.1
 aiohttp==3.9.5
 requests==2.32.3
+selenium==4.22.0

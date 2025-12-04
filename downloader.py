@@ -76,19 +76,19 @@ class AudioDownloadManager:
 
         return opts
 
-    async def _execute_download(self, search_query: str) -> Optional[Tuple[str, TrackInfo]]:
+    async def _execute_download(self, search_query: str, is_retry: bool = False) -> Optional[Tuple[str, TrackInfo]]:
         """
-        Executes the download and post-processing, ensuring thread safety and
-        correct file path retrieval.
+        Выполняет загрузку и постобработку, обеспечивая потокобезопасность,
+        корректное получение пути к файлу и автоматическое обновление cookies.
         """
         unique_id = str(uuid.uuid4())
-        ydl_opts = self.get_ydl_opts(unique_id)
-
-        async with download_lock:  # Ensure only one download happens at a time
+        
+        async with download_lock:
             logger.info(f"Download lock acquired for '{search_query}' (ID: {unique_id})")
             try:
+                # Получаем опции yt-dlp прямо перед использованием
+                ydl_opts = self.get_ydl_opts(unique_id)
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    # Run the blocking ydl.extract_info in a separate thread
                     info = await asyncio.to_thread(ydl.extract_info, search_query, download=True)
 
                     if not info:
@@ -100,15 +100,10 @@ class AudioDownloadManager:
                         logger.warning(f"No valid entry found for: {search_query}")
                         return None, None
                     
-                    # CRITICAL FIX: After post-processing, yt-dlp updates the 'filepath' key.
-                    # We read this final path instead of guessing the filename.
                     final_filepath = entry.get('filepath')
                     if not final_filepath or not os.path.exists(final_filepath):
-                         logger.error(f"Post-processing failed: MP3 file not found at expected path for '{search_query}'")
-                         # Fallback to guessing, though it's not ideal
-                         final_filepath = os.path.join(DOWNLOADS_DIR, f"{unique_id}.mp3")
-                         if not os.path.exists(final_filepath):
-                             return None, None
+                         logger.error(f"Post-processing failed: MP3 file not found for '{search_query}'")
+                         return None, None
 
                     track_info = TrackInfo(
                         title=entry.get('title', 'Unknown'),
@@ -120,8 +115,31 @@ class AudioDownloadManager:
                     logger.info(f"Download successful for '{search_query}'. File: {final_filepath}")
                     return final_filepath, track_info
 
+            except yt_dlp.utils.DownloadError as e:
+                error_str = str(e).lower()
+                # Проверяем на ошибки, связанные с аутентификацией, и что это не повторная попытка
+                if not is_retry and ('sign in' in error_str or 'confirm you’re not a bot' in error_str or 'invalid argument' in error_str):
+                    logger.warning("Перехвачена ошибка аутентификации YouTube. Запускаю процесс обновления cookies...")
+                    
+                    from cookie_manager import refresh_cookies
+                    
+                    # Запускаем синхронную функцию в отдельном потоке, чтобы не блокировать asyncio
+                    success = await asyncio.to_thread(refresh_cookies)
+
+                    if success:
+                        logger.info("Cookies успешно обновлены. Повторная попытка загрузки...")
+                        # Рекурсивно вызываем себя еще раз, но с флагом, чтобы избежать бесконечного цикла
+                        return await self._execute_download(search_query, is_retry=True)
+                    else:
+                        logger.error("Автоматическое обновление cookies не удалось. Загрузка отменена.")
+                        return None, None
+                else:
+                    # Если это была повторная попытка или другая ошибка, просто логируем и выходим
+                    logger.error(f"Download execution failed for '{search_query}': {e}", exc_info=True)
+                    return None, None
+            
             except Exception as e:
-                logger.error(f"Download execution failed for '{search_query}': {e}", exc_info=True)
+                logger.error(f"An unexpected error occurred during download for '{search_query}': {e}", exc_info=True)
                 return None, None
             finally:
                 logger.info(f"Download lock released for '{search_query}' (ID: {unique_id})")
