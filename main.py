@@ -12,7 +12,7 @@ from config import (
     PROXY_ENABLED, PROXY_URL, MAX_QUERY_LENGTH, cleanup_temp_files,
     Source
 )
-from smart_youtube_downloader import SmartYouTubeDownloader
+from simple_youtube_downloader import SimpleYouTubeDownloader
 from deezer_simple_downloader import DeezerSimpleDownloadManager
 from utils import is_admin, get_menu_keyboard, format_status_message, validate_query_length
 from locks import state_lock, radio_update_lock
@@ -24,9 +24,9 @@ class MusicBot:
         self.app = app
         self.job_queue: JobQueue = self.app.job_queue
         
-        # ВСЕ ИСТОЧНИКИ ДОСТУПНЫ
-        self.youtube_downloader = SmartYouTubeDownloader()  # Умный кэширующий
-        self.deezer_downloader = DeezerSimpleDownloadManager()  # Deezer превью
+        # Инициализируем загрузчики
+        self.youtube_downloader = SimpleYouTubeDownloader()
+        self.deezer_downloader = DeezerSimpleDownloadManager()
         
         self.state = BotState()
         
@@ -48,15 +48,17 @@ class MusicBot:
         self.job_queue.run_repeating(
             self.update_radio_task, 
             interval=300,  # 5 минут
-            first=10,
+            first=30,
             name="radio_updater"
         )
         self.job_queue.run_repeating(
             self.update_status_messages_task,
             interval=30,
-            first=5,
+            first=10,
             name="status_updater"
         )
+        
+        logger.info("Фоновые задачи запущены")
     
     def register_handlers(self):
         """Регистрирует обработчики команд."""
@@ -87,7 +89,7 @@ class MusicBot:
             try:
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
-                    text="⚠️ Произошла ошибка. Попробуйте позже."
+                    text=MESSAGES['error']
                 )
             except Exception as e:
                 logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
@@ -109,7 +111,7 @@ class MusicBot:
         await self.update_status_message(context, chat_id)
     
     async def play_song(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик /play - РАБОТАЕТ С ВСЕМИ ИСТОЧНИКАМИ"""
+        """Обработчик /play"""
         chat_id = update.effective_chat.id
         
         if not context.args:
@@ -127,7 +129,7 @@ class MusicBot:
         status_msg = await context.bot.send_message(chat_id, MESSAGES['searching'])
         
         try:
-            # ВЫБОР ИСТОЧНИКА
+            # Выбор источника
             if self.state.source == Source.DEEZER:
                 logger.info(f"Использую Deezer для: '{query}'")
                 result = await self.deezer_downloader.download_track(query)
@@ -154,6 +156,7 @@ class MusicBot:
                     logger.error(f"Ошибка Telegram: {e}")
                     await status_msg.edit_text("❌ Не удалось отправить файл")
                 finally:
+                    # Удаляем временный файл
                     if os.path.exists(audio_path):
                         try:
                             os.remove(audio_path)
@@ -256,7 +259,7 @@ class MusicBot:
         await context.bot.send_message(update.effective_chat.id, MESSAGES['next_track'])
     
     async def source_switch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Переключает источник - ВСЕ ИСТОЧНИКИ ДОСТУПНЫ!"""
+        """Переключает источник."""
         if not await is_admin(update, context):
             await context.bot.send_message(update.effective_chat.id, MESSAGES['admin_only'])
             return
@@ -303,6 +306,7 @@ class MusicBot:
     async def update_radio_task(self, context: ContextTypes.DEFAULT_TYPE):
         """Обновление радио."""
         if radio_update_lock.locked():
+            logger.debug("Радио уже обновляется, пропускаю")
             return
         
         async with radio_update_lock:
@@ -321,17 +325,18 @@ class MusicBot:
             time_since_last = current_time - self.state.radio_status.last_played_time
             
             if time_since_last < self.state.radio_status.cooldown:
+                logger.debug(f"Радио кулдаун: {int(self.state.radio_status.cooldown - time_since_last)}с")
                 return
         
         logger.info("Обновление радио...")
         
-        # Выбор жанра в зависимости от источника
+        # Выбор жанра
         if self.state.source == Source.DEEZER:
             genre = self.deezer_downloader.get_random_genre()
         else:
             genre = self.youtube_downloader.get_random_genre()
         
-        logger.info(f"Жанр: {genre}")
+        logger.info(f"Жанр радио: {genre}")
         
         # Скачивание трека
         result = None
@@ -343,7 +348,7 @@ class MusicBot:
         if result:
             audio_path, track_info = result
             try:
-                # Отправка во все чаты
+                # Отправка во все активные чаты
                 async with state_lock:
                     active_chats = list(self.state.active_chats.keys())
                     self.state.radio_status.current_genre = genre
@@ -359,27 +364,35 @@ class MusicBot:
                                 title=track_info.title,
                                 performer=track_info.artist,
                                 duration=track_info.duration,
-                                caption=f"📻 Радио: {genre}"
+                                caption=f"📻 Радио: {genre.capitalize()}"
                             )
                         successful += 1
                     except Forbidden:
+                        logger.warning(f"Бот заблокирован в чате {chat_id}")
                         async with state_lock:
                             if chat_id in self.state.active_chats:
                                 del self.state.active_chats[chat_id]
                     except Exception as e:
                         logger.error(f"Ошибка отправки в {chat_id}: {e}")
                 
-                logger.info(f"Отправлено в {successful}/{len(active_chats)} чатов")
+                logger.info(f"Радио отправлено в {successful}/{len(active_chats)} чатов")
                 
+                # Обновляем время последнего трека
                 async with state_lock:
                     self.state.radio_status.last_played_time = asyncio.get_event_loop().time()
                 
             finally:
+                # Удаляем файл
                 if os.path.exists(audio_path):
                     try:
                         os.remove(audio_path)
                     except:
                         pass
+        else:
+            logger.warning(f"Не удалось найти трек для жанра: {genre}")
+            # Устанавливаем задержку при ошибке
+            async with state_lock:
+                self.state.radio_status.last_played_time = asyncio.get_event_loop().time()
     
     async def update_status_messages_task(self, context: ContextTypes.DEFAULT_TYPE):
         """Обновление статус-сообщений."""
@@ -424,27 +437,35 @@ class MusicBot:
                             self.state.active_chats[cid].status_message_id = sent_message.message_id
                     
             except BadRequest as e:
-                if "message not found" in str(e):
+                if "message not found" in str(e).lower():
                     async with state_lock:
                         if cid in self.state.active_chats:
                             self.state.active_chats[cid].status_message_id = None
+                elif "not modified" in str(e).lower():
+                    pass  # Это нормально, сообщение не изменилось
+                else:
+                    logger.warning(f"Не удалось обновить статус в {cid}: {e}")
             except Forbidden:
+                logger.warning(f"Бот заблокирован в {cid}")
                 async with state_lock:
                     if cid in self.state.active_chats:
                         del self.state.active_chats[cid]
             except Exception as e:
-                logger.error(f"Ошибка обновления статуса: {e}")
+                logger.error(f"Ошибка обновления статуса для {cid}: {e}")
     
     async def shutdown(self):
         """Завершение работы."""
         logger.info("Завершение работы бота...")
         
+        # Останавливаем задачи
         for job in self.job_queue.jobs():
             job.schedule_removal()
         
+        # Закрываем загрузчики
         await self.youtube_downloader.close()
         await self.deezer_downloader.close()
         
+        # Очищаем временные файлы
         cleanup_temp_files()
         
         logger.info("Бот завершил работу")
