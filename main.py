@@ -9,9 +9,11 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 
 from config import (
     BOT_TOKEN, BotState, MESSAGES, check_environment, 
-    PROXY_ENABLED, PROXY_URL, MAX_QUERY_LENGTH, cleanup_temp_files
+    PROXY_ENABLED, PROXY_URL, MAX_QUERY_LENGTH, cleanup_temp_files,
+    Source  # ВАЖНО: Импортируем Source для сравнения
 )
 from downloader import AudioDownloadManager
+from deezer_simple_downloader import DeezerSimpleDownloadManager  # ВАЖНО: Новый импорт
 from utils import is_admin, get_menu_keyboard, format_status_message, validate_query_length
 from locks import state_lock, radio_update_lock
 
@@ -21,7 +23,11 @@ class MusicBot:
     def __init__(self, app: Application):
         self.app = app
         self.job_queue: JobQueue = self.app.job_queue
-        self.downloader = AudioDownloadManager()
+        
+        # ВАЖНО: Инициализируем ОБА загрузчика
+        self.youtube_downloader = AudioDownloadManager()
+        self.deezer_downloader = DeezerSimpleDownloadManager()
+        
         self.state = BotState()
         
         logger.info("Инициализация бота...")
@@ -120,7 +126,11 @@ class MusicBot:
         status_msg = await context.bot.send_message(chat_id, MESSAGES['searching'])
         
         try:
-            result = await self.downloader.download_track(query, self.state.source)
+            # ВАЖНО: Выбираем загрузчик в зависимости от источника
+            if self.state.source == Source.DEEZER:
+                result = await self.deezer_downloader.download_track(query)
+            else:
+                result = await self.youtube_downloader.download_track(query, self.state.source)
             
             if result:
                 audio_path, track_info = result
@@ -178,7 +188,11 @@ class MusicBot:
         status_msg = await context.bot.send_message(chat_id, MESSAGES['searching_audiobook'])
         
         try:
-            result = await self.downloader.download_longest_track(query, self.state.source)
+            # ВАЖНО: Выбираем загрузчик в зависимости от источника
+            if self.state.source == Source.DEEZER:
+                result = await self.deezer_downloader.download_longest_track(query)
+            else:
+                result = await self.youtube_downloader.download_longest_track(query, self.state.source)
             
             if result:
                 audio_path, track_info = result
@@ -325,14 +339,19 @@ class MusicBot:
         logger.info("Начинаю обновление радио...")
         
         # Получаем случайный жанр
-        genre = self.downloader.get_random_genre()
+        if self.state.source == Source.DEEZER:
+            genre = self.deezer_downloader.get_random_genre()
+        else:
+            genre = self.youtube_downloader.get_random_genre()
+        
         logger.info(f"Выбран жанр: {genre}")
         
         # Пытаемся скачать трек
-        result = await self.downloader.download_track(
-            f"{genre} music", 
-            self.state.source
-        )
+        result = None
+        if self.state.source == Source.DEEZER:
+            result = await self.deezer_downloader.download_track(f"{genre} music")
+        else:
+            result = await self.youtube_downloader.download_track(f"{genre} music", self.state.source)
         
         if result:
             audio_path, track_info = result
@@ -454,8 +473,9 @@ class MusicBot:
         for job in self.job_queue.jobs():
             job.schedule_removal()
         
-        # Закрываем загрузчик
-        await self.downloader.close()
+        # Закрываем загрузчики
+        await self.youtube_downloader.close()
+        await self.deezer_downloader.close()
         
         # Очищаем временные файлы
         cleanup_temp_files()
