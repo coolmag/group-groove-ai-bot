@@ -10,7 +10,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from config import (
     BOT_TOKEN, BotState, MESSAGES, check_environment, 
     PROXY_ENABLED, PROXY_URL, MAX_QUERY_LENGTH, cleanup_temp_files,
-    Source, ChatData  # ← ДОБАВЛЕН ChatData
+    Source, ChatData
 )
 from simple_youtube_downloader import SimpleYouTubeDownloader
 from deezer_simple_downloader import DeezerSimpleDownloadManager
@@ -105,7 +105,7 @@ class MusicBot:
         
         async with state_lock:
             if chat_id not in self.state.active_chats:
-                self.state.active_chats[chat_id] = ChatData(status_message_id=None)  # ← ИСПРАВЛЕНО
+                self.state.active_chats[chat_id] = ChatData(status_message_id=None)
                 logger.info(f"Новый чат: {chat_id}")
         
         await self.update_status_message(context, chat_id)
@@ -413,6 +413,9 @@ class MusicBot:
             keyboard = get_menu_keyboard()
             message_text = format_status_message(self.state)
             
+            # УДАЛЯЕМ HTML-ТЕГИ ИЗ ТЕКСТА
+            message_text = message_text.replace('<b>', '').replace('</b>', '')
+            
             async with state_lock:
                 if chat_id:
                     chats_to_update = [chat_id] if chat_id in self.state.active_chats else []
@@ -429,14 +432,14 @@ class MusicBot:
                             message_id=chat_data.status_message_id,
                             text=message_text,
                             reply_markup=keyboard,
-                            parse_mode='HTML'
+                            parse_mode=None  # Отключаем HTML парсинг
                         )
                     else:
                         sent_message = await context.bot.send_message(
                             chat_id=cid,
                             text=message_text,
                             reply_markup=keyboard,
-                            parse_mode='HTML'
+                            parse_mode=None  # Отключаем HTML парсинг
                         )
                         
                         async with state_lock:
