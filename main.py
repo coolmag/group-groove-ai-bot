@@ -10,10 +10,10 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from config import (
     BOT_TOKEN, BotState, MESSAGES, check_environment, 
     PROXY_ENABLED, PROXY_URL, MAX_QUERY_LENGTH, cleanup_temp_files,
-    Source  # ВАЖНО: Импортируем Source для сравнения
+    Source
 )
 from downloader import AudioDownloadManager
-from deezer_simple_downloader import DeezerSimpleDownloadManager  # ВАЖНО: Новый импорт
+from deezer_simple_downloader import DeezerSimpleDownloadManager
 from utils import is_admin, get_menu_keyboard, format_status_message, validate_query_length
 from locks import state_lock, radio_update_lock
 
@@ -24,7 +24,7 @@ class MusicBot:
         self.app = app
         self.job_queue: JobQueue = self.app.job_queue
         
-        # ВАЖНО: Инициализируем ОБА загрузчика
+        # Инициализируем загрузчики
         self.youtube_downloader = AudioDownloadManager()
         self.deezer_downloader = DeezerSimpleDownloadManager()
         
@@ -41,10 +41,16 @@ class MusicBot:
         # Регистрация обработчика ошибок
         self.app.add_error_handler(self.on_error)
         
+        logger.info("Бот инициализирован")
+    
+    async def initialize(self):
+        """Асинхронная инициализация."""
+        await self.deezer_downloader.initialize()
+        
         # Запуск фоновых задач
         self.job_queue.run_repeating(
             self.update_radio_task, 
-            interval=60, 
+            interval=300,  # 5 минут для радио
             first=10,
             name="radio_updater"
         )
@@ -54,8 +60,6 @@ class MusicBot:
             first=5,
             name="status_updater"
         )
-        
-        logger.info("Бот инициализирован")
     
     def register_handlers(self):
         """Регистрирует все обработчики команд"""
@@ -126,16 +130,18 @@ class MusicBot:
         status_msg = await context.bot.send_message(chat_id, MESSAGES['searching'])
         
         try:
-            # ВАЖНО: Выбираем загрузчик в зависимости от источника
+            # Выбираем загрузчик в зависимости от источника
             if self.state.source == Source.DEEZER:
+                logger.info(f"Использую Deezer для запроса: '{query}'")
                 result = await self.deezer_downloader.download_track(query)
             else:
+                logger.info(f"Использую YouTube для запроса: '{query}'")
                 result = await self.youtube_downloader.download_track(query, self.state.source)
             
             if result:
                 audio_path, track_info = result
                 try:
-                    # Отправляем файл по частям (stream)
+                    # Отправляем файл
                     with open(audio_path, 'rb') as audio_file:
                         await context.bot.send_audio(
                             chat_id=chat_id,
@@ -155,7 +161,7 @@ class MusicBot:
                     logger.error(f"Ошибка при отправке: {e}")
                     await status_msg.edit_text("❌ Ошибка отправки")
                 finally:
-                    # Всегда удаляем файл
+                    # Удаляем файл
                     if os.path.exists(audio_path):
                         try:
                             os.remove(audio_path)
@@ -166,7 +172,7 @@ class MusicBot:
                 await status_msg.edit_text(MESSAGES['not_found'])
                 
         except Exception as e:
-            logger.error(f"Ошибка в play_song: {e}")
+            logger.error(f"Ошибка в play_song: {e}", exc_info=True)
             await status_msg.edit_text("❌ Ошибка при загрузке")
     
     async def audiobook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,7 +194,7 @@ class MusicBot:
         status_msg = await context.bot.send_message(chat_id, MESSAGES['searching_audiobook'])
         
         try:
-            # ВАЖНО: Выбираем загрузчик в зависимости от источника
+            # Выбираем загрузчик в зависимости от источника
             if self.state.source == Source.DEEZER:
                 result = await self.deezer_downloader.download_longest_track(query)
             else:
@@ -392,7 +398,7 @@ class MusicBot:
                     self.state.radio_status.last_played_time = asyncio.get_event_loop().time()
                 
             finally:
-                # Всегда удаляем файл
+                # Удаляем файл
                 if os.path.exists(audio_path):
                     try:
                         os.remove(audio_path)
@@ -400,7 +406,7 @@ class MusicBot:
                         logger.error(f"Не удалось удалить файл: {e}")
         else:
             logger.warning(f"Не удалось найти трек для жанра: {genre}")
-            # Устанавливаем задержку при ошибке (5 минут вместо обычных)
+            # Устанавливаем задержку при ошибке
             async with state_lock:
                 self.state.radio_status.last_played_time = asyncio.get_event_loop().time()
     
@@ -495,6 +501,9 @@ async def main():
     
     # Создаем экземпляр бота
     bot = MusicBot(app)
+    
+    # Инициализируем бота асинхронно
+    await bot.initialize()
     
     # Настраиваем обработку сигналов
     stop_event = asyncio.Event()
