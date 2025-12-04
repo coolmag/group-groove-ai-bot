@@ -1,9 +1,0 @@
-.git/
-.gitignore
-.dockerignore
-.env
-.env.*
-README.md
-railway.json
-*.session
-*.session-journal
