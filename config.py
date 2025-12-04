@@ -8,14 +8,11 @@ from dotenv import load_dotenv
 # Загрузка переменных окружения
 load_dotenv()
 
-# Настройка логирования
+# Настройка логирования - только в консоль для Railway
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('bot.log', encoding='utf-8')
-    ]
+    handlers=[logging.StreamHandler()]  # Только консоль, без файла
 )
 logger = logging.getLogger(__name__)
 
@@ -30,7 +27,7 @@ COOKIES_TEXT = os.getenv("COOKIES_TEXT", "")
 if not COOKIES_TEXT:
     logger.warning("⚠️ COOKIES_TEXT не задан. YouTube будет блокировать запросы!")
 else:
-    logger.info("✅ COOKIES_TEXT загружен (длина: %d символов)", len(COOKIES_TEXT))
+    logger.info("✅ COOKIES_TEXT загружен")
 
 # Админы
 ADMIN_IDS = []
@@ -44,13 +41,14 @@ except Exception as e:
 if not ADMIN_IDS:
     logger.warning("⚠️ ADMIN_IDS не задан. Некоторые команды будут недоступны")
 
-# Определяем директорию для загрузок
+# Определяем директорию для загрузок (используем /tmp на Railway)
 if os.path.exists("/tmp"):
     DOWNLOADS_DIR = "/tmp/music_bot_downloads"
 else:
     DOWNLOADS_DIR = "downloads"
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+logger.info(f"Директория загрузок: {DOWNLOADS_DIR}")
 
 # Прокси (необязательно)
 PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() == "true"
@@ -138,7 +136,7 @@ def check_environment() -> bool:
                 timeout=5
             )
             if result.returncode == 0:
-                logger.info("✅ FFmpeg доступен: %s", result.stdout.split('\n')[0])
+                logger.info("✅ FFmpeg доступен")
             else:
                 logger.error("❌ FFmpeg не найден или не работает!")
                 return False
@@ -161,12 +159,13 @@ def check_environment() -> bool:
         if not COOKIES_TEXT:
             logger.warning("⚠️ COOKIES_TEXT не задан. YouTube может блокировать запросы!")
         else:
-            # Проверяем, что cookies содержат необходимые поля
-            if 'youtube.com' in COOKIES_TEXT and 'LOGIN_INFO' in COOKIES_TEXT:
-                logger.info("✅ Cookies выглядят валидными")
+            # Простая проверка
+            if 'youtube.com' in COOKIES_TEXT:
+                logger.info("✅ Cookies содержат youtube.com")
             else:
                 logger.warning("⚠️ Cookies могут быть неполными")
         
+        logger.info(f"✅ Директория загрузок: {DOWNLOADS_DIR}")
         return True
         
     except Exception as e:
@@ -178,7 +177,6 @@ def cleanup_temp_files():
     try:
         import glob
         import time
-        import shutil
         
         current_time = time.time()
         
@@ -191,17 +189,6 @@ def cleanup_temp_files():
                     logger.debug(f"Удален старый файл: {os.path.basename(filepath)}")
             except Exception as e:
                 logger.debug(f"Не удалось удалить файл {filepath}: {e}")
-        
-        # Очищаем старые логи (старше 7 дней)
-        log_files = glob.glob("*.log")
-        for log_file in log_files:
-            try:
-                if os.path.exists(log_file):
-                    file_age = current_time - os.path.getmtime(log_file)
-                    if file_age > 7 * 24 * 3600:  # 7 дней
-                        os.remove(log_file)
-            except:
-                pass
                 
     except Exception as e:
         logger.error(f"Ошибка при очистке файлов: {e}")

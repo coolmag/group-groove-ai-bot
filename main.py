@@ -32,10 +32,6 @@ class MusicBot:
         self.state = BotState()
         
         logger.info("Инициализация бота...")
-        logger.info(f"Администраторы: {ADMIN_IDS}")
-        
-        if PROXY_ENABLED and PROXY_URL:
-            logger.info(f"Прокси включен: {PROXY_URL}")
         
         self.register_handlers()
         self.app.add_error_handler(self.on_error)
@@ -91,37 +87,20 @@ class MusicBot:
     async def on_error(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик ошибок."""
         error_msg = str(context.error) if context.error else "Неизвестная ошибка"
-        logger.error(f"Ошибка: {error_msg}", exc_info=context.error)
+        logger.error(f"Ошибка: {error_msg}")
         
         if update and update.effective_chat:
             try:
-                # Отправляем понятное сообщение об ошибке
-                user_friendly_msg = "⚠️ Произошла ошибка. Попробуйте позже или используйте другую команду."
-                
-                # Специальные сообщения для известных ошибок
-                if "YouTube заблокировал запрос" in error_msg:
-                    user_friendly_msg = "⚠️ YouTube заблокировал запрос. Используйте /source для переключения на Deezer."
-                elif "Timeout" in error_msg or "таймаут" in error_msg.lower():
-                    user_friendly_msg = "⏰ Превышено время ожидания. Попробуйте снова или используйте другой источник (/source)."
-                
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
-                    text=user_friendly_msg
+                    text="⚠️ Произошла ошибка. Попробуйте позже."
                 )
             except Exception as e:
                 logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик /start"""
-        welcome_msg = MESSAGES['welcome'] + "\n\n" \
-                     "📋 Основные команды:\n" \
-                     "/play <название> - поиск музыки\n" \
-                     "/ab <название> - поиск аудиокниги\n" \
-                     "/menu - главное меню\n" \
-                     "/source - сменить источник\n" \
-                     "/status - статус бота"
-        
-        await update.message.reply_text(welcome_msg)
+        await update.message.reply_text(MESSAGES['welcome'])
         await self.show_menu(update, context)
     
     async def show_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -156,7 +135,7 @@ class MusicBot:
         except Exception as e:
             error_msg = str(e)
             if "YouTube заблокировал запрос" in error_msg:
-                raise  # Пробрасываем для специальной обработки
+                raise
             logger.error(f"Ошибка {source.value}: {error_msg[:200]}")
             return None
     
@@ -194,8 +173,6 @@ class MusicBot:
                     await status_msg.edit_text(f"{MESSAGES['youtube_blocked']}\n\nАвтоматически переключаюсь на Deezer...")
                     current_source = Source.DEEZER
                     result = await self.download_with_timeout(query, current_source, timeout=30)
-                else:
-                    raise
             
             # Если не получилось, пробуем Deezer как резервный
             if not result and current_source != Source.DEEZER:
@@ -239,9 +216,9 @@ class MusicBot:
                 
         except asyncio.TimeoutError:
             logger.error(f"Общий таймаут для: '{query}'")
-            await status_msg.edit_text("⏰ Превышено время ожидания. Попробуйте позже или другой запрос.")
+            await status_msg.edit_text("⏰ Превышено время ожидания. Попробуйте позже.")
         except Exception as e:
-            logger.error(f"Ошибка в play_song: {e}", exc_info=True)
+            logger.error(f"Ошибка в play_song: {e}")
             await status_msg.edit_text("❌ Ошибка при загрузке. Попробуйте позже.")
     
     async def audiobook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,7 +255,6 @@ class MusicBot:
             
             if not result and self.state.source != Source.DEEZER:
                 # Если YouTube не нашел, пробуем Deezer
-                logger.info("YouTube не нашел аудиокнигу, пробую Deezer...")
                 await status_msg.edit_text("YouTube не нашел, пробую Deezer...")
                 result = await asyncio.wait_for(
                     self.deezer_downloader.download_longest_track(f"{query} аудиокнига"),
@@ -314,9 +290,9 @@ class MusicBot:
                 
         except asyncio.TimeoutError:
             logger.error(f"Таймаут при поиске аудиокниги: '{query}'")
-            await status_msg.edit_text("⏰ Поиск занял слишком много времени. Попробуйте другой запрос.")
+            await status_msg.edit_text("⏰ Поиск занял слишком много времени.")
         except Exception as e:
-            logger.error(f"Ошибка в audiobook: {e}", exc_info=True)
+            logger.error(f"Ошибка в audiobook: {e}")
             await status_msg.edit_text("❌ Ошибка при поиске аудиокниги.")
     
     async def radio_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -398,20 +374,17 @@ class MusicBot:
         
         if command in command_map:
             await command_map[command](update, context)
-        else:
-            logger.warning(f"Неизвестная команда кнопки: {command}")
     
     async def update_radio_task(self, context: ContextTypes.DEFAULT_TYPE):
         """Обновление радио."""
         if radio_update_lock.locked():
-            logger.debug("Радио уже обновляется, пропускаю")
             return
         
         async with radio_update_lock:
             try:
                 await self._update_radio(context)
             except Exception as e:
-                logger.error(f"Ошибка в радио: {e}", exc_info=True)
+                logger.error(f"Ошибка в радио: {e}")
     
     async def _update_radio(self, context: ContextTypes.DEFAULT_TYPE):
         """Логика радио."""
@@ -423,7 +396,6 @@ class MusicBot:
             time_since_last = current_time - self.state.radio_status.last_played_time
             
             if time_since_last < self.state.radio_status.cooldown:
-                logger.debug(f"Радио кулдаун: {int(self.state.radio_status.cooldown - time_since_last)}с")
                 return
         
         logger.info("Обновление радио...")
@@ -520,7 +492,7 @@ class MusicBot:
             keyboard = get_menu_keyboard()
             message_text = format_status_message(self.state)
             
-            # Удаляем ВСЕ HTML-теги
+            # Удаляем HTML-теги
             message_text = re.sub(r'<[^>]+>', '', message_text)
             
             async with state_lock:
@@ -539,14 +511,14 @@ class MusicBot:
                             message_id=chat_data.status_message_id,
                             text=message_text,
                             reply_markup=keyboard,
-                            parse_mode=None  # Отключаем HTML полностью
+                            parse_mode=None
                         )
                     else:
                         sent_message = await context.bot.send_message(
                             chat_id=cid,
                             text=message_text,
                             reply_markup=keyboard,
-                            parse_mode=None  # Отключаем HTML полностью
+                            parse_mode=None
                         )
                         
                         async with state_lock:
@@ -560,11 +532,7 @@ class MusicBot:
                             if cid in self.state.active_chats:
                                 self.state.active_chats[cid].status_message_id = None
                     elif "not modified" in error_str.lower():
-                        pass  # Это нормально
-                    elif "message text is empty" in error_str.lower():
-                        logger.warning(f"Пустой текст сообщения для {cid}")
-                    else:
-                        logger.warning(f"Не удалось обновить статус в {cid}: {error_str}")
+                        pass
                 except Forbidden:
                     logger.warning(f"Бот заблокирован в {cid}")
                     async with state_lock:
@@ -573,7 +541,7 @@ class MusicBot:
                 except Exception as e:
                     logger.error(f"Ошибка обновления статуса для {cid}: {e}")
         except Exception as e:
-            logger.error(f"Критическая ошибка в update_status_message: {e}")
+            logger.error(f"Ошибка в update_status_message: {e}")
     
     async def shutdown(self):
         """Завершение работы."""
@@ -634,17 +602,13 @@ async def main():
             await app.updater.start_polling()
         
         logger.info("✅ Бот запущен и готов к работе!")
-        logger.info(f"📊 Статистика:")
-        logger.info(f"  - Админов: {len(ADMIN_IDS)}")
-        logger.info(f"  - Cookies: {'✅' if COOKIES_TEXT else '❌'}")
-        logger.info(f"  - Прокси: {'✅' if PROXY_ENABLED else '❌'}")
         
         await stop_event.wait()
         
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C...")
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка при запуске: {e}")
     finally:
         logger.info("Завершение работы...")
         
