@@ -2,8 +2,8 @@ import os
 import logging
 import asyncio
 import yt_dlp
-from typing import Optional, Tuple, List
-from datetime import datetime
+from typing import Optional, Tuple
+import re
 
 from config import DOWNLOADS_DIR, TrackInfo, Source
 from locks import download_lock
@@ -15,7 +15,7 @@ class AudioDownloadManager:
     
     def __init__(self):
         self.setup_directories()
-        self.last_video_id = None  # ← ДОБАВЛЕНО ДЛЯ КЭШИРОВАНИЯ
+        self.last_video_id = None
         
     def setup_directories(self):
         """Создаёт директорию для загрузок."""
@@ -38,7 +38,7 @@ class AudioDownloadManager:
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'outtmpl': os.path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s'),
+            'outtmpl': os.path.join(DOWNLOADS_DIR, '%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
             'ignoreerrors': True,
@@ -48,10 +48,31 @@ class AudioDownloadManager:
             'skip_unavailable_fragments': True,
         }
         
+        # Добавляем cookies если есть
+        cookies_text = os.getenv("COOKIES_TEXT", "")
+        if cookies_text:
+            import tempfile
+            import atexit
+            
+            # Создаем временный файл для cookies
+            cookies_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+            cookies_file.write(cookies_text)
+            cookies_file.flush()
+            cookies_file.close()
+            
+            base_options['cookiefile'] = cookies_file.name
+            
+            # Удаляем файл при выходе
+            def cleanup():
+                try:
+                    os.unlink(cookies_file.name)
+                except:
+                    pass
+            
+            atexit.register(cleanup)
+        
         if source == Source.YOUTUBE_MUSIC:
             base_options['extractor_args'] = {'youtube': {'player_client': ['web_music']}}
-        elif source == Source.SOUNDCLOUD:
-            base_options['extractor_args'] = {'soundcloud': {'client_id': 'your_client_id'}}
         
         return base_options
     
@@ -60,15 +81,14 @@ class AudioDownloadManager:
         async with download_lock:
             logger.info(f"Скачивание трека: '{query}' с {source.value}")
             
-            # Если запрос похож на video_id (11 символов, буквы/цифры/_-)
-            import re
+            # Проверяем, является ли запрос video_id (11 символов YouTube ID)
             if re.match(r'^[a-zA-Z0-9_-]{11}$', query):
                 video_id = query
                 search_query = video_id
                 logger.info(f"Использую video_id: {video_id}")
             else:
                 video_id = None
-                # Формируем поисковый запрос в зависимости от источника
+                # Формируем поисковый запрос
                 if source in [Source.YOUTUBE, Source.YOUTUBE_MUSIC]:
                     search_query = f"ytsearch1:{query}"
                 elif source == Source.SOUNDCLOUD:
@@ -81,7 +101,6 @@ class AudioDownloadManager:
                     search_query = query
             
             ydl_opts = self._get_ydl_options(source)
-            ydl_opts['outtmpl'] = os.path.join(DOWNLOADS_DIR, '%(id)s.%(ext)s')
             
             loop = asyncio.get_event_loop()
             
@@ -90,7 +109,6 @@ class AudioDownloadManager:
                     logger.info(f"Попытка {attempt + 1}/3")
                     
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # Используем run_in_executor для избежания блокировки
                         info = await loop.run_in_executor(
                             None, 
                             lambda: ydl.extract_info(search_query, download=True)
@@ -106,32 +124,38 @@ class AudioDownloadManager:
                         else:
                             video_info = info
                         
-                        # Сохраняем video_id для кэширования ← ВАЖНО!
+                        # Сохраняем video_id для кэширования
                         self.last_video_id = video_info.get('id')
                         
                         # Формируем путь к файлу
-                        audio_path = os.path.join(
-                            DOWNLOADS_DIR, 
-                            f"{video_info['id']}.mp3"
-                        )
+                        audio_path = os.path.join(DOWNLOADS_DIR, f"{video_info['id']}.mp3")
                         
                         if not os.path.exists(audio_path):
                             logger.error(f"Файл не создан: {audio_path}")
-                            continue
+                            # Пробуем найти файл по шаблону
+                            import glob
+                            pattern = os.path.join(DOWNLOADS_DIR, f"{video_info['id']}.*")
+                            files = glob.glob(pattern)
+                            if files:
+                                audio_path = files[0]
+                            else:
+                                continue
                         
                         # Получаем информацию о треке
-                        title = video_info.get('title', 'Unknown')[:100]
-                        artist = 'Unknown'
+                        title = video_info.get('title', 'Unknown Track')[:100]
+                        artist = 'Unknown Artist'
                         
                         # Пытаемся извлечь артиста
                         if video_info.get('artist'):
                             artist = video_info['artist'][:100]
                         elif video_info.get('uploader'):
                             artist = video_info['uploader'][:100]
-                        elif 'channel' in video_info:
+                        elif video_info.get('channel'):
                             artist = video_info['channel'][:100]
                         
                         duration = int(video_info.get('duration', 0))
+                        if duration == 0:
+                            duration = 180  # Дефолтное значение
                         
                         track_info = TrackInfo(
                             title=title,
@@ -140,7 +164,7 @@ class AudioDownloadManager:
                             source=source.value
                         )
                         
-                        logger.info(f"Успешно скачан: {artist} - {title}")
+                        logger.info(f"Успешно скачан: {artist} - {title} ({duration} сек)")
                         return (audio_path, track_info)
                         
                 except Exception as e:
@@ -156,7 +180,6 @@ class AudioDownloadManager:
         async with download_lock:
             logger.info(f"Поиск длинного трека: '{query}'")
             
-            # Увеличиваем лимит поиска для аудиокниг
             if source in [Source.YOUTUBE, Source.YOUTUBE_MUSIC]:
                 search_query = f"ytsearch10:{query}"
             elif source == Source.SOUNDCLOUD:
@@ -165,7 +188,6 @@ class AudioDownloadManager:
                 search_query = query
             
             ydl_opts = self._get_ydl_options(source)
-            ydl_opts['outtmpl'] = os.path.join(DOWNLOADS_DIR, '%(id)s.%(ext)s')
             
             loop = asyncio.get_event_loop()
             
@@ -180,20 +202,16 @@ class AudioDownloadManager:
                         return None
                     
                     # Ищем самый длинный трек
-                    entries = info['entries']
-                    longest_track = None
-                    max_duration = 0
-                    
-                    for entry in entries:
-                        if entry and entry.get('duration', 0) > max_duration:
-                            max_duration = entry['duration']
-                            longest_track = entry
-                    
-                    if not longest_track:
+                    entries = [e for e in info['entries'] if e]
+                    if not entries:
                         return None
+                    
+                    longest_track = max(entries, key=lambda x: x.get('duration', 0))
                     
                     # Скачиваем самый длинный трек
                     video_id = longest_track['id']
+                    self.last_video_id = video_id
+                    
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
                         await loop.run_in_executor(
                             None,
@@ -203,14 +221,17 @@ class AudioDownloadManager:
                     audio_path = os.path.join(DOWNLOADS_DIR, f"{video_id}.mp3")
                     
                     if not os.path.exists(audio_path):
-                        return None
+                        # Пробуем найти файл
+                        import glob
+                        pattern = os.path.join(DOWNLOADS_DIR, f"{video_id}.*")
+                        files = glob.glob(pattern)
+                        if not files:
+                            return None
+                        audio_path = files[0]
                     
-                    # Сохраняем video_id ← ВАЖНО!
-                    self.last_video_id = video_id
-                    
-                    title = longest_track.get('title', 'Unknown')[:100]
-                    artist = longest_track.get('uploader', 'Unknown')[:100]
-                    duration = max_duration
+                    title = longest_track.get('title', 'Unknown Track')[:100]
+                    artist = longest_track.get('uploader', 'Unknown Artist')[:100]
+                    duration = longest_track.get('duration', 0)
                     
                     track_info = TrackInfo(
                         title=title,
@@ -226,15 +247,5 @@ class AudioDownloadManager:
                 return None
     
     async def close(self):
-        """Очистка временных файлов."""
-        try:
-            # Удаляем старые файлы (старше 1 часа)
-            for filename in os.listdir(DOWNLOADS_DIR):
-                filepath = os.path.join(DOWNLOADS_DIR, filename)
-                if os.path.isfile(filepath):
-                    file_age = datetime.now().timestamp() - os.path.getmtime(filepath)
-                    if file_age > 3600:  # 1 час
-                        os.remove(filepath)
-                        logger.debug(f"Удален старый файл: {filename}")
-        except Exception as e:
-            logger.error(f"Ошибка при очистке файлов: {e}")
+        """Очистка ресурсов."""
+        logger.info("Загрузчик остановлен")
