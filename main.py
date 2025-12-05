@@ -1,10 +1,48 @@
 import asyncio
 import os
-import signal
 import sys
+import signal
 import logging
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
-from telegram.error import BadRequest, Forbidden
+import atexit
+
+# --- Механизм блокировки ---
+LOCK_FILE_PATH = "/tmp/music_bot.lock"
+
+def create_lock_file():
+    if os.path.exists(LOCK_FILE_PATH):
+        # Проверяем, не завис ли старый процесс
+        try:
+            with open(LOCK_FILE_PATH, "r") as f:
+                pid = int(f.read())
+            # Проверяем, существует ли процесс с таким PID
+            if os.path.exists(f"/proc/{pid}"):
+                logging.warning(f"Найден активный lock-файл (PID: {pid}). Другой экземпляр уже запущен.")
+                return False
+            else:
+                logging.warning("Найден старый lock-файл от зависшего процесса. Удаляем его.")
+        except (ValueError, FileNotFoundError):
+             logging.warning("Найден поврежденный lock-файл. Удаляем его.")
+
+    # Создаем новый lock-файл
+    try:
+        with open(LOCK_FILE_PATH, "w") as f:
+            f.write(str(os.getpid()))
+        atexit.register(remove_lock_file)
+        return True
+    except IOError as e:
+        logging.error(f"Не удалось создать lock-файл: {e}")
+        return False
+
+def remove_lock_file():
+    if os.path.exists(LOCK_FILE_PATH):
+        try:
+            os.remove(LOCK_FILE_PATH)
+            logging.info("Lock-файл удален.")
+        except OSError:
+            pass
+
+# --- Конец механизма блокировки ---
+
 
 # Настройка логов
 logging.basicConfig(
@@ -13,25 +51,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Импорты наших модулей
-from config import settings, TrackInfo, Source
-from handlers import BotHandlers
 
+async def main_bot_logic():
+    """Основная логика бота, вынесенная из main"""
+    from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+    from config import settings
+    from handlers import BotHandlers
 
-async def main():
-    """Главная функция бота"""
     logger.info("🚀 Запуск Music Bot...")
     
-    # Проверка токена
     if not settings.BOT_TOKEN:
         logger.error("❌ BOT_TOKEN не установлен!")
         sys.exit(1)
     
-    # Проверка FFmpeg
     try:
         import subprocess
-        result = subprocess.run(['ffmpeg', '-version'], 
-                              capture_output=True, text=True, timeout=5)
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             logger.error("❌ FFmpeg не найден!")
             sys.exit(1)
@@ -40,80 +75,61 @@ async def main():
         logger.error(f"❌ Ошибка проверки FFmpeg: {e}")
         sys.exit(1)
     
+    app = Application.builder().token(settings.BOT_TOKEN).build()
+    handlers = BotHandlers(app)
+    
+    commands = [
+        ("start", handlers.start), ("menu", handlers.show_menu),
+        ("play", handlers.handle_play), ("p", handlers.handle_play),
+        ("audiobook", handlers.handle_audiobook), ("ab", handlers.handle_audiobook),
+        ("radio", handlers.handle_radio),
+        ("source", handlers.handle_source), ("src", handlers.handle_source),
+        ("status", handlers.handle_status), ("stat", handlers.handle_status),
+        ("help", handlers.handle_help),
+    ]
+    for command, handler in commands:
+        app.add_handler(CommandHandler(command, handler))
+    
+    app.add_handler(CallbackQueryHandler(handlers.handle_callback))
+    
+    logger.info("✅ Бот запускается...")
+    await app.initialize()
+    if app.updater:
+        await app.updater.start_polling(drop_pending_updates=True)
+    logger.info("✅ Бот успешно запущен!")
+    
+    # Ожидание сигнала завершения
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+        
+    await stop_event.wait()
+    
+    logger.info("Завершение работы бота...")
+    if app.updater:
+        await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+
+
+def main():
+    """Главная функция-обертка с блокировкой"""
+    if not create_lock_file():
+        logger.info("Экземпляр уже запущен. Этот процесс будет завершен.")
+        sys.exit(1)
+        
     try:
-        # Создаем приложение бота
-        app = Application.builder().token(settings.BOT_TOKEN).build()
-        
-        # Создаем обработчики
-        handlers = BotHandlers(app)
-        
-        # Регистрируем команды
-        commands = [
-            ("start", handlers.start),
-            ("menu", handlers.show_menu),
-            ("play", handlers.handle_play),
-            ("p", handlers.handle_play),
-            ("audiobook", handlers.handle_audiobook),
-            ("ab", handlers.handle_audiobook),
-            ("radio", handlers.handle_radio),
-            ("source", handlers.handle_source),
-            ("src", handlers.handle_source),
-            ("status", handlers.handle_status),
-            ("stat", handlers.handle_status),
-            ("help", handlers.handle_help),
-        ]
-        
-        for command, handler in commands:
-            app.add_handler(CommandHandler(command, handler))
-        
-        # Регистрируем колбэки
-        app.add_handler(CallbackQueryHandler(handlers.handle_callback))
-        
-        # Запускаем бота
-        logger.info("✅ Бот запускается...")
-        await app.initialize()
-        
-        if app.updater:
-            await app.updater.start_polling(
-                drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"]
-            )
-        
-        logger.info("✅ Бот успешно запущен!")
-        
-        # Ждем сигнала завершения
-        stop_event = asyncio.Event()
-        
-        def signal_handler():
-            logger.info("Получен сигнал завершения")
-            stop_event.set()
-        
-        loop = asyncio.get_event_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, signal_handler)
-        
-        await stop_event.wait()
-        
+        asyncio.run(main_bot_logic())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем.")
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
-        raise
+        logger.error(f"Непредвиденная ошибка в main: {e}", exc_info=True)
+        sys.exit(1)
     finally:
-        logger.info("Завершение работы бота...")
-        try:
-            if 'app' in locals():
-                if app.updater:
-                    await app.updater.stop()
-                await app.stop()
-                await app.shutdown()
-        except Exception as e:
-            logger.error(f"Ошибка при завершении: {e}")
+        remove_lock_file()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
-    except Exception as e:
-        logger.error(f"Непредвиденная ошибка: {e}")
-        sys.exit(1)
+    main()
