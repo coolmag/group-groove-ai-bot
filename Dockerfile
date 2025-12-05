@@ -2,11 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Установка системных зависимостей
+# Установка системных зависимостей ВКЛЮЧАЯ компилятор
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     git \
+    gcc \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Копируем requirements и устанавливаем зависимости
