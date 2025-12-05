@@ -1,0 +1,12 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install -r requirements.txt && apt-get update && apt-get install -y ffmpeg"
+
+[deploy]
+startCommand = "python main.py"
+
+[variables]
+BOT_TOKEN = "{{BOT_TOKEN}}"
+ADMIN_IDS = "{{ADMIN_IDS}}"
+COOKIES_TEXT = "{{COOKIES_TEXT}}"
+DEBUG = "false"
