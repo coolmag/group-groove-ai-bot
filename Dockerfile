@@ -8,11 +8,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Обновляем pip
+RUN pip install --upgrade pip
+
 # Копируем requirements и устанавливаем зависимости
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь проект (включая все .py файлы)
+# Копируем весь проект
 COPY . .
 
 # Создаем папку для загрузок
