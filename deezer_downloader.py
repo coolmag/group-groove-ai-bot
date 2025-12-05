@@ -6,6 +6,7 @@ from typing import Optional
 from base_downloader import BaseDownloader, DownloadResult
 from config import TrackInfo, settings, Source
 from logger import logger
+from cache import CacheManager
 
 
 class DeezerDownloader(BaseDownloader):
@@ -13,8 +14,9 @@ class DeezerDownloader(BaseDownloader):
     
     def __init__(self):
         super().__init__()
-        self.session = None
+        self.session: Optional[aiohttp.ClientSession] = None
         self.api_base = "https://api.deezer.com"
+        self.cache = CacheManager()
     
     async def _get_session(self):
         if not self.session or self.session.closed:
@@ -25,6 +27,13 @@ class DeezerDownloader(BaseDownloader):
     
     async def download(self, query: str) -> DownloadResult:
         """Загрузка превью с Deezer"""
+        # Проверяем кэш
+        cached_result = await self.cache.get(query, Source.DEEZER)
+        if cached_result:
+            logger.info(f"[Deezer] Использую кэш для: {query}")
+            return cached_result
+            
+        logger.info(f"[Deezer] Ищу '{query}'")
         try:
             session = await self._get_session()
             
@@ -77,47 +86,27 @@ class DeezerDownloader(BaseDownloader):
                         title=f"{track['title'][:95]} (preview)",
                         artist=track['artist']['name'][:100],
                         duration=30,
-                        source="Deezer Preview"
+                        source=Source.DEEZER.value
                     )
                     
-                    return DownloadResult(
+                    result = DownloadResult(
                         success=True,
                         file_path=filepath,
                         track_info=track_info
                     )
+                    
+                    # Сохраняем в кэш
+                    await self.cache.set(query, Source.DEEZER, result)
+                    return result
                     
         except Exception as e:
             logger.error(f"Ошибка Deezer: {e}")
             return DownloadResult(success=False, error=str(e))
     
     async def download_long(self, query: str) -> DownloadResult:
-        """Поиск длинных треков на Deezer"""
-        try:
-            session = await self._get_session()
-            
-            async with session.get(
-                f"{self.api_base}/search",
-                params={"q": f"{query} full", "limit": 10}
-            ) as response:
-                if response.status != 200:
-                    return await self.download(query)
-                
-                data = await response.json()
-                if not data.get('data'):
-                    return await self.download(query)
-                
-                # Ищем самый длинный трек
-                tracks = data['data']
-                longest = max(tracks, key=lambda x: x.get('duration', 0))
-                
-                if longest.get('duration', 0) > 1800:
-                    return await self.download(longest['title'])
-                else:
-                    return await self.download(query)
-                    
-        except Exception as e:
-            logger.error(f"Ошибка поиска длинного Deezer: {e}")
-            return await self.download(query)
+        """Поиск длинных треков на Deezer (заглушка, т.к. Deezer не отдает полные треки)"""
+        logger.info(f"[Deezer] Поиск длинного контента не поддерживается, ищу обычный трек: '{query}'")
+        return await self.download(query)
     
     async def __del__(self):
         """Очистка сессии"""

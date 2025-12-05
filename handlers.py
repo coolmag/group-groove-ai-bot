@@ -1,7 +1,7 @@
 import asyncio
 import os
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import Application, ContextTypes
 from telegram.error import BadRequest, Forbidden
 
 from config import settings, TrackInfo, Source
@@ -17,11 +17,11 @@ from logger import logger
 class BotHandlers:
     """Обработчики команд бота"""
     
-    def __init__(self):
+    def __init__(self, app: Application):
         self.state = BotState()
-        self.radio = RadioService(self.state)
         self.youtube = YouTubeDownloader()
         self.deezer = DeezerDownloader()
+        self.radio = RadioService(self.state, app.bot, self.youtube)
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /start"""
@@ -234,6 +234,9 @@ class BotHandlers:
         elif data == 'source_deezer':
             self.state.source = Source.DEEZER
             await query.edit_message_text("💿 Источник: Deezer")
+        elif data == 'source_switch':
+            keyboard = get_source_keyboard()
+            await query.edit_message_text("💿 Выберите источник:", reply_markup=keyboard)
         elif data == 'radio_on':
             if await is_admin(update, context):
                 self.state.radio.is_on = True
@@ -250,8 +253,8 @@ class BotHandlers:
                 await query.answer("⛔ Только для админов", show_alert=True)
         elif data == 'next_track':
             if await is_admin(update, context):
-                self.state.radio.last_played = 0
-                await query.answer("⏭️ Следующий трек скоро...")
+                await self.radio.skip()
+                await query.answer("⏭️ Пропускаем трек...")
             else:
                 await query.answer("⛔ Только для админов", show_alert=True)
         elif data == 'menu_refresh':
@@ -292,6 +295,10 @@ class BotHandlers:
     
     async def _get_status_text(self) -> str:
         """Генерация текста статуса"""
+        radio_status = '🟢 ВКЛ' if self.state.radio.is_on else '🔴 ВЫКЛ'
+        if self.state.radio.is_on and self.state.radio.current_genre:
+            radio_status += f" ({self.state.radio.current_genre})"
+
         try:
             import psutil
             cpu = psutil.cpu_percent()
@@ -305,8 +312,7 @@ class BotHandlers:
 
 *Бот:*
 • Источник: {self.state.source.value}
-• Радио: {'🟢 ВКЛ' if self.state.radio.is_on else '🔴 ВЫКЛ'}
-• Активных чатов: {len(self.state.chats)}
+• Радио: {radio_status}
             """.strip()
         except:
             status = f"""
@@ -314,8 +320,7 @@ class BotHandlers:
 
 *Бот:*
 • Источник: {self.state.source.value}
-• Радио: {'🟢 ВКЛ' if self.state.radio.is_on else '🔴 ВЫКЛ'}
-• Активных чатов: {len(self.state.chats)}
+• Радио: {radio_status}
             """.strip()
         
         return status

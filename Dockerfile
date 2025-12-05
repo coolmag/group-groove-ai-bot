@@ -2,25 +2,25 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Установка системных зависимостей ВКЛЮЧАЯ компилятор
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
-    git \
-    gcc \
-    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Копируем requirements и устанавливаем зависимости
+# Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь проект
-COPY . .
+# Copy application
+COPY src/ ./src/
+COPY main.py .
 
-# Создаем папку для загрузок
-RUN mkdir -p downloads
+# Create non-root user
+RUN useradd -m -u 1000 musicbot && chown -R musicbot:musicbot /app
+USER musicbot
 
-# Запускаем бота
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
+
 CMD ["python", "main.py"]
