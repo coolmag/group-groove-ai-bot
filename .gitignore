@@ -1,25 +1,17 @@
-__pycache__
-*.pyc
-.git
-.env
-downloads/
-
-# Environment variables and credentials
-.env
-*.session
-*cookies.txt
-radio_config.json
-
-# Python cache
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.env
+.venv
+venv/
 
-# IDE and OS specific files
-.idea/
-.vscode/
-.DS_Store
-
-# Downloaded media files
+# Данные
 downloads/
+cache.db
+bot.log
+
+# Системные
+.DS_Store
+Thumbs.db
