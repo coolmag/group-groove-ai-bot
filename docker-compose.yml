@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  music-bot:
+    build: .
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - COOKIES_TEXT=${COOKIES_TEXT}
+    restart: unless-stopped
+    volumes:
+      - ./downloads:/app/downloads

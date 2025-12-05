@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv/
+
+# Данные
+downloads/
+cache.db
+bot.log
+
+# Системные
+.DS_Store
+Thumbs.db
