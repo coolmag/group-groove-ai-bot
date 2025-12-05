@@ -41,7 +41,7 @@ class Settings:
     if admin_str:
         try:
             ADMIN_IDS = [int(id.strip()) for id in admin_str.split(",") if id.strip().isdigit()]
-        except:
+        except (ValueError, TypeError):
             ADMIN_IDS = []
     
     # Пути
