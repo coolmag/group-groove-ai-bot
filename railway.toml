@@ -2,9 +2,11 @@
 builder = "nixpacks"
 buildCommand = "apt-get update && apt-get install -y ffmpeg gcc python3-dev && pip install --no-cache-dir -r requirements.txt"
 
+[deploy]
+# startCommand = "python main.py" # Убрано, чтобы довериться автоматическому определению Nixpacks
+
 [variables]
 BOT_TOKEN = "{{BOT_TOKEN}}"
 ADMIN_IDS = "{{ADMIN_IDS}}"
 COOKIES_TEXT = "{{COOKIES_TEXT}}"
-
 DEBUG = "false"

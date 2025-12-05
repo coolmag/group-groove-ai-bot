@@ -1,7 +1,6 @@
 import os
-import tempfile
-from typing import List, Optional
 from enum import Enum
+from typing import List
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,19 +35,16 @@ class Settings:
     COOKIES_TEXT = os.getenv("COOKIES_TEXT", "")
     
     # Админы
-    ADMIN_IDS = []
+    ADMIN_IDS: List[int] = []
     admin_str = os.getenv("ADMIN_IDS", "")
     if admin_str:
         try:
-            ADMIN_IDS = [int(id.strip()) for id in admin_str.split(",") if id.strip().isdigit()]
+            ADMIN_IDS = [int(id.strip()) for id in admin_str.split(",") if id.strip()]
         except (ValueError, TypeError):
             ADMIN_IDS = []
     
     # Пути
-    if os.path.exists("/tmp"):
-        DOWNLOADS_DIR = "/tmp/music_bot_downloads"
-    else:
-        DOWNLOADS_DIR = "downloads"
+    DOWNLOADS_DIR = "/tmp/music_bot_downloads"
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
     # Лимиты

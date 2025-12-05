@@ -1,9 +1,16 @@
 import asyncio
 import os
+from typing import Optional
+
 from telegram import Update, Message
-from telegram.ext import Application, ContextTypes
-from telegram.error import BadRequest, Forbidden
+from telegram.ext import (
+    Application, 
+    ContextTypes, 
+    CommandHandler, 
+    CallbackQueryHandler
+)
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden
 
 from config import settings, TrackInfo, Source
 from keyboards import get_main_keyboard, get_source_keyboard
@@ -23,6 +30,28 @@ class BotHandlers:
         self.youtube = YouTubeDownloader()
         self.deezer = DeezerDownloader()
         self.radio = RadioService(self.state, app.bot, self.youtube)
+
+    async def register_handlers(self, app: Application):
+        """Регистрация всех обработчиков"""
+        commands = [
+            ("start", self.start),
+            ("menu", self.show_menu),
+            ("play", self.handle_play), 
+            ("p", self.handle_play),
+            ("audiobook", self.handle_audiobook), 
+            ("ab", self.handle_audiobook),
+            ("radio", self.handle_radio),
+            ("source", self.handle_source), 
+            ("src", self.handle_source),
+            ("status", self.handle_status), 
+            ("stat", self.handle_status),
+            ("help", self.handle_help),
+        ]
+        
+        for command, handler in commands:
+            app.add_handler(CommandHandler(command, handler))
+        
+        app.add_handler(CallbackQueryHandler(self.handle_callback))
 
     async def _send_audio_safe(
         self,
@@ -220,7 +249,7 @@ class BotHandlers:
             try:
                 status_text = await self._get_status_text()
                 await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode=ParseMode.MARKDOWN)
-            except BadRequest: # Сообщение не изменилось
+            except BadRequest:  # Сообщение не изменилось
                 pass
 
     async def handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,7 +278,7 @@ class BotHandlers:
 3. Cookies нужны для YouTube
         """.strip()
         
-        await update.message.reply_text(help_text, parse_mode='Markdown')
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
     
     async def handle_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /status"""

@@ -1,7 +1,9 @@
 import asyncio
 import random
 import os
-from telegram.ext import Application
+from typing import Optional
+
+from telegram import Bot
 from telegram.constants import ParseMode
 
 from logger import logger
@@ -13,7 +15,7 @@ from base_downloader import BaseDownloader, DownloadResult
 class RadioService:
     """Сервис радио, который проигрывает музыку в чате."""
     
-    def __init__(self, state: BotState, bot: Application.bot, downloader: BaseDownloader):
+    def __init__(self, state: BotState, bot: Bot, downloader: BaseDownloader):
         self.state = state
         self.bot = bot
         self.downloader = downloader
@@ -100,7 +102,7 @@ class RadioService:
                 break
             except Exception as e:
                 logger.error(f"Критическая ошибка в радио-цикле: {e}", exc_info=True)
-                await asyncio.sleep(60) # Пауза в случае серьезной ошибки
+                await asyncio.sleep(60)  # Пауза в случае серьезной ошибки
             finally:
                 # 4. Очищаем файл
                 if result and result.file_path and os.path.exists(result.file_path):
