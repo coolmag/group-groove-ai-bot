@@ -1,14 +1,14 @@
+#!/usr/bin/env python3
 import asyncio
 import logging
-import signal
 import sys
 
-from telegram.ext import Application
+from telegram import Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 from config import settings
 from handlers import BotHandlers
 
-# Настройка логов
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -16,14 +16,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def debug_message(update: Update, context):
+    """Отладочный обработчик всех сообщений"""
+    user = update.effective_user
+    chat = update.effective_chat
+    text = update.message.text if update.message else "No text"
+    
+    logger.info(f"📨 Получено сообщение от {user.id} ( @{user.username}) в чате {chat.id}: {text}")
+    
+    if text.startswith('/'):
+        await update.message.reply_text(f"✅ Получена команда: {text}")
+    else:
+        await update.message.reply_text(f"📝 Вы написали: {text}")
+
+
 async def main():
     """Основная функция запуска бота"""
-    logger.info("🚀 Запуск Music Bot v2.0...")
+    logger.info("🚀 Запуск Music Bot v2.0 с диагностикой...")
     
     # Проверка обязательных переменных
     if not settings.BOT_TOKEN:
         logger.error("❌ BOT_TOKEN не установлен!")
         sys.exit(1)
+    
+    if not settings.ADMIN_IDS:
+        logger.warning("⚠️ ADMIN_IDS не установлен!")
+    
+    logger.info(f"📊 Настройки: Admin IDs: {settings.ADMIN_IDS}, Source: YouTube")
     
     # Проверка FFmpeg
     try:
@@ -38,54 +57,50 @@ async def main():
         logger.error(f"❌ Ошибка проверки FFmpeg: {e}")
         sys.exit(1)
     
-    app = None  # Инициализируем app как None
     try:
         # Создание приложения
         app = Application.builder().token(settings.BOT_TOKEN).build()
         handlers = BotHandlers(app)
+        
+        # ДОБАВИТЬ ОТЛАДОЧНЫЙ ОБРАБОТЧИК
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_message))
         
         # Регистрация обработчиков
         await handlers.register_handlers(app)
         
         # Запуск бота
         logger.info("✅ Бот запускается...")
+        logger.info(f"✅ Токен: {settings.BOT_TOKEN[:10]}...")
+        
         await app.initialize()
+        
+        # Запуск polling с подробными параметрами
+        logger.info("🔄 Запуск polling...")
         
         if app.updater:
             await app.updater.start_polling(
                 drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"]
+                allowed_updates=["message", "callback_query"],
+                poll_interval=0.5,
+                timeout=10
             )
         
         logger.info("✅ Бот успешно запущен и ожидает сообщений...")
+        logger.info("📝 Отправьте /start боту в личные сообщения!")
         
-        # Ожидание сигнала завершения
-        stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop_event.set)
-            
-        await stop_event.wait()
+        # Бесконечное ожидание
+        await asyncio.Event().wait()
         
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка в main: {e}", exc_info=True)
+        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
         sys.exit(1)
-    finally:
-        logger.info("👋 Завершение работы бота...")
-        if app and app.updater:
-            await app.updater.stop()
-        if app:
-            await app.stop()
-            await app.shutdown()
-        logger.info("Бот полностью остановлен.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен пользователем (KeyboardInterrupt)")
+        logger.info("👋 Бот остановлен пользователем")
     except Exception as e:
-        logger.error(f"❌ Непредвиденная ошибка на верхнем уровне: {e}", exc_info=True)
+        logger.error(f"❌ Непредвиденная ошибка: {e}", exc_info=True)
         sys.exit(1)
